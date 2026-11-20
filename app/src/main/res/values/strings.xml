@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">Aura Finanças</string>
+    <string name="app_subtitle">Finanças Familiares &amp; Rotina Diária</string>
+    <string name="sign_in_google">Entrar com o Google</string>
+    <string name="sign_out">Sair da Conta</string>
+    <string name="nav_dashboard">Início</string>
+    <string name="nav_tasks">Tarefas &amp; Agenda</string>
+    <string name="nav_finances">Finanças</string>
+    <string name="nav_savings">Economia &amp; Relatórios</string>
+    <string name="nav_family">Família</string>
+    <string name="alarm_channel_name">Alarmes de Tarefas e Contas</string>
+    <string name="alarm_channel_desc">Notificações e alarmes de tarefas agendadas e vencimentos de assinaturas</string>
+</resources>

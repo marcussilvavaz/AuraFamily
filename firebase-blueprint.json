@@ -1,0 +1,386 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile and family household budget configuration.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated user UID."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name."
+        },
+        "householdId": {
+          "type": "string",
+          "description": "Shared family household identifier code."
+        },
+        "themeMode": {
+          "type": "string",
+          "enum": ["SYSTEM", "LIGHT", "DARK"],
+          "description": "Preferred UI theme mode."
+        },
+        "baseCurrency": {
+          "type": "string",
+          "enum": ["BRL"],
+          "description": "Primary currency (BRL)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": ["userId", "displayName", "householdId", "themeMode", "baseCurrency", "createdAt", "updatedAt"]
+    },
+    "Household": {
+      "title": "Household",
+      "description": "Shared family budget configuration, monthly income, and 50/30/20 rule percentages.",
+      "type": "object",
+      "properties": {
+        "householdId": {
+          "type": "string",
+          "description": "Unique family budget code."
+        },
+        "name": {
+          "type": "string",
+          "description": "Family budget display name."
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Creator UID."
+        },
+        "monthlyIncomeBrl": {
+          "type": "number",
+          "description": "Monthly family income in BRL."
+        },
+        "needsPercentage": {
+          "type": "integer",
+          "description": "Percentage allocated to Needs (e.g. 50)."
+        },
+        "wantsPercentage": {
+          "type": "integer",
+          "description": "Percentage allocated to Wants (e.g. 30)."
+        },
+        "savingsPercentage": {
+          "type": "integer",
+          "description": "Percentage allocated to Savings & Goals (e.g. 20)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": ["householdId", "name", "ownerId", "monthlyIncomeBrl", "needsPercentage", "wantsPercentage", "savingsPercentage", "createdAt", "updatedAt"]
+    },
+    "TaskItem": {
+      "title": "TaskItem",
+      "description": "Daily task with calendar date, completion check, and local alarm time.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Author user UID."
+        },
+        "householdId": {
+          "type": "string",
+          "description": "Shared family household ID."
+        },
+        "title": {
+          "type": "string",
+          "description": "Task title."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Task details or notes."
+        },
+        "category": {
+          "type": "string",
+          "description": "Task category (Finanças, Casa, Trabalho, Saúde, Família)."
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH"],
+          "description": "Task priority level."
+        },
+        "dateEpochDay": {
+          "type": "integer",
+          "description": "Calendar day as epoch day."
+        },
+        "yearMonth": {
+          "type": "string",
+          "description": "Month key in YYYY-MM format."
+        },
+        "alarmHour": {
+          "type": "integer",
+          "description": "Alarm hour (0-23)."
+        },
+        "alarmMinute": {
+          "type": "integer",
+          "description": "Alarm minute (0-59)."
+        },
+        "alarmEnabled": {
+          "type": "boolean",
+          "description": "Whether local alarm/reminder is active."
+        },
+        "completed": {
+          "type": "boolean",
+          "description": "Whether task is checked as completed."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": ["userId", "householdId", "title", "notes", "category", "priority", "dateEpochDay", "yearMonth", "alarmHour", "alarmMinute", "alarmEnabled", "completed", "createdAt", "updatedAt"]
+    },
+    "FinanceTransaction": {
+      "title": "FinanceTransaction",
+      "description": "Daily expense or income entry with multi-currency conversion to BRL.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Author user UID."
+        },
+        "householdId": {
+          "type": "string",
+          "description": "Shared family household ID."
+        },
+        "title": {
+          "type": "string",
+          "description": "Transaction description."
+        },
+        "amountOriginal": {
+          "type": "number",
+          "description": "Amount in original currency."
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["BRL", "USD", "EUR", "GBP"],
+          "description": "Original currency code."
+        },
+        "exchangeRateToBrl": {
+          "type": "number",
+          "description": "Exchange rate used to convert to BRL."
+        },
+        "amountBrl": {
+          "type": "number",
+          "description": "Converted amount in BRL."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["EXPENSE", "INCOME"],
+          "description": "Transaction type."
+        },
+        "budgetBucket": {
+          "type": "string",
+          "enum": ["NEEDS", "WANTS", "SAVINGS", "INCOME"],
+          "description": "50/30/20 rule bucket classification."
+        },
+        "category": {
+          "type": "string",
+          "description": "Expense or income category."
+        },
+        "dateEpochDay": {
+          "type": "integer",
+          "description": "Transaction date as epoch day."
+        },
+        "yearMonth": {
+          "type": "string",
+          "description": "Month key in YYYY-MM format."
+        },
+        "recurringSourceId": {
+          "type": "string",
+          "description": "Subscription ID if auto-posted from a recurring bill, or empty string."
+        },
+        "createdByName": {
+          "type": "string",
+          "description": "Display name of family member who logged it."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": ["userId", "householdId", "title", "amountOriginal", "currency", "exchangeRateToBrl", "amountBrl", "type", "budgetBucket", "category", "dateEpochDay", "yearMonth", "recurringSourceId", "createdByName", "createdAt", "updatedAt"]
+    },
+    "SubscriptionBill": {
+      "title": "SubscriptionBill",
+      "description": "Recurring subscription or fixed monthly bill with automatic posting and reminder alarm.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Creator user UID."
+        },
+        "householdId": {
+          "type": "string",
+          "description": "Shared family household ID."
+        },
+        "title": {
+          "type": "string",
+          "description": "Subscription or fixed bill name."
+        },
+        "amountOriginal": {
+          "type": "number",
+          "description": "Bill amount in original currency."
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["BRL", "USD", "EUR", "GBP"],
+          "description": "Currency code."
+        },
+        "exchangeRateToBrl": {
+          "type": "number",
+          "description": "Exchange rate to BRL."
+        },
+        "amountBrl": {
+          "type": "number",
+          "description": "Converted amount in BRL."
+        },
+        "category": {
+          "type": "string",
+          "description": "Category (Streaming, Moradia, Energia, Internet, Educação, Saúde, Outros)."
+        },
+        "budgetBucket": {
+          "type": "string",
+          "enum": ["NEEDS", "WANTS", "SAVINGS"],
+          "description": "50/30/20 bucket."
+        },
+        "dueDayOfMonth": {
+          "type": "integer",
+          "description": "Day of month bill is due (1-31)."
+        },
+        "reminderDaysBefore": {
+          "type": "integer",
+          "description": "Days before due date to trigger recurring alarm (0-15)."
+        },
+        "autoPostEnabled": {
+          "type": "boolean",
+          "description": "Whether this bill automatically posts to monthly expenses."
+        },
+        "lastPostedYearMonth": {
+          "type": "string",
+          "description": "Last YYYY-MM where this bill was posted/paid."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether subscription is active."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": ["userId", "householdId", "title", "amountOriginal", "currency", "exchangeRateToBrl", "amountBrl", "category", "budgetBucket", "dueDayOfMonth", "reminderDaysBefore", "autoPostEnabled", "lastPostedYearMonth", "active", "createdAt", "updatedAt"]
+    },
+    "SavingsGoal": {
+      "title": "SavingsGoal",
+      "description": "Custom family savings goal defined by percentage of income and target amount.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Creator user UID."
+        },
+        "householdId": {
+          "type": "string",
+          "description": "Shared family household ID."
+        },
+        "title": {
+          "type": "string",
+          "description": "Goal title."
+        },
+        "targetAmountBrl": {
+          "type": "number",
+          "description": "Target amount in BRL."
+        },
+        "currentAmountBrl": {
+          "type": "number",
+          "description": "Current saved amount in BRL."
+        },
+        "incomePercentage": {
+          "type": "integer",
+          "description": "Percentage of monthly income allocated to this goal (0-100)."
+        },
+        "category": {
+          "type": "string",
+          "description": "Goal category (Reserva, Viagem, Imóvel, Educação, Investimento, Família)."
+        },
+        "targetYearMonth": {
+          "type": "string",
+          "description": "Target completion YYYY-MM."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": ["userId", "householdId", "title", "targetAmountBrl", "currentAmountBrl", "incomePercentage", "category", "targetYearMonth", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Authenticated user profile and active household reference."
+    },
+    "/households/{householdId}": {
+      "schema": { "$ref": "#/entities/Household" },
+      "description": "Shared family household budget settings and 50/30/20 plan."
+    },
+    "/households/{householdId}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/TaskItem" },
+      "description": "Daily tasks with calendar dates, checkboxes, and alarms scoped under householdId."
+    },
+    "/households/{householdId}/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/FinanceTransaction" },
+      "description": "Daily expenses and incomes with multi-currency conversion scoped under householdId."
+    },
+    "/households/{householdId}/subscriptions/{subscriptionId}": {
+      "schema": { "$ref": "#/entities/SubscriptionBill" },
+      "description": "Recurring subscriptions and fixed bills with reminders scoped under householdId."
+    },
+    "/households/{householdId}/savings_goals/{goalId}": {
+      "schema": { "$ref": "#/entities/SavingsGoal" },
+      "description": "Family savings goals by percentage and target amount scoped under householdId."
+    }
+  }
+}

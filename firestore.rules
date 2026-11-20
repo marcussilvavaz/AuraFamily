@@ -1,0 +1,367 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidCurrency(c) {
+      return c is string && (c == 'BRL' || c == 'USD' || c == 'EUR' || c == 'GBP');
+    }
+
+    function isValidNumber(n) {
+      return (n is int || n is float);
+    }
+
+    // Check if the authenticated user belongs to a household via their /users/{uid} profile
+    function isHouseholdMember(householdId) {
+      return isSignedIn() &&
+             isValidId(householdId) &&
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.householdId == householdId;
+    }
+
+    // 1. UserProfile validation
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             data.householdId is string && isValidId(data.householdId) &&
+             data.themeMode is string && (data.themeMode == 'SYSTEM' || data.themeMode == 'LIGHT' || data.themeMode == 'DARK') &&
+             data.baseCurrency is string && data.baseCurrency == 'BRL' &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow get, list: if isSignedIn() && request.auth.uid == userId;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'householdId', 'themeMode', 'baseCurrency', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'displayName', 'householdId', 'themeMode', 'baseCurrency',
+                         'memberColorHex', 'avatarInitials', 'avatarEmoji', 'memberRole',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'displayName', 'householdId', 'themeMode', 'baseCurrency',
+                         'memberColorHex', 'avatarInitials', 'avatarEmoji', 'memberRole',
+                         'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    // 2. Household validation
+    function isValidHousehold(data) {
+      return data.householdId is string && isValidId(data.householdId) &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             data.ownerId is string && isValidId(data.ownerId) &&
+             isValidNumber(data.monthlyIncomeBrl) && data.monthlyIncomeBrl >= 0 && data.monthlyIncomeBrl <= 1000000000 &&
+             data.needsPercentage is int && data.needsPercentage >= 0 && data.needsPercentage <= 100 &&
+             data.wantsPercentage is int && data.wantsPercentage >= 0 && data.wantsPercentage <= 100 &&
+             data.savingsPercentage is int && data.savingsPercentage >= 0 && data.savingsPercentage <= 100 &&
+             (data.needsPercentage + data.wantsPercentage + data.savingsPercentage == 100) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // 3. TaskItem validation
+    function isValidTaskItem(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.householdId is string && isValidId(data.householdId) &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 140 &&
+             data.notes is string && data.notes.size() <= 500 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 50 &&
+             data.priority is string && (data.priority == 'LOW' || data.priority == 'MEDIUM' || data.priority == 'HIGH') &&
+             data.dateEpochDay is int && data.dateEpochDay >= 0 && data.dateEpochDay <= 100000 &&
+             data.yearMonth is string && data.yearMonth.size() == 7 &&
+             data.alarmHour is int && data.alarmHour >= 0 && data.alarmHour <= 23 &&
+             data.alarmMinute is int && data.alarmMinute >= 0 && data.alarmMinute <= 59 &&
+             data.alarmEnabled is bool &&
+             data.completed is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // 4. FinanceTransaction validation
+    function isValidFinanceTransaction(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.householdId is string && isValidId(data.householdId) &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 140 &&
+             isValidNumber(data.amountOriginal) && data.amountOriginal > 0 && data.amountOriginal <= 1000000000 &&
+             isValidCurrency(data.currency) &&
+             isValidNumber(data.exchangeRateToBrl) && data.exchangeRateToBrl > 0 && data.exchangeRateToBrl <= 10000 &&
+             isValidNumber(data.amountBrl) && data.amountBrl > 0 && data.amountBrl <= 1000000000 &&
+             data.type is string && (data.type == 'EXPENSE' || data.type == 'INCOME') &&
+             data.budgetBucket is string && (data.budgetBucket == 'NEEDS' || data.budgetBucket == 'WANTS' || data.budgetBucket == 'SAVINGS' || data.budgetBucket == 'INCOME') &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 50 &&
+             data.dateEpochDay is int && data.dateEpochDay >= 0 && data.dateEpochDay <= 100000 &&
+             data.yearMonth is string && data.yearMonth.size() == 7 &&
+             data.recurringSourceId is string && data.recurringSourceId.size() <= 128 &&
+             data.createdByName is string && data.createdByName.size() >= 1 && data.createdByName.size() <= 80 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // 5. SubscriptionBill validation
+    function isValidSubscriptionBill(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.householdId is string && isValidId(data.householdId) &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 140 &&
+             isValidNumber(data.amountOriginal) && data.amountOriginal > 0 && data.amountOriginal <= 1000000000 &&
+             isValidCurrency(data.currency) &&
+             isValidNumber(data.exchangeRateToBrl) && data.exchangeRateToBrl > 0 && data.exchangeRateToBrl <= 10000 &&
+             isValidNumber(data.amountBrl) && data.amountBrl > 0 && data.amountBrl <= 1000000000 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 50 &&
+             data.budgetBucket is string && (data.budgetBucket == 'NEEDS' || data.budgetBucket == 'WANTS' || data.budgetBucket == 'SAVINGS') &&
+             data.dueDayOfMonth is int && data.dueDayOfMonth >= 1 && data.dueDayOfMonth <= 31 &&
+             data.reminderDaysBefore is int && data.reminderDaysBefore >= 0 && data.reminderDaysBefore <= 15 &&
+             data.autoPostEnabled is bool &&
+             data.lastPostedYearMonth is string && data.lastPostedYearMonth.size() <= 7 &&
+             data.active is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // 6. SavingsGoal validation
+    function isValidSavingsGoal(data) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.householdId is string && isValidId(data.householdId) &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 140 &&
+             isValidNumber(data.targetAmountBrl) && data.targetAmountBrl > 0 && data.targetAmountBrl <= 1000000000 &&
+             isValidNumber(data.currentAmountBrl) && data.currentAmountBrl >= 0 && data.currentAmountBrl <= 1000000000 &&
+             data.incomePercentage is int && data.incomePercentage >= 0 && data.incomePercentage <= 100 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 50 &&
+             data.targetYearMonth is string && data.targetYearMonth.size() <= 7 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /households/{householdId} {
+      allow get: if isSignedIn() && isValidId(householdId) && (isHouseholdMember(householdId) || (resource != null && existing().ownerId == request.auth.uid));
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       isValidId(householdId) &&
+                       incoming().householdId == householdId &&
+                       incoming().ownerId == request.auth.uid &&
+                       incoming().keys().hasAll(['householdId', 'name', 'ownerId', 'monthlyIncomeBrl', 'needsPercentage', 'wantsPercentage', 'savingsPercentage', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly([
+                         'householdId', 'name', 'ownerId', 'monthlyIncomeBrl',
+                         'needsPercentage', 'wantsPercentage', 'savingsPercentage',
+                         'memberIds', 'membersMap', 'defaultSplitMode', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidHousehold(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(householdId) &&
+                       isValidHousehold(incoming()) &&
+                       (isHouseholdMember(householdId) || existing().ownerId == request.auth.uid) &&
+                       incoming().householdId == existing().householdId &&
+                       incoming().ownerId == existing().ownerId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'name', 'monthlyIncomeBrl', 'needsPercentage', 'wantsPercentage', 'savingsPercentage',
+                         'memberIds', 'membersMap', 'defaultSplitMode', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && isValidId(householdId) && existing().ownerId == request.auth.uid;
+
+      // Subcollection: Tasks
+      match /tasks/{taskId} {
+        allow get: if isSignedIn() && isValidId(taskId) && isHouseholdMember(householdId);
+        allow list: if isSignedIn() && isHouseholdMember(householdId);
+
+        allow create: if isSignedIn() &&
+                         isValidId(taskId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().householdId == householdId &&
+                         incoming().keys().hasAll(['userId', 'householdId', 'title', 'notes', 'category', 'priority', 'dateEpochDay', 'yearMonth', 'alarmHour', 'alarmMinute', 'alarmEnabled', 'completed', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'householdId', 'title', 'notes', 'category', 'priority',
+                           'dateEpochDay', 'yearMonth', 'alarmHour', 'alarmMinute', 'alarmEnabled', 'completed',
+                           'privacyScope', 'visibleToMemberIds', 'assignedMemberId', 'assignedMemberName',
+                           'assignedMemberColorHex', 'assignedMemberEmoji', 'createdByName', 'createdByColorHex',
+                           'createdByEmoji', 'completedByUserId', 'completedByName', 'linkedTransactionId',
+                           'linkedSubscriptionId', 'estimatedCostBrl', 'autoCreateExpenseOnComplete',
+                           'splitMode', 'splitWithMemberIds', 'splitSharesMap',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTaskItem(incoming()) &&
+                         isHouseholdMember(householdId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(taskId) &&
+                         isValidTaskItem(incoming()) &&
+                         isHouseholdMember(householdId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().householdId == existing().householdId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'notes', 'category', 'priority', 'dateEpochDay', 'yearMonth',
+                           'alarmHour', 'alarmMinute', 'alarmEnabled', 'completed',
+                           'privacyScope', 'visibleToMemberIds', 'assignedMemberId', 'assignedMemberName',
+                           'assignedMemberColorHex', 'assignedMemberEmoji', 'createdByName', 'createdByColorHex',
+                           'createdByEmoji', 'completedByUserId', 'completedByName', 'linkedTransactionId',
+                           'linkedSubscriptionId', 'estimatedCostBrl', 'autoCreateExpenseOnComplete',
+                           'splitMode', 'splitWithMemberIds', 'splitSharesMap',
+                           'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() && isValidId(taskId) && isHouseholdMember(householdId);
+      }
+
+      // Subcollection: Transactions
+      match /transactions/{transactionId} {
+        allow get: if isSignedIn() && isValidId(transactionId) && isHouseholdMember(householdId);
+        allow list: if isSignedIn() && isHouseholdMember(householdId);
+
+        allow create: if isSignedIn() &&
+                         isValidId(transactionId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().householdId == householdId &&
+                         incoming().keys().hasAll(['userId', 'householdId', 'title', 'amountOriginal', 'currency', 'exchangeRateToBrl', 'amountBrl', 'type', 'budgetBucket', 'category', 'dateEpochDay', 'yearMonth', 'recurringSourceId', 'createdByName', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'householdId', 'title', 'amountOriginal', 'currency', 'exchangeRateToBrl',
+                           'amountBrl', 'type', 'budgetBucket', 'category', 'dateEpochDay', 'yearMonth',
+                           'recurringSourceId', 'createdByName', 'createdByColorHex', 'createdByEmoji',
+                           'privacyScope', 'visibleToMemberIds', 'responsibleMemberId', 'responsibleMemberName',
+                           'responsibleMemberColorHex', 'responsibleMemberEmoji', 'splitMode', 'splitWithMemberIds',
+                           'splitSharesMap', 'linkedTaskId', 'generateCalendarTask',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidFinanceTransaction(incoming()) &&
+                         isHouseholdMember(householdId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(transactionId) &&
+                         isValidFinanceTransaction(incoming()) &&
+                         isHouseholdMember(householdId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().householdId == existing().householdId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'amountOriginal', 'currency', 'exchangeRateToBrl', 'amountBrl',
+                           'type', 'budgetBucket', 'category', 'dateEpochDay', 'yearMonth',
+                           'createdByName', 'createdByColorHex', 'createdByEmoji',
+                           'privacyScope', 'visibleToMemberIds', 'responsibleMemberId', 'responsibleMemberName',
+                           'responsibleMemberColorHex', 'responsibleMemberEmoji', 'splitMode', 'splitWithMemberIds',
+                           'splitSharesMap', 'linkedTaskId', 'generateCalendarTask',
+                           'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() && isValidId(transactionId) && isHouseholdMember(householdId);
+      }
+
+      // Subcollection: Subscriptions
+      match /subscriptions/{subscriptionId} {
+        allow get: if isSignedIn() && isValidId(subscriptionId) && isHouseholdMember(householdId);
+        allow list: if isSignedIn() && isHouseholdMember(householdId);
+
+        allow create: if isSignedIn() &&
+                         isValidId(subscriptionId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().householdId == householdId &&
+                         incoming().keys().hasAll(['userId', 'householdId', 'title', 'amountOriginal', 'currency', 'exchangeRateToBrl', 'amountBrl', 'category', 'budgetBucket', 'dueDayOfMonth', 'reminderDaysBefore', 'autoPostEnabled', 'lastPostedYearMonth', 'active', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'householdId', 'title', 'amountOriginal', 'currency', 'exchangeRateToBrl',
+                           'amountBrl', 'category', 'budgetBucket', 'dueDayOfMonth', 'reminderDaysBefore',
+                           'autoPostEnabled', 'lastPostedYearMonth', 'active',
+                           'privacyScope', 'visibleToMemberIds', 'responsibleMemberId', 'responsibleMemberName',
+                           'responsibleMemberColorHex', 'responsibleMemberEmoji', 'splitMode', 'splitWithMemberIds',
+                           'splitSharesMap', 'syncDueDayToCalendar', 'linkedTaskId',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidSubscriptionBill(incoming()) &&
+                         isHouseholdMember(householdId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(subscriptionId) &&
+                         isValidSubscriptionBill(incoming()) &&
+                         isHouseholdMember(householdId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().householdId == existing().householdId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'amountOriginal', 'currency', 'exchangeRateToBrl', 'amountBrl',
+                           'category', 'budgetBucket', 'dueDayOfMonth', 'reminderDaysBefore',
+                           'autoPostEnabled', 'lastPostedYearMonth', 'active',
+                           'privacyScope', 'visibleToMemberIds', 'responsibleMemberId', 'responsibleMemberName',
+                           'responsibleMemberColorHex', 'responsibleMemberEmoji', 'splitMode', 'splitWithMemberIds',
+                           'splitSharesMap', 'syncDueDayToCalendar', 'linkedTaskId',
+                           'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() && isValidId(subscriptionId) && isHouseholdMember(householdId);
+      }
+
+      // Subcollection: SavingsGoals
+      match /savings_goals/{goalId} {
+        allow get: if isSignedIn() && isValidId(goalId) && isHouseholdMember(householdId);
+        allow list: if isSignedIn() && isHouseholdMember(householdId);
+
+        allow create: if isSignedIn() &&
+                         isValidId(goalId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().householdId == householdId &&
+                         incoming().keys().hasAll(['userId', 'householdId', 'title', 'targetAmountBrl', 'currentAmountBrl', 'incomePercentage', 'category', 'targetYearMonth', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'householdId', 'title', 'targetAmountBrl', 'currentAmountBrl',
+                           'incomePercentage', 'category', 'targetYearMonth',
+                           'privacyScope', 'visibleToMemberIds', 'responsibleMemberId', 'responsibleMemberName',
+                           'responsibleMemberColorHex', 'responsibleMemberEmoji', 'splitMode', 'splitWithMemberIds',
+                           'memberContributionsMap', 'linkedTaskId',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidSavingsGoal(incoming()) &&
+                         isHouseholdMember(householdId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(goalId) &&
+                         isValidSavingsGoal(incoming()) &&
+                         isHouseholdMember(householdId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().householdId == existing().householdId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'targetAmountBrl', 'currentAmountBrl', 'incomePercentage',
+                           'category', 'targetYearMonth',
+                           'privacyScope', 'visibleToMemberIds', 'responsibleMemberId', 'responsibleMemberName',
+                           'responsibleMemberColorHex', 'responsibleMemberEmoji', 'splitMode', 'splitWithMemberIds',
+                           'memberContributionsMap', 'linkedTaskId',
+                           'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() && isValidId(goalId) && isHouseholdMember(householdId);
+      }
+    }
+  }
+}
