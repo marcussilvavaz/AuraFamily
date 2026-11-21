@@ -90,8 +90,12 @@ fun attemptAutoSignIn(
         return
     }
     val clientId = try {
-        context.getString(R.string.default_web_client_id)
+        context.getString(R.string.default_web_client_id).trim()
     } catch (_: Exception) {
+        onUnauthenticated()
+        return
+    }
+    if (clientId.isBlank()) {
         onUnauthenticated()
         return
     }
@@ -128,9 +132,13 @@ fun onGoogleSignInClicked(
     onAuthCancelled: () -> Unit = {}
 ) {
     val clientId = try {
-        context.getString(R.string.default_web_client_id)
+        context.getString(R.string.default_web_client_id).trim()
     } catch (_: Exception) {
         onAuthError("Configuração Google Sign-In ausente (default_web_client_id)")
+        return
+    }
+    if (clientId.isBlank()) {
+        onAuthError("Web Client ID (oauth_client client_type 3) ausente no google-services.json do projeto auramaneger-e1830. Ative o provedor Google no Firebase Authentication e atualize o google-services.json.")
         return
     }
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()

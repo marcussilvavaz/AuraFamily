@@ -13,11 +13,17 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.aurafinancas.mxqvrp"
+    applicationId = "com.auramanager.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 5
+    versionName = "1.5.0"
+
+    buildConfigField(
+      "String",
+      "DEFAULT_UPDATE_URL",
+      "\"https://ais-pre-4si6mi2cx6qcf46zmdgzwc-153058406669.us-east1.run.app\""
+    )
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

@@ -10,6 +10,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,10 +43,13 @@ import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AlarmOn
 import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FamilyRestroom
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Healing
@@ -70,6 +74,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -80,6 +85,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import com.example.data.AgendaLayoutMode
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -207,15 +213,37 @@ fun TasksCalendarScreen(
     val context = LocalContext.current
     val cardRadius = LocalOrganicCardRadius.current
 
-    // Modos de visualização da Agenda (Passo 2):
-    // "TIMELINE" = Linha do Tempo Diária (Time Blocking + Horas Ociosas + Financeiro)
+    // Modos de visualização da Agenda (Passo 2 + Design Structured):
+    // "TIMELINE" = Linha do Tempo Diária Estilo Structured (Completo / Simplificado / Mínimo)
     // "INBOX" = Tarefas sem horário definido (isInbox = true)
     // "CALENDAR" = Calendário Mensal + Lista Completa
     var agendaViewMode by remember { mutableStateOf("TIMELINE") }
     var showMiniCalendarInTimeline by remember { mutableStateOf(false) }
+    var showStructuredDatePickerModal by remember { mutableStateOf(false) }
+    var showExpandableFiltersAndState by remember { mutableStateOf(false) }
+    var showExpandableAppearancePanel by remember { mutableStateOf(false) }
+    var showExpandableBillsSection by remember { mutableStateOf(false) }
+    var selectedTaskForBottomSheet by remember { mutableStateOf<TaskItem?>(null) }
+
     var scopeFilter by remember { mutableStateOf("ALL") } // "ALL", PrivacyScope.PERSONAL, PrivacyScope.FAMILY
+    // Filtro para separar Contas de Tarefas: "ALL" (Tudo), "TASKS_ONLY" (Só Tarefas), "BILLS_ONLY" (Só Contas)
+    var itemTypeFilter by remember { mutableStateOf("ALL") }
+    // Filtro por Categoria: "ALL" (Todas) ou nome da categoria ("Finanças", "Casa", "Trabalho", "Família", "Saúde")
+    var categoryFilter by remember { mutableStateOf("ALL") }
     var taskToScheduleFromInbox by remember { mutableStateOf<TaskItem?>(null) }
     var billForRingtoneDialog by remember { mutableStateOf<SubscriptionBill?>(null) }
+
+    val accentColor = remember(customizationConfig.agendaColorHex, customizationConfig.profileColorHex) {
+        Color(customizationConfig.agendaColorHex)
+    }
+    val layoutMode = customizationConfig.agendaLayoutMode
+
+    val availableCategories = remember(tasks, subscriptions) {
+        val defaults = listOf("Finanças", "Casa", "Trabalho", "Família", "Saúde")
+        val fromTasks = tasks.map { it.category.trim() }.filter { it.isNotBlank() }
+        val fromSubs = subscriptions.map { it.category.trim() }.filter { it.isNotBlank() }
+        (defaults + fromTasks + fromSubs).distinct()
+    }
 
     val calendarCells = remember(selectedYearMonth) {
         DateCalendarUtils.buildMonthCalendarGrid(selectedYearMonth)
@@ -233,28 +261,59 @@ fun TasksCalendarScreen(
     }
     val isHardDayActive = customizationConfig.chronicPainFatigueEnabled && dailyState.hardDayModeActive
 
-    // 1. Filtro de Escopo ("Tudo", "Individual", "Familiar") aplicado em Tarefas, Inbox e Contas
-    val scopeFilteredTasks = remember(tasks, scopeFilter) {
-        when (scopeFilter) {
-            PrivacyScope.FAMILY -> tasks.filter { it.privacyScope != PrivacyScope.PERSONAL }
-            PrivacyScope.PERSONAL -> tasks.filter { it.privacyScope == PrivacyScope.PERSONAL }
-            else -> tasks
+    // Helper para identificar se uma TaskItem é uma Conta/Pagamento Financeiro ou uma Tarefa de Rotina
+    fun isFinancialBillTask(task: TaskItem): Boolean {
+        return task.estimatedCostBrl > 0.0 ||
+            task.linkedSubscriptionId.isNotBlank() ||
+            task.linkedTransactionId.isNotBlank()
+    }
+
+    // 1. Filtro de Escopo ("Tudo", "Individual", "Familiar") + Categoria + Tipo (Tarefas vs Contas)
+    val scopeFilteredTasks = remember(tasks, scopeFilter, categoryFilter, itemTypeFilter) {
+        tasks.filter { task ->
+            val matchesScope = when (scopeFilter) {
+                PrivacyScope.FAMILY -> task.privacyScope != PrivacyScope.PERSONAL
+                PrivacyScope.PERSONAL -> task.privacyScope == PrivacyScope.PERSONAL
+                else -> true
+            }
+            val matchesCategory = categoryFilter == "ALL" ||
+                task.category.equals(categoryFilter, ignoreCase = true) ||
+                (categoryFilter == "Finanças" && isFinancialBillTask(task))
+            val isBill = isFinancialBillTask(task)
+            val matchesType = when (itemTypeFilter) {
+                "TASKS_ONLY" -> !isBill
+                "BILLS_ONLY" -> isBill
+                else -> true
+            }
+            matchesScope && matchesCategory && matchesType
         }
     }
 
-    // Contadores para os chips de escopo
+    val activeFiltersCount = remember(scopeFilter, itemTypeFilter, categoryFilter) {
+        (if (scopeFilter != "ALL") 1 else 0) +
+            (if (itemTypeFilter != "ALL") 1 else 0) +
+            (if (categoryFilter != "ALL") 1 else 0)
+    }
+
+    // Contadores para os chips de escopo e tipo
     val totalIndividualCount = remember(tasks) {
         tasks.count { it.privacyScope == PrivacyScope.PERSONAL }
     }
     val totalFamilyCount = remember(tasks) {
         tasks.count { it.privacyScope != PrivacyScope.PERSONAL }
     }
+    val totalRoutineTasksCount = remember(tasks) {
+        tasks.count { !isFinancialBillTask(it) }
+    }
+    val totalBillsCount = remember(tasks, subscriptions) {
+        tasks.count { isFinancialBillTask(it) } + subscriptions.count { it.active }
+    }
 
-    // Tarefas da Inbox (sem horário definido: isInbox == true) respeitando o filtro de escopo e Modo Dia Difícil
+    // Tarefas da Inbox (sem horário definido: isInbox == true) respeitando os filtros e Modo Dia Difícil
     val inboxTasks = remember(scopeFilteredTasks, isHardDayActive) {
         val rawInbox = scopeFilteredTasks.filter { it.isInbox }
         if (isHardDayActive) {
-            rawInbox.filter { it.isEssential || it.priority == "HIGH" }
+            rawInbox.filter { it.isEssential || it.priority == "HIGH" || isFinancialBillTask(it) }
         } else {
             rawInbox
         }
@@ -267,17 +326,25 @@ fun TasksCalendarScreen(
             .sortedWith(compareBy<TaskItem> { it.alarmHour }.thenBy { it.alarmMinute })
     }
 
-    // Contas do Financeiro que vencem na data selecionada (respeitando Individual vs Familiar)
-    // Contas vencendo no dia são automaticamente "Essenciais" (não somem no Modo Dia Difícil!)
-    val dueDaySubscriptions = remember(subscriptions, selectedDayOfMonth, scopeFilter) {
-        subscriptions.filter { sub ->
-            sub.active &&
-                sub.dueDayOfMonth.toInt() == selectedDayOfMonth &&
-                when (scopeFilter) {
+    // Contas do Financeiro que vencem na data selecionada (respeitando Escopo, Categoria e Tipo)
+    val dueDaySubscriptions = remember(subscriptions, selectedDayOfMonth, scopeFilter, categoryFilter, itemTypeFilter) {
+        if (itemTypeFilter == "TASKS_ONLY") {
+            emptyList()
+        } else {
+            subscriptions.filter { sub ->
+                val matchesScope = when (scopeFilter) {
                     PrivacyScope.FAMILY -> sub.privacyScope != PrivacyScope.PERSONAL
                     PrivacyScope.PERSONAL -> sub.privacyScope == PrivacyScope.PERSONAL
                     else -> true
                 }
+                val matchesCategory = categoryFilter == "ALL" ||
+                    categoryFilter == "Finanças" ||
+                    sub.category.equals(categoryFilter, ignoreCase = true)
+                sub.active &&
+                    sub.dueDayOfMonth.toInt() == selectedDayOfMonth &&
+                    matchesScope &&
+                    matchesCategory
+            }
         }
     }
 
@@ -285,9 +352,7 @@ fun TasksCalendarScreen(
     val dayScheduledTasks = remember(baseDayScheduledTasks, isHardDayActive) {
         if (isHardDayActive) {
             baseDayScheduledTasks.filter { task ->
-                val isFinancialDue = task.estimatedCostBrl > 0.0 ||
-                    task.linkedSubscriptionId.isNotBlank() ||
-                    task.linkedTransactionId.isNotBlank()
+                val isFinancialDue = isFinancialBillTask(task)
                 task.isEssential || task.priority == "HIGH" || isFinancialDue
             }
         } else {
@@ -295,12 +360,19 @@ fun TasksCalendarScreen(
         }
     }
 
+    // Separação explícita no dia entre Tarefas com Custo/Conta Vinculada vs Tarefas Puras de Rotina
+    val dayFinancialTasks = remember(dayScheduledTasks) {
+        dayScheduledTasks.filter { isFinancialBillTask(it) }
+    }
+    val dayRoutineOnlyTasks = remember(dayScheduledTasks) {
+        dayScheduledTasks.filter { !isFinancialBillTask(it) }
+    }
+
     val hiddenNonEssentialCount = remember(baseDayScheduledTasks, dayScheduledTasks, isHardDayActive) {
         if (isHardDayActive) (baseDayScheduledTasks.size - dayScheduledTasks.size).coerceAtLeast(0) else 0
     }
 
     // Início do dia na Linha do Tempo:
-    // Se rotina Elástica e wokeUpAt preenchido -> usa wokeUpAt; senão usa fixedWakeTime (padrão 07:00)
     val dayStartMinutes = remember(
         customizationConfig.routineRhythm,
         customizationConfig.fixedWakeTime,
@@ -318,9 +390,9 @@ fun TasksCalendarScreen(
         if (parsedEnd <= dayStartMinutes + 60) (dayStartMinutes + 8 * 60).coerceAtMost(23 * 60 + 45) else parsedEnd
     }
 
-    // Algoritmo de Linha do Tempo + Horas Ociosas (Gaps >= 10 minutos) + Turnos de Baixa Energia
+    // Algoritmo de Linha do Tempo (exclusivo para Tarefas de Rotina, separado das Contas) + Horas Ociosas (Gaps >= 10 minutos)
     val timelineNodes = remember(
-        dayScheduledTasks,
+        dayRoutineOnlyTasks,
         dayStartMinutes,
         dayEndMinutes,
         customizationConfig.energyMorning,
@@ -329,7 +401,6 @@ fun TasksCalendarScreen(
     ) {
         val nodes = mutableListOf<TimelineNode>()
 
-        // 1. Indicadores suaves de turnos marcados como "Baixa Energia" no Mapa de Energia do Perfil
         if (customizationConfig.energyMorning == EnergyLevel.BAIXA) {
             nodes.add(
                 TimelineNode.LowEnergyShiftBanner(
@@ -358,8 +429,7 @@ fun TasksCalendarScreen(
             )
         }
 
-        // 2. Ordena blocos agendados e calcula Gaps >= 10 minutos
-        val sortedTasks = dayScheduledTasks.sortedBy { it.alarmHour * 60 + it.alarmMinute }
+        val sortedTasks = dayRoutineOnlyTasks.sortedBy { it.alarmHour * 60 + it.alarmMinute }
         var cursorMinutes = dayStartMinutes
 
         for (task in sortedTasks) {
@@ -367,7 +437,6 @@ fun TasksCalendarScreen(
             val duration = task.durationMinutes.coerceIn(10, 480)
             val taskEnd = (taskStart + duration).coerceAtMost(23 * 60 + 59)
 
-            // Se existe intervalo livre >= 10 minutos entre o cursor atual e o início da tarefa
             if (taskStart - cursorMinutes >= 10) {
                 nodes.add(
                     TimelineNode.FreeGapBlock(
@@ -391,7 +460,6 @@ fun TasksCalendarScreen(
             }
         }
 
-        // Gap final até o horário de dormir se >= 10 minutos
         if (dayEndMinutes - cursorMinutes >= 10) {
             nodes.add(
                 TimelineNode.FreeGapBlock(
@@ -435,763 +503,851 @@ fun TasksCalendarScreen(
         }
     }
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .testTag("tasks_calendar_list"),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        // 1. Top Header & Nova Tarefa CTA
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Agenda & Time Blocking",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "Linha do tempo diária, horas livres, Inbox e contas a vencer",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Button(
-                    onClick = {
-                        val defaultScope = if (scopeFilter == PrivacyScope.PERSONAL) PrivacyScope.PERSONAL else PrivacyScope.FAMILY
-                        val isInboxDefault = (agendaViewMode == "INBOX")
-                        onOpenNewTaskWithPreset(9, 0, 30, isInboxDefault, defaultScope)
-                    },
-                    shape = RoundedCornerShape(50),
-                    modifier = Modifier.testTag("add_task_header_btn")
-                ) {
-                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Nova Tarefa")
-                }
-            }
-        }
-
-        // 2. PASSO 1 - CONTROLES DE ESTADO DIÁRIO (Acordei + Modo Dia Difícil + Sequência Congelada)
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("daily_state_control_card"),
-                shape = RoundedCornerShape(cardRadius),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isHardDayActive) {
-                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)
-                    } else {
-                        MaterialTheme.colorScheme.surface
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("tasks_calendar_list"),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 156.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // 1. CABEÇALHO CLEAN ESTILO STRUCTURED ("novembro 2026" + Faixa de 7 dias + Botões rápidos)
+            item {
+                StructuredAgendaHeader(
+                    selectedEpochDay = selectedEpochDay,
+                    accentColor = accentColor,
+                    layoutMode = layoutMode,
+                    tasksByDay = tasksByDay,
+                    activeFiltersCount = activeFiltersCount,
+                    inboxCount = inboxTasks.size,
+                    dueBillsCount = dueDaySubscriptions.size + dayFinancialTasks.size,
+                    onSelectEpochDay = onSelectEpochDay,
+                    onOpenDatePickerModal = { showStructuredDatePickerModal = true },
+                    onToggleFiltersPanel = { showExpandableFiltersAndState = !showExpandableFiltersAndState },
+                    onOpenAppearanceSheet = { showExpandableAppearancePanel = !showExpandableAppearancePanel },
+                    onSwitchToInbox = {
+                        agendaViewMode = if (agendaViewMode == "INBOX") "TIMELINE" else "INBOX"
                     }
-                ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Column(
+                )
+            }
+
+            // 2. BARRA COMPACTA DE AÇÕES RÁPIDAS & ESTADO DO DIA (Discreta para não sujar a tela)
+            item {
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Botão Acordei discreto quando rotina for Elástica
+                    if (customizationConfig.routineRhythm == RoutineRhythm.ELASTICA) {
+                        if (dailyState.wokeUpAt.isBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = accentColor.copy(alpha = 0.18f),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .clickable { customizationRepo.recordWokeUp(selectedDateIso) }
+                                    .testTag("woke_up_btn")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.WbSunny,
+                                        contentDescription = null,
+                                        tint = accentColor,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = "Acordei",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = accentColor
+                                    )
+                                }
+                            }
+                        } else {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = IncomeEmerald.copy(alpha = 0.16f),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .clickable { customizationRepo.resetWokeUpForDate(selectedDateIso) }
+                                    .testTag("woke_up_recorded_badge")
+                            ) {
+                                Text(
+                                    text = "☀️ Acordou ${dailyState.wokeUpAt}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = IncomeEmerald,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Botão discreto de Modo Dia Difícil se Dores/Fadiga estiver ativo
+                    if (customizationConfig.chronicPainFatigueEnabled) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (isHardDayActive) ExpenseCoral.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .clickable { customizationRepo.toggleHardDayMode(selectedDateIso) }
+                                .testTag("hard_day_mode_btn")
+                        ) {
+                            Text(
+                                text = if (isHardDayActive) "💜 Dia Difícil Ativo" else "Dia Difícil",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isHardDayActive) ExpenseCoral else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+
+                    // Chips rápidos de escopo: Tudo | Individual | Familiar
+                    listOf(
+                        Triple("ALL", "Tudo", "agenda_scope_all"),
+                        Triple(PrivacyScope.PERSONAL, "Individual", "agenda_scope_personal"),
+                        Triple(PrivacyScope.FAMILY, "Família", "agenda_scope_family")
+                    ).forEach { (key, label, tag) ->
+                        val selected = scopeFilter == key
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (selected) accentColor.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .clickable { scopeFilter = key }
+                                .testTag(tag)
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (selected) accentColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+
+                    // Chip para abrir/fechar Menu Expansível de Categorias, Tipo (Contas vs Tarefas) e Visão
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = if (showExpandableFiltersAndState || activeFiltersCount > 0) {
+                            accentColor.copy(alpha = 0.22f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                        },
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .clickable { showExpandableFiltersAndState = !showExpandableFiltersAndState }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (showExpandableFiltersAndState) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                tint = accentColor,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = if (categoryFilter == "ALL") "Filtros & Visão" else "Cat: $categoryFilter",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Banner acolhedor caso Modo Dia Difícil esteja ativo
+            if (isHardDayActive) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("hard_day_welcome_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Favorite,
+                                contentDescription = null,
+                                tint = ExpenseCoral,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Modo Dia Difícil ativo: ocultamos $hiddenNonEssentialCount tarefa(s) não essencial(is) e congelamos sua sequência (${customizationConfig.currentStreakDays}d ❄️).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 3. MENU EXPANSÍVEL: APARÊNCIA DA AGENDA (Completo / Simplificado / Mínimo + Cor do App)
+            item {
+                AnimatedVisibility(visible = showExpandableAppearancePanel) {
+                    StructuredAppearanceCard(
+                        config = customizationConfig,
+                        customizationRepo = customizationRepo
+                    )
+                }
+            }
+
+            // 4. MENU EXPANSÍVEL: FILTROS AVANÇADOS (Separar Contas e Tarefas, Categorias, Estado do Dia e Abas)
+            item {
+                AnimatedVisibility(visible = showExpandableFiltersAndState) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("daily_state_control_card"),
+                        shape = RoundedCornerShape(22.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        ),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Opções & Filtros da Agenda",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = SavingsGold.copy(alpha = 0.2f),
+                                    modifier = Modifier.testTag("daily_streak_badge")
+                                ) {
+                                    Text(
+                                        text = if (isHardDayActive || dailyState.streakFrozen) {
+                                            "Sequência: ${customizationConfig.currentStreakDays}d ❄️"
+                                        } else {
+                                            "Sequência: ${customizationConfig.currentStreakDays}d 🔥"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+
+                            // Separar Contas e Tarefas
+                            Text(
+                                text = "Separar Contas e Tarefas",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                FilterChip(
+                                    selected = itemTypeFilter == "ALL",
+                                    onClick = { itemTypeFilter = "ALL" },
+                                    label = { Text("Tudo") },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("agenda_type_all")
+                                )
+                                FilterChip(
+                                    selected = itemTypeFilter == "TASKS_ONLY",
+                                    onClick = { itemTypeFilter = "TASKS_ONLY" },
+                                    label = { Text("📋 Só Tarefas ($totalRoutineTasksCount)") },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("agenda_type_tasks_only")
+                                )
+                                FilterChip(
+                                    selected = itemTypeFilter == "BILLS_ONLY",
+                                    onClick = { itemTypeFilter = "BILLS_ONLY" },
+                                    label = { Text("💳 Só Contas ($totalBillsCount)") },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("agenda_type_bills_only")
+                                )
+                            }
+
+                            // Filtrar por Categoria
+                            Text(
+                                text = "Categoria",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                FilterChip(
+                                    selected = categoryFilter == "ALL",
+                                    onClick = { categoryFilter = "ALL" },
+                                    label = { Text("Todas") },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("agenda_category_all")
+                                )
+                                availableCategories.forEach { cat ->
+                                    FilterChip(
+                                        selected = categoryFilter.equals(cat, ignoreCase = true),
+                                        onClick = { categoryFilter = cat },
+                                        label = { Text(cat) },
+                                        shape = RoundedCornerShape(50),
+                                        modifier = Modifier.testTag("agenda_category_$cat")
+                                    )
+                                }
+                            }
+
+                            // Alternar modo de visão: Linha do Tempo | Inbox | Grade Mensal
+                            Text(
+                                text = "Modo de Exibição",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilterChip(
+                                    selected = agendaViewMode == "TIMELINE",
+                                    onClick = { agendaViewMode = "TIMELINE" },
+                                    label = { Text("Linha do Tempo") },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("view_mode_timeline_tab")
+                                )
+                                FilterChip(
+                                    selected = agendaViewMode == "INBOX",
+                                    onClick = { agendaViewMode = "INBOX" },
+                                    label = { Text("Inbox (${inboxTasks.size})") },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("view_mode_inbox_tab")
+                                )
+                                FilterChip(
+                                    selected = agendaViewMode == "CALENDAR",
+                                    onClick = { agendaViewMode = "CALENDAR" },
+                                    label = { Text("Mês") },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("view_mode_calendar_tab")
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (agendaViewMode == "TIMELINE") {
+                // 5. MENU EXPANSÍVEL DE CONTAS & PAGAMENTOS DO DIA (Separado das Tarefas de Rotina)
+                val totalBillsDueToday = dueDaySubscriptions.size + dayFinancialTasks.size
+                if (itemTypeFilter != "TASKS_ONLY" && totalBillsDueToday > 0) {
+                    item {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(
+                                    width = 1.dp,
+                                    color = accentColor.copy(alpha = 0.22f),
+                                    shape = RoundedCornerShape(cardRadius)
+                                )
+                                .testTag("expandable_daily_bills_card"),
+                            shape = RoundedCornerShape(cardRadius),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surface
+                            ),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { showExpandableBillsSection = !showExpandableBillsSection }
+                                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(34.dp)
+                                                .clip(CircleShape)
+                                                .background(accentColor.copy(alpha = 0.16f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.AccountBalanceWallet,
+                                                contentDescription = null,
+                                                tint = accentColor,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Text(
+                                            text = "Contas & Vencimentos de Hoje ($totalBillsDueToday)",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = accentColor.copy(alpha = 0.12f),
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (showExpandableBillsSection) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                                contentDescription = "Expandir ou recolher contas",
+                                                tint = accentColor,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                AnimatedVisibility(visible = showExpandableBillsSection) {
+                                    Column(
+                                        modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        dueDaySubscriptions.forEach { bill ->
+                                            val isPaidThisMonth = bill.lastPostedYearMonth == selectedYearMonth
+                                            AgendaFinancialBillCard(
+                                                bill = bill,
+                                                isPaidThisMonth = isPaidThisMonth,
+                                                onMarkPaidNow = { onPostSubscriptionNow(bill) },
+                                                onOpenRingtonePicker = { billForRingtoneDialog = bill }
+                                            )
+                                        }
+                                        dayFinancialTasks.forEach { billTask ->
+                                            val startMin = billTask.alarmHour.toInt() * 60 + billTask.alarmMinute.toInt()
+                                            TimeBlockingTaskCard(
+                                                task = billTask,
+                                                startMinutes = startMin,
+                                                endMinutes = startMin + billTask.durationMinutes,
+                                                onToggleCheck = { onToggleTask(billTask) },
+                                                onToggleEssential = { onToggleTaskEssential(billTask) },
+                                                onToggleSubtask = { subtaskId -> onToggleSubtask(billTask, subtaskId) },
+                                                onDelete = { onDeleteTask(billTask) }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (itemTypeFilter == "BILLS_ONLY" && totalBillsDueToday == 0) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(22.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        ) {
+                            Text(
+                                text = "Nenhuma conta a vencer neste dia para o filtro selecionado.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(18.dp)
+                            )
+                        }
+                    }
+                }
+
+                // 6. LINHA DO TEMPO VISUAL ESTILO STRUCTURED (Container orgânico curvo com nós conectados)
+                if (itemTypeFilter != "BILLS_ONLY") {
+                    item {
+                        Surface(
+                            shape = RoundedCornerShape(cardRadius),
+                            color = MaterialTheme.colorScheme.surface,
+                            tonalElevation = 2.dp,
+                            shadowElevation = 2.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(
+                                    width = 1.dp,
+                                    color = accentColor.copy(alpha = 0.16f),
+                                    shape = RoundedCornerShape(cardRadius)
+                                )
+                                .testTag("structured_timeline_sheet")
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 18.dp)
+                            ) {
+                                // Filtramos nós conforme o layoutMode (no MÍNIMO ocultamos FreeGapBlock e LowEnergyShiftBanner)
+                                val visibleNodes = remember(timelineNodes, layoutMode) {
+                                    when (layoutMode) {
+                                        AgendaLayoutMode.MINIMO -> timelineNodes.filterIsInstance<TimelineNode.ScheduledTaskBlock>()
+                                        AgendaLayoutMode.SIMPLIFICADO -> timelineNodes.filter { it !is TimelineNode.LowEnergyShiftBanner }
+                                        else -> timelineNodes
+                                    }
+                                }
+
+                                val scheduledTaskNodes = remember(visibleNodes) {
+                                    visibleNodes.filterIsInstance<TimelineNode.ScheduledTaskBlock>()
+                                }
+
+                                if (scheduledTaskNodes.isEmpty()) {
+                                    // Empty state clean inside the Structured sheet
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 24.dp, vertical = 28.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(56.dp)
+                                                .clip(CircleShape)
+                                                .background(accentColor.copy(alpha = 0.2f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.CalendarToday,
+                                                contentDescription = null,
+                                                tint = accentColor,
+                                                modifier = Modifier.size(26.dp)
+                                            )
+                                        }
+                                        Text(
+                                            text = "Comece a estruturar seu dia",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Você tem ${formatDurationPt(totalFreeMinutesToday)} livres hoje. Toque no botão + para adicionar sua primeira tarefa.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    }
+                                } else {
+                                    visibleNodes.forEachIndexed { idx, node ->
+                                        when (node) {
+                                            is TimelineNode.LowEnergyShiftBanner -> {
+                                                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                                                    LowEnergyShiftIndicatorCard(
+                                                        shiftName = node.shiftName,
+                                                        periodLabel = node.periodLabel
+                                                    )
+                                                }
+                                            }
+
+                                            is TimelineNode.FreeGapBlock -> {
+                                                // Exibir intervalo livre apenas entre tarefas ou após a primeira tarefa para visual limpo estilo Structured
+                                                StructuredFreeGapRow(
+                                                    startMinutesOfDay = node.startMinutesOfDay,
+                                                    endMinutesOfDay = node.endMinutesOfDay,
+                                                    gapMinutes = node.gapMinutes,
+                                                    accentColor = accentColor,
+                                                    layoutMode = layoutMode,
+                                                    onAddInGap = {
+                                                        val startH = node.startMinutesOfDay / 60
+                                                        val startM = node.startMinutesOfDay % 60
+                                                        val suggestedDur = when {
+                                                            node.gapMinutes >= 60 -> 60
+                                                            node.gapMinutes >= 45 -> 45
+                                                            node.gapMinutes >= 30 -> 30
+                                                            else -> 15
+                                                        }
+                                                        val defaultScope = if (scopeFilter == PrivacyScope.PERSONAL) {
+                                                            PrivacyScope.PERSONAL
+                                                        } else {
+                                                            PrivacyScope.FAMILY
+                                                        }
+                                                        onOpenNewTaskWithPreset(startH, startM, suggestedDur, false, defaultScope)
+                                                    }
+                                                )
+                                            }
+
+                                            is TimelineNode.ScheduledTaskBlock -> {
+                                                val firstTaskIndex = visibleNodes.indexOfFirst { it is TimelineNode.ScheduledTaskBlock }
+                                                val lastTaskIndex = visibleNodes.indexOfLast { it is TimelineNode.ScheduledTaskBlock }
+                                                val nextNode = visibleNodes.getOrNull(idx + 1)
+
+                                                StructuredTimelineTaskRow(
+                                                    task = node.task,
+                                                    startMinutesOfDay = node.startMinutesOfDay,
+                                                    endMinutesOfDay = node.endMinutesOfDay,
+                                                    accentColor = accentColor,
+                                                    layoutMode = layoutMode,
+                                                    isFirstNode = idx == firstTaskIndex,
+                                                    isLastNode = idx == lastTaskIndex && nextNode !is TimelineNode.FreeGapBlock,
+                                                    nextNodeIsGap = nextNode is TimelineNode.FreeGapBlock,
+                                                    onTaskClick = { clickedTask ->
+                                                        selectedTaskForBottomSheet = clickedTask
+                                                    },
+                                                    onToggleTask = { toggledTask ->
+                                                        onToggleTask(toggledTask)
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (agendaViewMode == "INBOX") {
+                // 7. ABA / SEÇÃO INBOX (Tarefas sem horário definido: isInbox == true)
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(cardRadius),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "📥 Inbox • Sem Horário Definido",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Toque em '+ Agendar' em qualquer item para encaixá-lo na Linha do Tempo.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            FilledTonalButton(
+                                onClick = {
+                                    val defaultScope = if (scopeFilter == PrivacyScope.PERSONAL) {
+                                        PrivacyScope.PERSONAL
+                                    } else {
+                                        PrivacyScope.FAMILY
+                                    }
+                                    onOpenNewTaskWithPreset(9, 0, 30, true, defaultScope)
+                                },
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier.testTag("add_inbox_task_btn")
+                            ) {
+                                Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("+ Inbox", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                if (inboxTasks.isEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(cardRadius),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Inbox,
+                                    contentDescription = null,
+                                    tint = accentColor,
+                                    modifier = Modifier.size(40.dp)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "Sua Inbox está limpa!",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Capture tarefas sem horário definido aqui para agendá-las depois.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    items(inboxTasks, key = { "inbox_${it.id}" }) { inboxTask ->
+                        InboxTaskCard(
+                            task = inboxTask,
+                            onScheduleClick = { taskToScheduleFromInbox = inboxTask },
+                            onToggleCheck = { onToggleTask(inboxTask) },
+                            onToggleSubtask = { subtaskId -> onToggleSubtask(inboxTask, subtaskId) },
+                            onDelete = { onDeleteTask(inboxTask) }
+                        )
+                    }
+                }
+            } else {
+                // 8. MODO CALENDÁRIO MENSAL COMPLETO + LISTA DO MÊS
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(cardRadius),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(18.dp)) {
+                            MonthlyCalendarGridContent(
+                                selectedYearMonth = selectedYearMonth,
+                                selectedEpochDay = selectedEpochDay,
+                                calendarCells = calendarCells,
+                                tasksByDay = tasksByDay,
+                                subscriptions = subscriptions,
+                                scopeFilter = scopeFilter,
+                                onShiftMonth = onShiftMonth,
+                                onSelectEpochDay = {
+                                    onSelectEpochDay(it)
+                                    agendaViewMode = "TIMELINE"
+                                }
+                            )
+                        }
+                    }
+                }
+
+                item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Estado do Dia • $selectedDateIso",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontFamily = JetBrainsMonoFontFamily,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            text = "Compromissos de ${DateCalendarUtils.formatYearMonthDisplay(selectedYearMonth)}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
                         )
-
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = if (isHardDayActive || dailyState.streakFrozen) {
-                                Color(0xFF0077B6).copy(alpha = 0.18f)
-                            } else {
-                                SavingsGold.copy(alpha = 0.22f)
-                            },
-                            modifier = Modifier.testTag("daily_streak_badge")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = if (isHardDayActive || dailyState.streakFrozen) {
-                                        Icons.Default.AcUnit
-                                    } else {
-                                        Icons.Default.LocalFireDepartment
-                                    },
-                                    contentDescription = null,
-                                    tint = if (isHardDayActive || dailyState.streakFrozen) {
-                                        Color(0xFF0077B6)
-                                    } else {
-                                        Color(0xFFD97706)
-                                    },
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = if (isHardDayActive || dailyState.streakFrozen) {
-                                        "Sequência: ${customizationConfig.currentStreakDays}d (Congelada ❄️)"
-                                    } else {
-                                        "Sequência: ${customizationConfig.currentStreakDays}d 🔥"
-                                    },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isHardDayActive || dailyState.streakFrozen) {
-                                        Color(0xFF0077B6)
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurface
-                                    }
-                                )
-                            }
-                        }
-                    }
-
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        if (customizationConfig.routineRhythm == RoutineRhythm.ELASTICA) {
-                            if (dailyState.wokeUpAt.isBlank()) {
-                                FilledTonalButton(
-                                    onClick = {
-                                        customizationRepo.recordWokeUp(selectedDateIso)
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                                    modifier = Modifier.testTag("woke_up_btn")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.WbSunny,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Acordei (Iniciar Dia)",
-                                        style = MaterialTheme.typography.labelLarge,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            } else {
-                                Surface(
-                                    shape = RoundedCornerShape(50),
-                                    color = IncomeEmerald.copy(alpha = 0.16f),
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(50))
-                                        .clickable {
-                                            customizationRepo.resetWokeUpForDate(selectedDateIso)
-                                        }
-                                        .testTag("woke_up_recorded_badge")
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.WbSunny,
-                                            contentDescription = null,
-                                            tint = IncomeEmerald,
-                                            modifier = Modifier.size(15.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = "Início do dia: ${dailyState.wokeUpAt} (woke_up_at)",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = IncomeEmerald
-                                        )
-                                    }
-                                }
-                            }
-                        } else {
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
-                            ) {
-                                Text(
-                                    text = "Início Padrão: ${customizationConfig.fixedWakeTime} - ${customizationConfig.fixedSleepTime}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                                )
-                            }
-                        }
-
-                        if (customizationConfig.chronicPainFatigueEnabled) {
-                            FilterChip(
-                                selected = isHardDayActive,
-                                onClick = {
-                                    customizationRepo.toggleHardDayMode(selectedDateIso)
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Healing,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        text = if (isHardDayActive) "Modo Dia Difícil Ativo ✓" else "Modo Dia Difícil",
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                },
-                                shape = RoundedCornerShape(50),
-                                modifier = Modifier.testTag("hard_day_mode_btn")
-                            )
-                        }
-                    }
-
-                    AnimatedVisibility(visible = isHardDayActive) {
-                        Surface(
-                            shape = RoundedCornerShape(18.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(
-                                    1.dp,
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
-                                    RoundedCornerShape(18.dp)
-                                )
-                                .testTag("hard_day_welcome_banner")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Favorite,
-                                    contentDescription = null,
-                                    tint = ExpenseCoral,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "Acolhimento • Modo Dia Difícil Ativado",
-                                        style = MaterialTheme.typography.labelLarge,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Text(
-                                        text = "Tudo bem desacelerar hoje. Ocultamos $hiddenNonEssentialCount tarefa(s) não essencial(is), mantivemos apenas compromissos essenciais e contas vencendo hoje, e congelamos sua sequência sem penalidade.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. PASSO 2 - FILTRO RÁPIDO DE ESCOPO ("Tudo", "Individual", "Familiar") + SELETOR DE VISÃO (Linha do Tempo | Inbox | Calendário)
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(cardRadius),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                )
-            ) {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = "Filtro de Escopo (Agenda, Inbox & Contas)",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        FilterChip(
-                            selected = scopeFilter == "ALL",
-                            onClick = { scopeFilter = "ALL" },
-                            label = {
-                                Text(
-                                    text = "Tudo (${totalIndividualCount + totalFamilyCount})",
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1
-                                )
-                            },
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier.testTag("agenda_scope_all")
-                        )
-                        FilterChip(
-                            selected = scopeFilter == PrivacyScope.PERSONAL,
-                            onClick = { scopeFilter = PrivacyScope.PERSONAL },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.Lock,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = "Individual ($totalIndividualCount)",
-                                    maxLines = 1
-                                )
-                            },
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier.testTag("agenda_scope_personal")
-                        )
-                        FilterChip(
-                            selected = scopeFilter == PrivacyScope.FAMILY,
-                            onClick = { scopeFilter = PrivacyScope.FAMILY },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.FamilyRestroom,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = "Familiar ($totalFamilyCount)",
-                                    maxLines = 1
-                                )
-                            },
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier.testTag("agenda_scope_family")
-                        )
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-
-                    // View Tabs: Linha do Tempo (Time Blocking) | Inbox (Sem horário) | Calendário Mensal
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        FilterChip(
-                            selected = agendaViewMode == "TIMELINE",
-                            onClick = { agendaViewMode = "TIMELINE" },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.Schedule,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = "Linha do Tempo",
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1
-                                )
-                            },
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier.testTag("view_mode_timeline_tab")
-                        )
-                        FilterChip(
-                            selected = agendaViewMode == "INBOX",
-                            onClick = { agendaViewMode = "INBOX" },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.Inbox,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = "Inbox (${inboxTasks.size})",
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1
-                                )
-                            },
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier.testTag("view_mode_inbox_tab")
-                        )
-                        FilterChip(
-                            selected = agendaViewMode == "CALENDAR",
-                            onClick = { agendaViewMode = "CALENDAR" },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.CalendarMonth,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = "Calendário",
-                                    maxLines = 1
-                                )
-                            },
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier.testTag("view_mode_calendar_tab")
-                        )
-                    }
-                }
-            }
-        }
-
-        // 4. SELETOR RÁPIDO DE DATA (Dia Anterior / Hoje / Próximo Dia + Botão de abrir Calendário Mensal)
-        if (agendaViewMode == "TIMELINE") {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(cardRadius),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(
-                                onClick = { onSelectEpochDay(selectedEpochDay - 1L) },
-                                modifier = Modifier.testTag("timeline_prev_day_btn")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                                    contentDescription = "Dia anterior"
-                                )
-                            }
-
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .clickable { showMiniCalendarInTimeline = !showMiniCalendarInTimeline }
-                                    .padding(horizontal = 12.dp, vertical = 4.dp)
-                            ) {
-                                Text(
-                                    text = "Dia ${DateCalendarUtils.formatEpochDayPt(selectedEpochDay)}",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "${dayScheduledTasks.size} blocos • ${formatDurationPt(totalFreeMinutesToday)} livres em janelas >= 10m",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-
-                            IconButton(
-                                onClick = { onSelectEpochDay(selectedEpochDay + 1L) },
-                                modifier = Modifier.testTag("timeline_next_day_btn")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                    contentDescription = "Próximo dia"
-                                )
-                            }
-                        }
-
-                        AnimatedVisibility(visible = showMiniCalendarInTimeline) {
-                            Column(modifier = Modifier.padding(top = 10.dp)) {
-                                MonthlyCalendarGridContent(
-                                    selectedYearMonth = selectedYearMonth,
-                                    selectedEpochDay = selectedEpochDay,
-                                    calendarCells = calendarCells,
-                                    tasksByDay = tasksByDay,
-                                    subscriptions = subscriptions,
-                                    scopeFilter = scopeFilter,
-                                    onShiftMonth = onShiftMonth,
-                                    onSelectEpochDay = {
-                                        onSelectEpochDay(it)
-                                        showMiniCalendarInTimeline = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 5. INTEGRAÇÃO COM O FINANCEIRO NA AGENDA: Contas a vencer na data atual
-            //    Marcadas automaticamente como "Essenciais" (não somem no Modo Dia Difícil)
-            //    Permite dar baixa (marcar como paga) direto pela Agenda e configurar ringtone próprio
-            if (dueDaySubscriptions.isNotEmpty()) {
-                item {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "💳 Contas do Financeiro Vencendo Hoje (Essenciais ⭐)",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-
-                        dueDaySubscriptions.forEach { bill ->
-                            val isPaidThisMonth = bill.lastPostedYearMonth == selectedYearMonth
-                            AgendaFinancialBillCard(
-                                bill = bill,
-                                isPaidThisMonth = isPaidThisMonth,
-                                onMarkPaidNow = { onPostSubscriptionNow(bill) },
-                                onOpenRingtonePicker = { billForRingtoneDialog = bill }
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 6. LINHA DO TEMPO VISUAL (TIME BLOCKING) + HORAS OCIOSAS (GAPS >= 10 MIN) + TURNOS DE BAIXA ENERGIA
-            items(timelineNodes, key = { it.key }) { node ->
-                when (node) {
-                    is TimelineNode.LowEnergyShiftBanner -> {
-                        LowEnergyShiftIndicatorCard(
-                            shiftName = node.shiftName,
-                            periodLabel = node.periodLabel
-                        )
-                    }
-
-                    is TimelineNode.FreeGapBlock -> {
-                        FreeTimeGapCard(
-                            startMinutes = node.startMinutesOfDay,
-                            endMinutes = node.endMinutesOfDay,
-                            gapMinutes = node.gapMinutes,
-                            onClickAddInGap = {
-                                val startH = node.startMinutesOfDay / 60
-                                val startM = node.startMinutesOfDay % 60
-                                val suggestedDur = when {
-                                    node.gapMinutes >= 60 -> 60
-                                    node.gapMinutes >= 45 -> 45
-                                    node.gapMinutes >= 30 -> 30
-                                    else -> 15
-                                }
-                                val defaultScope = if (scopeFilter == PrivacyScope.PERSONAL) {
-                                    PrivacyScope.PERSONAL
-                                } else {
-                                    PrivacyScope.FAMILY
-                                }
-                                onOpenNewTaskWithPreset(startH, startM, suggestedDur, false, defaultScope)
-                            }
-                        )
-                    }
-
-                    is TimelineNode.ScheduledTaskBlock -> {
-                        TimeBlockingTaskCard(
-                            task = node.task,
-                            startMinutes = node.startMinutesOfDay,
-                            endMinutes = node.endMinutesOfDay,
-                            onToggleCheck = { onToggleTask(node.task) },
-                            onToggleEssential = { onToggleTaskEssential(node.task) },
-                            onToggleSubtask = { subtaskId -> onToggleSubtask(node.task, subtaskId) },
-                            onDelete = { onDeleteTask(node.task) }
-                        )
-                    }
-                }
-            }
-        } else if (agendaViewMode == "INBOX") {
-            // 7. ABA / SEÇÃO INBOX (Tarefas sem horário definido: isInbox == true)
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(cardRadius),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "📥 Inbox • Tarefas sem Horário Definido",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Capture ideias e pendências rápidas aqui. Toque em '+ Agendar' em qualquer item para encaixá-lo na Linha do Tempo.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        FilledTonalButton(
+                        OutlinedButton(
                             onClick = {
-                                val defaultScope = if (scopeFilter == PrivacyScope.PERSONAL) {
-                                    PrivacyScope.PERSONAL
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                    ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.POST_NOTIFICATIONS
+                                    ) != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                                 } else {
-                                    PrivacyScope.FAMILY
+                                    TaskTonePreviewPlayer.playPreview("SUAVE")
+                                    AlarmScheduler.showImmediateNotification(
+                                        context = context,
+                                        notificationId = 8888,
+                                        title = "Alarme da Agenda",
+                                        message = "Teste de alarme personalizado concluído com sucesso!"
+                                    )
                                 }
-                                onOpenNewTaskWithPreset(9, 0, 30, true, defaultScope)
                             },
                             shape = RoundedCornerShape(50),
-                            modifier = Modifier.testTag("add_inbox_task_btn")
-                        ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("+ Inbox", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-
-            if (inboxTasks.isEmpty()) {
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(cardRadius),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("test_alarm_btn")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Inbox,
+                                imageVector = Icons.Default.NotificationsActive,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(40.dp)
+                                modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Sua Inbox está limpa!",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Ao criar uma tarefa sem horário definido, ela fica guardada aqui até você decidir agendá-la na Linha do Tempo.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center
-                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Testar Toque", style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }
-            } else {
-                items(inboxTasks, key = { "inbox_${it.id}" }) { inboxTask ->
-                    InboxTaskCard(
-                        task = inboxTask,
-                        onScheduleClick = { taskToScheduleFromInbox = inboxTask },
-                        onToggleCheck = { onToggleTask(inboxTask) },
-                        onToggleSubtask = { subtaskId -> onToggleSubtask(inboxTask, subtaskId) },
-                        onDelete = { onDeleteTask(inboxTask) }
-                    )
-                }
-            }
-        } else {
-            // 8. MODO CALENDÁRIO MENSAL COMPLETO + LISTA DO MÊS
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(cardRadius),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-                ) {
-                    Column(modifier = Modifier.padding(18.dp)) {
-                        MonthlyCalendarGridContent(
-                            selectedYearMonth = selectedYearMonth,
-                            selectedEpochDay = selectedEpochDay,
-                            calendarCells = calendarCells,
-                            tasksByDay = tasksByDay,
-                            subscriptions = subscriptions,
-                            scopeFilter = scopeFilter,
-                            onShiftMonth = onShiftMonth,
-                            onSelectEpochDay = {
-                                onSelectEpochDay(it)
-                                agendaViewMode = "TIMELINE"
-                            }
+
+                val monthTasks = scopeFilteredTasks.filter { it.yearMonth == selectedYearMonth && !it.isInbox }
+                if (monthTasks.isEmpty()) {
+                    item {
+                        Text(
+                            text = "Nenhuma tarefa agendada neste mês para o filtro selecionado.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                }
-            }
-
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Compromissos de ${DateCalendarUtils.formatYearMonthDisplay(selectedYearMonth)}",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    OutlinedButton(
-                        onClick = {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                ContextCompat.checkSelfPermission(
-                                    context,
-                                    Manifest.permission.POST_NOTIFICATIONS
-                                ) != PackageManager.PERMISSION_GRANTED
-                            ) {
-                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            } else {
-                                TaskTonePreviewPlayer.playPreview("SUAVE")
-                                AlarmScheduler.showImmediateNotification(
-                                    context = context,
-                                    notificationId = 8888,
-                                    title = "Alarme da Agenda",
-                                    message = "Teste de alarme personalizado concluído com sucesso!"
-                                )
-                            }
-                        },
-                        shape = RoundedCornerShape(50),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                        modifier = Modifier.testTag("test_alarm_btn")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.NotificationsActive,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
+                } else {
+                    items(monthTasks, key = { "cal_${it.id}" }) { task ->
+                        val startMin = task.alarmHour.toInt() * 60 + task.alarmMinute.toInt()
+                        TimeBlockingTaskCard(
+                            task = task,
+                            startMinutes = startMin,
+                            endMinutes = startMin + task.durationMinutes,
+                            onToggleCheck = { onToggleTask(task) },
+                            onToggleEssential = { onToggleTaskEssential(task) },
+                            onToggleSubtask = { subtaskId -> onToggleSubtask(task, subtaskId) },
+                            onDelete = { onDeleteTask(task) }
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Testar Toque", style = MaterialTheme.typography.labelMedium)
                     }
-                }
-            }
-
-            val monthTasks = scopeFilteredTasks.filter { it.yearMonth == selectedYearMonth && !it.isInbox }
-            if (monthTasks.isEmpty()) {
-                item {
-                    Text(
-                        text = "Nenhuma tarefa agendada neste mês para o filtro selecionado.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else {
-                items(monthTasks, key = { "cal_${it.id}" }) { task ->
-                    val startMin = task.alarmHour.toInt() * 60 + task.alarmMinute.toInt()
-                    TimeBlockingTaskCard(
-                        task = task,
-                        startMinutes = startMin,
-                        endMinutes = startMin + task.durationMinutes,
-                        onToggleCheck = { onToggleTask(task) },
-                        onToggleEssential = { onToggleTaskEssential(task) },
-                        onToggleSubtask = { subtaskId -> onToggleSubtask(task, subtaskId) },
-                        onDelete = { onDeleteTask(task) }
-                    )
                 }
             }
         }
+
+        // Botão Circular "+" Flutuante Estilo Structured no canto inferior direito (empilhado abaixo do Microfone)
+        FloatingActionButton(
+            onClick = {
+                val defaultScope = if (scopeFilter == PrivacyScope.PERSONAL) PrivacyScope.PERSONAL else PrivacyScope.FAMILY
+                val isInboxDefault = (agendaViewMode == "INBOX")
+                onOpenNewTaskWithPreset(9, 0, 30, isInboxDefault, defaultScope)
+            },
+            shape = CircleShape,
+            containerColor = accentColor,
+            contentColor = Color(0xFF18191C),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 16.dp, bottom = 16.dp)
+                .size(56.dp)
+                .testTag("add_task_header_btn")
+        ) {
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = "Nova Tarefa",
+                modifier = Modifier.size(28.dp)
+            )
+        }
+    }
+
+    // Modal Structured "Selecionar data" (Screenshot 5)
+    if (showStructuredDatePickerModal) {
+        StructuredDatePickerDialog(
+            selectedEpochDay = selectedEpochDay,
+            accentColor = accentColor,
+            onDismiss = { showStructuredDatePickerModal = false },
+            onConfirmEpochDay = { pickedEpochDay ->
+                onSelectEpochDay(pickedEpochDay)
+            }
+        )
+    }
+
+    // Bottom Sheet Structured de Detalhes da Tarefa (Screenshot 3)
+    selectedTaskForBottomSheet?.let { activeTask ->
+        // Sincroniza estado atualizado da tarefa na lista principal
+        val liveTask = tasks.firstOrNull { it.id == activeTask.id } ?: activeTask
+        StructuredTaskDetailBottomSheet(
+            task = liveTask,
+            accentColor = accentColor,
+            onDismiss = { selectedTaskForBottomSheet = null },
+            onToggleTask = { onToggleTask(it) },
+            onToggleSubtask = { taskObj, subId -> onToggleSubtask(taskObj, subId) },
+            onToggleEssential = { onToggleTaskEssential(it) },
+            onDeleteTask = { onDeleteTask(it) }
+        )
     }
 
     // Modal rápido para agendar item da Inbox na Linha do Tempo
@@ -1722,6 +1878,21 @@ private fun TimeBlockingTaskCard(
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = if (isPersonal) MaterialTheme.colorScheme.onTertiaryContainer else blockColor
+                        )
+                    }
+                }
+
+                // Badge de Categoria da Tarefa / Conta
+                if (task.category.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                    ) {
+                        Text(
+                            text = "🏷️ ${task.category}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                         )
                     }
                 }

@@ -1,7 +1,7 @@
 {
   "firestore": [
     {
-      "database": "ai-studio-android-aurafina-1f004ec6-1a1b-4707-ac76-fff9727493c9",
+      "database": "(default)",
       "rules": "firestore.rules"
     }
   ],

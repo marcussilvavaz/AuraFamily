@@ -77,6 +77,31 @@ service cloud.firestore {
                        ]);
 
       allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+
+      // Subcollection: Private Diary (strictly isolated per user)
+      match /private_diary/{entryId} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+        allow create, update: if isSignedIn() &&
+                                 request.auth.uid == userId &&
+                                 isValidId(entryId) &&
+                                 incoming().userId == userId &&
+                                 incoming().dateIso is string && incoming().dateIso.size() == 10 &&
+                                 incoming().timeFormatted is string && incoming().timeFormatted.size() >= 4 && incoming().timeFormatted.size() <= 10 &&
+                                 incoming().moodId is string && incoming().moodId.size() >= 1 && incoming().moodId.size() <= 40 &&
+                                 incoming().freeText is string && incoming().freeText.size() <= 3000;
+        allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(entryId);
+      }
+
+      // Subcollection: Support Letters (strictly isolated per user)
+      match /support_letters/{letterId} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+        allow create, update: if isSignedIn() &&
+                                 request.auth.uid == userId &&
+                                 isValidId(letterId) &&
+                                 incoming().userId == userId &&
+                                 incoming().content is string && incoming().content.size() >= 1 && incoming().content.size() <= 8000;
+        allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(letterId);
+      }
     }
 
     // 2. Household validation
@@ -362,6 +387,35 @@ service cloud.firestore {
 
         allow delete: if isSignedIn() && isValidId(goalId) && isHouseholdMember(householdId);
       }
+    }
+
+    // 7. App Release & Live Update Metadata (/app_releases/latest)
+    function isValidAppRelease(data) {
+      return data.buildRevision is int && data.buildRevision >= 1 && data.buildRevision <= 9999999999999 &&
+             data.versionCode is int && data.versionCode >= 1 && data.versionCode <= 1000000 &&
+             data.versionName is string && data.versionName.size() >= 1 && data.versionName.size() <= 40 &&
+             data.dexSignature is string && data.dexSignature.size() >= 1 && data.dexSignature.size() <= 128 &&
+             data.releaseNotes is string && data.releaseNotes.size() <= 1500 &&
+             data.downloadUrl is string && data.downloadUrl.size() <= 500 &&
+             data.mandatory is bool &&
+             data.publishedBy is string && data.publishedBy.size() <= 80 &&
+             data.updatedAtEpochMs is int && data.updatedAtEpochMs >= 0;
+    }
+
+    match /app_releases/{releaseId} {
+      allow get: if releaseId == 'latest';
+      allow create, update: if releaseId == 'latest' &&
+                               incoming().keys().hasAll([
+                                 'buildRevision', 'versionCode', 'versionName', 'dexSignature',
+                                 'releaseNotes', 'downloadUrl', 'mandatory',
+                                 'publishedBy', 'updatedAtEpochMs'
+                               ]) &&
+                               incoming().keys().hasOnly([
+                                 'buildRevision', 'versionCode', 'versionName', 'dexSignature',
+                                 'releaseNotes', 'downloadUrl', 'mandatory',
+                                 'publishedBy', 'updatedAtEpochMs'
+                               ]) &&
+                               isValidAppRelease(incoming());
     }
   }
 }

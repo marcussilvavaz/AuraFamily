@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "725763199828",
+    "project_id": "auramaneger-e1830",
+    "storage_bucket": "auramaneger-e1830.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:725763199828:android:7c41c13c7861f48997aec1",
+        "android_client_info": {
+          "package_name": "com.auramanager.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBs4DCCB200DkGL7bn-SY-f0wpH1TLcHEM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -80,6 +80,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.data.AppCustomizationConfig
+import com.example.data.AppUpdateManager
+import com.example.data.AppUpdateUiState
 import com.example.data.CustomizationCatalog
 import com.example.data.CustomizationRepository
 import com.example.data.Household
@@ -194,6 +196,8 @@ fun FamilySettingsScreen(
     onChangeThemeMode: (String) -> Unit,
     onOpenCustomizationStudio: () -> Unit,
     onOpenModularOnboardingScreen: () -> Unit = {},
+    updateState: AppUpdateUiState? = null,
+    updateManager: AppUpdateManager? = null,
     onBackToHub: () -> Unit,
     onShowMessage: (String) -> Unit,
     onSignOut: () -> Unit
@@ -210,11 +214,11 @@ fun FamilySettingsScreen(
     }
     val selectedColorHex = customizationConfig.profileColorHex
 
-    // Expandable section states (collapsible so the menu stays compact)
-    var expandProfileIdentity by remember { mutableStateOf(true) }
-    var expandModularProfile by remember { mutableStateOf(true) }
+    // Expandable section states (all start collapsed by default so the screen stays compact and clean)
+    var expandStructuredAppearance by remember { mutableStateOf(false) }
+    var expandProfileIdentity by remember { mutableStateOf(false) }
+    var expandModularProfile by remember { mutableStateOf(false) }
     var expandHubBuilder by remember { mutableStateOf(false) }
-    var expandVisualStudio by remember { mutableStateOf(false) }
     var expandFamilySync by remember { mutableStateOf(false) }
 
     var targetCodeInput by remember { mutableStateOf("") }
@@ -364,12 +368,107 @@ fun FamilySettingsScreen(
         }
 
         // =========================================================================
-        // EXPANDABLE SECTION 1: FOTO DO PERFIL, NOME & COR NA AGENDA FAMILIAR
+        // CENTRAL DE ATUALIZAÇÕES EM TEMPO REAL (AUTO-UPDATE CHECKER)
+        // =========================================================================
+        if (updateState != null && updateManager != null) {
+            item {
+                AppUpdateControlCenterCard(
+                    updateState = updateState,
+                    updateManager = updateManager,
+                    onShowMessage = onShowMessage
+                )
+            }
+        }
+
+        // =========================================================================
+        // EXPANDABLE SECTION 1: APARÊNCIA UNIFICADA, CORES POR MÓDULO, TEMAS & LAYOUT
         // =========================================================================
         item {
             ExpandableProfileSectionCard(
-                title = "1. Foto do Perfil & Cor na Agenda",
-                subtitle = "Escolha sua foto e a cor das suas tarefas na agenda familiar",
+                title = "1. Aparência, Cores dos Módulos & Temas",
+                subtitle = "Cores dos 5 módulos, sugestões de tema, estilo orgânico e layout (${customizationConfig.agendaLayoutMode.lowercase().replaceFirstChar { it.uppercase() }})",
+                icon = Icons.Default.Palette,
+                accentColor = selectedMemberColor,
+                expanded = expandStructuredAppearance,
+                onToggleExpand = { expandStructuredAppearance = !expandStructuredAppearance },
+                testTag = "section_structured_appearance"
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    StructuredAppearanceCard(
+                        config = customizationConfig,
+                        customizationRepo = customizationRepo,
+                        onOpenFullPalette = onOpenCustomizationStudio
+                    )
+
+                    // Modo Base Claro / Escuro / Automático + Acesso às Fontes e Sons
+                    Surface(
+                        shape = RoundedCornerShape(24.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.DarkMode,
+                                    contentDescription = null,
+                                    tint = selectedMemberColor,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Modo Base (Claro / Escuro):",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                listOf(
+                                    "SYSTEM" to "Automático",
+                                    "LIGHT" to "Claro",
+                                    "DARK" to "Escuro"
+                                ).forEach { (mode, label) ->
+                                    FilterChip(
+                                        selected = activeTheme == mode,
+                                        onClick = { onChangeThemeMode(mode) },
+                                        label = { Text(label) },
+                                        shape = RoundedCornerShape(50),
+                                        modifier = Modifier.testTag("theme_chip_$mode")
+                                    )
+                                }
+                            }
+
+                            FilledTonalButton(
+                                onClick = onOpenCustomizationStudio,
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("family_open_studio_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Palette,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Personalizar 10 Fontes & Toques de Alarme")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // EXPANDABLE SECTION 2: FOTO & NOME DO PERFIL
+        // =========================================================================
+        item {
+            ExpandableProfileSectionCard(
+                title = "2. Foto & Nome do Perfil",
+                subtitle = "Escolha sua foto de perfil e como seu nome aparece para a família",
                 icon = Icons.Default.Person,
                 accentColor = selectedMemberColor,
                 expanded = expandProfileIdentity,
@@ -455,7 +554,7 @@ fun FamilySettingsScreen(
                             onValueChange = { nameInput = it },
                             label = { Text("Seu Nome na Agenda Familiar") },
                             singleLine = true,
-                            shape = RoundedCornerShape(18.dp),
+                            shape = RoundedCornerShape(22.dp),
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("profile_name_input")
@@ -466,81 +565,12 @@ fun FamilySettingsScreen(
                                 customizationRepo.updateProfileIdentity(clean, selectedColorHex)
                                 onUpdateProfileIdentity(clean, selectedColorHex)
                             },
-                            shape = RoundedCornerShape(18.dp),
+                            shape = RoundedCornerShape(50),
                             modifier = Modifier
                                 .height(54.dp)
                                 .testTag("save_profile_name_btn")
                         ) {
                             Text("Salvar", fontWeight = FontWeight.Bold)
-                        }
-                    }
-
-                    // 10 Member Agenda Colors Grid
-                    Text(
-                        text = "Cor das suas tarefas na Agenda Familiar:",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        CustomizationCatalog.memberAgendaColors.forEach { (swatchName, swatchColorHex) ->
-                            val isSelected = swatchColorHex == selectedColorHex
-                            val swatchColor = Color(swatchColorHex.toInt())
-
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = if (isSelected) {
-                                    swatchColor.copy(alpha = 0.22f)
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                                },
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(50))
-                                    .border(
-                                        width = if (isSelected) 2.dp else 1.dp,
-                                        color = if (isSelected) swatchColor else Color.Transparent,
-                                        shape = RoundedCornerShape(50)
-                                    )
-                                    .clickable {
-                                        val clean = nameInput.trim().ifBlank { "Você" }
-                                        customizationRepo.updateProfileIdentity(clean, swatchColorHex)
-                                        onUpdateProfileIdentity(clean, swatchColorHex)
-                                    }
-                                    .testTag("member_color_swatch_$swatchName")
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(20.dp)
-                                            .clip(CircleShape)
-                                            .background(swatchColor),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        if (isSelected) {
-                                            Icon(
-                                                imageVector = Icons.Default.Check,
-                                                contentDescription = "Selecionada",
-                                                tint = Color.White,
-                                                modifier = Modifier.size(13.dp)
-                                            )
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = swatchName,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isSelected) swatchColor else MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                            }
                         }
                     }
                 }
@@ -693,70 +723,6 @@ fun FamilySettingsScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Restaurar Padrão do Hub")
-                    }
-                }
-            }
-        }
-
-        // =========================================================================
-        // EXPANDABLE SECTION 3: TEMAS, CORES DO APP, 10 FONTES & TOQUES DE ALARME
-        // =========================================================================
-        item {
-            ExpandableProfileSectionCard(
-                title = "3. Temas, Cores, Fontes e Toques",
-                subtitle = "Troque o fundo, cartões, letras, 10 fontes e som das notificações",
-                icon = Icons.Default.Palette,
-                accentColor = MaterialTheme.colorScheme.secondary,
-                expanded = expandVisualStudio,
-                onToggleExpand = { expandVisualStudio = !expandVisualStudio },
-                testTag = "section_visual_studio"
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.DarkMode,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Modo Base (Claro / Escuro):",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(
-                            "SYSTEM" to "Automático",
-                            "LIGHT" to "Claro",
-                            "DARK" to "Escuro"
-                        ).forEach { (mode, label) ->
-                            FilterChip(
-                                selected = activeTheme == mode,
-                                onClick = { onChangeThemeMode(mode) },
-                                label = { Text(label) },
-                                shape = RoundedCornerShape(50),
-                                modifier = Modifier.testTag("theme_chip_$mode")
-                            )
-                        }
-                    }
-
-                    Button(
-                        onClick = onOpenCustomizationStudio,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("family_open_studio_btn")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Palette,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Abrir Estúdio de Cores, Fontes & Toques")
                     }
                 }
             }
@@ -935,16 +901,34 @@ private fun ExpandableProfileSectionCard(
     content: @Composable () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
+    val organicShape = RoundedCornerShape(cardRadius)
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .border(
+                width = 1.dp,
+                color = accentColor.copy(alpha = if (expanded) 0.32f else 0.14f),
+                shape = organicShape
+            )
             .testTag(testTag),
-        shape = RoundedCornerShape(cardRadius),
+        shape = organicShape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 4.dp else 1.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    androidx.compose.ui.graphics.Brush.horizontalGradient(
+                        colors = listOf(
+                            accentColor.copy(alpha = if (expanded) 0.12f else 0.06f),
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.surface
+                        )
+                    )
+                )
+        ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -961,7 +945,7 @@ private fun ExpandableProfileSectionCard(
                         modifier = Modifier
                             .size(42.dp)
                             .clip(CircleShape)
-                            .background(accentColor.copy(alpha = 0.16f)),
+                            .background(accentColor.copy(alpha = 0.18f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -988,11 +972,20 @@ private fun ExpandableProfileSectionCard(
                     }
                 }
 
-                Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = if (expanded) "Recolher" else "Expandir",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Surface(
+                    shape = CircleShape,
+                    color = accentColor.copy(alpha = 0.12f),
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (expanded) "Recolher" else "Expandir",
+                            tint = accentColor,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
             }
 
             AnimatedVisibility(visible = expanded) {

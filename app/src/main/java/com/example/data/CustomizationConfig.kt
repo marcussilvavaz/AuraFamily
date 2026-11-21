@@ -18,7 +18,12 @@ data class ThemePresetInfo(
     val cardHex: Long,
     val textHex: Long,
     val primaryHex: Long,
-    val accentHex: Long
+    val accentHex: Long,
+    val hubColorHex: Long = primaryHex,
+    val agendaColorHex: Long = accentHex,
+    val healthColorHex: Long = 0xFF10B981,
+    val diaryColorHex: Long = 0xFF8B5CF6,
+    val financeColorHex: Long = 0xFFE09F3E
 )
 
 data class FontChoiceInfo(
@@ -35,17 +40,45 @@ data class HubWidgetCatalogItem(
 
 object HubWidgetIds {
     const val TASKS_TODAY = "TASKS_TODAY"
+    const val HEALTH_SUMMARY = "HEALTH_SUMMARY"
     const val BALANCE_RING = "BALANCE_RING"
     const val BILLS_CURRENCY = "BILLS_CURRENCY"
     const val FAMILY_COLORS = "FAMILY_COLORS"
 
     val defaultOrder: List<String> = listOf(
         TASKS_TODAY,
+        HEALTH_SUMMARY,
         BALANCE_RING,
         BILLS_CURRENCY,
         FAMILY_COLORS
     )
 }
+
+object AgendaLayoutMode {
+    const val COMPLETO = "COMPLETO"
+    const val SIMPLIFICADO = "SIMPLIFICADO"
+    const val MINIMO = "MINIMO"
+}
+
+object OrganicVisualStyle {
+    const val ORGANICO_FLUIDO = "ORGANICO_FLUIDO"
+    const val TRANSLUCIDO_GLASS = "TRANSLUCIDO_GLASS"
+    const val MINIMALISTA_ACOLHEDOR = "MINIMALISTA_ACOLHEDOR"
+}
+
+object AppModuleId {
+    const val HUB = "HUB"
+    const val AGENDA = "AGENDA"
+    const val HEALTH = "HEALTH"
+    const val DIARY = "DIARY"
+    const val FINANCE = "FINANCE"
+}
+
+data class ModuleColorSpec(
+    val moduleId: String,
+    val label: String,
+    val description: String
+)
 
 data class AppCustomizationConfig(
     val presetId: String = "EMERALD_GOLD",
@@ -56,7 +89,14 @@ data class AppCustomizationConfig(
     val primaryHex: Long = 0xFF0B6E4F,
     val accentHex: Long = 0xFFD4AF37,
     val fontFamilyId: String = "NUNITO",
-    val cardCornerRadiusDp: Int = 30,
+    val cardCornerRadiusDp: Int = 34,
+    val organicVisualStyle: String = OrganicVisualStyle.ORGANICO_FLUIDO,
+    // Cores Independentes para os 5 Módulos
+    val hubColorHex: Long = 0xFF118D5F,
+    val agendaColorHex: Long = 0xFFE88378,
+    val healthColorHex: Long = 0xFF00A896,
+    val diaryColorHex: Long = 0xFF8B5CF6,
+    val financeColorHex: Long = 0xFFE09F3E,
     val taskAlarmSoundUri: String = "",
     val taskAlarmSoundTitle: String = "Alarme Padrão do Sistema",
     val taskVibrateEnabled: Boolean = true,
@@ -65,9 +105,11 @@ data class AppCustomizationConfig(
     val billVibrateEnabled: Boolean = true,
     // Profile Identity (Photo + Name + Personal Color for Family Agenda)
     val profileName: String = "Você",
-    val profileColorHex: Long = 0xFF0B6E4F,
+    val profileColorHex: Long = 0xFFE88378,
     val profilePhotoPath: String = "",
     val profilePhotoVersion: Long = 0L,
+    // Structured Agenda Appearance & Layout Mode ("COMPLETO", "SIMPLIFICADO", "MINIMO")
+    val agendaLayoutMode: String = AgendaLayoutMode.COMPLETO,
     // Smartwatch Hub Builder Config
     val hubWidgetOrder: List<String> = HubWidgetIds.defaultOrder,
     val enabledHubWidgets: Set<String> = HubWidgetIds.defaultOrder.toSet(),
@@ -102,15 +144,57 @@ data class AppCustomizationConfig(
     fun dailyStateFor(dateIso: String): DailyState {
         return dailyStatesByDate[dateIso] ?: DailyState(dateIso = dateIso)
     }
+
+    fun colorForModule(moduleId: String): Long {
+        return when (moduleId) {
+            AppModuleId.HUB -> hubColorHex
+            AppModuleId.AGENDA -> agendaColorHex
+            AppModuleId.HEALTH -> healthColorHex
+            AppModuleId.DIARY -> diaryColorHex
+            AppModuleId.FINANCE -> financeColorHex
+            else -> primaryHex
+        }
+    }
 }
 
 object CustomizationCatalog {
+
+    val moduleSpecs: List<ModuleColorSpec> = listOf(
+        ModuleColorSpec(AppModuleId.HUB, "Hub", "Anéis smartwatch, saudação e resumo do lar"),
+        ModuleColorSpec(AppModuleId.AGENDA, "Agenda", "Linha do tempo, tarefas, pílulas e calendário"),
+        ModuleColorSpec(AppModuleId.HEALTH, "Saúde", "Inegociáveis, glicemia, pressão e gestação"),
+        ModuleColorSpec(AppModuleId.DIARY, "Diário", "Humor por hora, frases de turno e carta IA"),
+        ModuleColorSpec(AppModuleId.FINANCE, "Finanças", "Contas, orçamento 50/30/20 e metas")
+    )
+
+    // Paleta completa de cores orgânicas e vibrantes para personalizar cada módulo
+    val structuredAppColors: List<Pair<String, Long>> = listOf(
+        "Coral Structured" to 0xFFE88378,
+        "Esmeralda Aura" to 0xFF118D5F,
+        "Turquesa Saúde" to 0xFF00A896,
+        "Lavanda Diário" to 0xFF8B5CF6,
+        "Dourado Solar" to 0xFFE09F3E,
+        "Tangerina" to 0xFFE67E45,
+        "Amarelo Solar" to 0xFFF5C132,
+        "Verde Folha" to 0xFF6BB848,
+        "Azul Céu" to 0xFF5E9AD6,
+        "Azul Royal" to 0xFF0971E6,
+        "Rosé Afeto" to 0xFFD84B72,
+        "Rubi" to 0xFFD84949,
+        "Índigo Sereno" to 0xFF6366F1,
+        "Cinza Neutro" to 0xFF8E99A4
+    )
 
     val hubWidgets: List<HubWidgetCatalogItem> = listOf(
         HubWidgetCatalogItem(
             id = HubWidgetIds.TASKS_TODAY,
             title = "Tarefas do Dia & Próximos Alarmes",
             subtitle = "Anel de progresso diário, cor do membro e check rápido"
+        ),
+        HubWidgetCatalogItem(
+            id = HubWidgetIds.HEALTH_SUMMARY,
+            title = "Saúde, Inegociáveis & Medições",
+            subtitle = "Trackers diários, últimas medições (Glicemia/Pressão) e timer 1h"
         ),
         HubWidgetCatalogItem(
             id = HubWidgetIds.BALANCE_RING,
@@ -129,63 +213,88 @@ object CustomizationCatalog {
         )
     )
 
-    val memberAgendaColors: List<Pair<String, Long>> = listOf(
-        "Verde Esmeralda" to 0xFF0B6E4F,
-        "Dourado Solar" to 0xFFD4AF37,
-        "Roxo Lavanda" to 0xFF7C4DFF,
-        "Azul Oceano" to 0xFF0077B6,
-        "Coral Vibrante" to 0xFFE15554,
-        "Rosé Afeto" to 0xFFD84B72,
-        "Turquesa Vivo" to 0xFF00A896,
-        "Laranja Terracota" to 0xFFC85A32,
-        "Índigo Real" to 0xFF4F46E5,
-        "Verde Menta" to 0xFF10B981
-    )
+    val memberAgendaColors: List<Pair<String, Long>> = structuredAppColors
 
     val presets: List<ThemePresetInfo> = listOf(
         ThemePresetInfo(
             id = "EMERALD_GOLD",
-            name = "Esmeralda & Dourado",
-            subtitle = "Fresco, orgânico e elegante",
+            name = "Aura Orgânica",
+            subtitle = "Esmeralda, coral suave e dourado acolhedor",
             isDark = false,
             backgroundHex = 0xFFF2F7F4,
             cardHex = 0xFFFFFFFF,
             textHex = 0xFF10221A,
             primaryHex = 0xFF0B6E4F,
-            accentHex = 0xFFD4AF37
+            accentHex = 0xFFD4AF37,
+            hubColorHex = 0xFF118D5F,
+            agendaColorHex = 0xFFE88378,
+            healthColorHex = 0xFF00A896,
+            diaryColorHex = 0xFF8B5CF6,
+            financeColorHex = 0xFFE09F3E
+        ),
+        ThemePresetInfo(
+            id = "STRUCTURED_DARK",
+            name = "Structured Coral (Escuro)",
+            subtitle = "Fundo obsidiana suave com coral, menta e lavanda",
+            isDark = true,
+            backgroundHex = 0xFF111317,
+            cardHex = 0xFF1B1E24,
+            textHex = 0xFFF3F4F6,
+            primaryHex = 0xFFE88378,
+            accentHex = 0xFF34D399,
+            hubColorHex = 0xFF34D399,
+            agendaColorHex = 0xFFE88378,
+            healthColorHex = 0xFF38BDF8,
+            diaryColorHex = 0xFFA78BFA,
+            financeColorHex = 0xFFFBBF24
         ),
         ThemePresetInfo(
             id = "WARM_TERRACOTTA",
-            name = "Terracota Acolhedor",
-            subtitle = "Tons quentes de argila e areia para o lar",
+            name = "Terracota & Sol",
+            subtitle = "Tons quentes de argila, âmbar e sálvia",
             isDark = false,
             backgroundHex = 0xFFFDF6F0,
             cardHex = 0xFFFFFFFF,
             textHex = 0xFF2D1A12,
             primaryHex = 0xFFC85A32,
-            accentHex = 0xFFE09F3E
+            accentHex = 0xFFE09F3E,
+            hubColorHex = 0xFFC85A32,
+            agendaColorHex = 0xFFE67E45,
+            healthColorHex = 0xFF6BB848,
+            diaryColorHex = 0xFFD84B72,
+            financeColorHex = 0xFFE09F3E
         ),
         ThemePresetInfo(
             id = "LAVENDER_CALM",
-            name = "Lavanda Sereno",
-            subtitle = "Suave, relaxante e criativo",
+            name = "Lavanda & Sereno",
+            subtitle = "Suave, relaxante e poético",
             isDark = false,
             backgroundHex = 0xFFF6F4FB,
             cardHex = 0xFFFFFFFF,
             textHex = 0xFF1F1833,
             primaryHex = 0xFF6C4AB6,
-            accentHex = 0xFFB983FF
+            accentHex = 0xFFB983FF,
+            hubColorHex = 0xFF6C4AB6,
+            agendaColorHex = 0xFF8B5CF6,
+            healthColorHex = 0xFF00A896,
+            diaryColorHex = 0xFFD84B72,
+            financeColorHex = 0xFF5E9AD6
         ),
         ThemePresetInfo(
             id = "OCEAN_BREEZE",
             name = "Brisa do Oceano",
-            subtitle = "Azul profundo e água-marinha",
+            subtitle = "Azul profundo, turquesa e coral marinho",
             isDark = false,
             backgroundHex = 0xFFF0F7FA,
             cardHex = 0xFFFFFFFF,
             textHex = 0xFF0E2431,
             primaryHex = 0xFF0077B6,
-            accentHex = 0xFF00B4D8
+            accentHex = 0xFF00B4D8,
+            hubColorHex = 0xFF0077B6,
+            agendaColorHex = 0xFF5E9AD6,
+            healthColorHex = 0xFF00A896,
+            diaryColorHex = 0xFF6366F1,
+            financeColorHex = 0xFF118D5F
         ),
         ThemePresetInfo(
             id = "ROSE_PEACH",
@@ -196,40 +305,44 @@ object CustomizationCatalog {
             cardHex = 0xFFFFFFFF,
             textHex = 0xFF33151E,
             primaryHex = 0xFFD84B72,
-            accentHex = 0xFFF4978E
-        ),
-        ThemePresetInfo(
-            id = "CAFE_CREAM",
-            name = "Café & Creme",
-            subtitle = "Editorial aconchegante em tons de cappuccino",
-            isDark = false,
-            backgroundHex = 0xFFF9F5F0,
-            cardHex = 0xFFFFFFFF,
-            textHex = 0xFF291D15,
-            primaryHex = 0xFF7F5539,
-            accentHex = 0xFFB08968
+            accentHex = 0xFFF4978E,
+            hubColorHex = 0xFFD84B72,
+            agendaColorHex = 0xFFE88378,
+            healthColorHex = 0xFF118D5F,
+            diaryColorHex = 0xFF8B5CF6,
+            financeColorHex = 0xFFE67E45
         ),
         ThemePresetInfo(
             id = "FOREST_NIGHT",
             name = "Floresta Noturna (Escuro)",
-            subtitle = "Verde obsidiana profundo com menta",
+            subtitle = "Verde obsidiana profundo com menta e coral",
             isDark = true,
             backgroundHex = 0xFF091410,
             cardHex = 0xFF132620,
             textHex = 0xFFE9F5F0,
             primaryHex = 0xFF34D399,
-            accentHex = 0xFFF3C65F
+            accentHex = 0xFFF3C65F,
+            hubColorHex = 0xFF34D399,
+            agendaColorHex = 0xFFE88378,
+            healthColorHex = 0xFF2DD4BF,
+            diaryColorHex = 0xFFA78BFA,
+            financeColorHex = 0xFFF3C65F
         ),
         ThemePresetInfo(
             id = "STARRY_DARK",
             name = "Noite Estrelada (Escuro)",
-            subtitle = "Azul meia-noite com violeta e ouro",
+            subtitle = "Azul meia-noite com violeta, céu e ouro",
             isDark = true,
             backgroundHex = 0xFF0B0F1A,
             cardHex = 0xFF161D2F,
             textHex = 0xFFEDF2FB,
             primaryHex = 0xFF818CF8,
-            accentHex = 0xFFFBBF24
+            accentHex = 0xFFFBBF24,
+            hubColorHex = 0xFF818CF8,
+            agendaColorHex = 0xFF5E9AD6,
+            healthColorHex = 0xFF34D399,
+            diaryColorHex = 0xFFC084FC,
+            financeColorHex = 0xFFFBBF24
         )
     )
 
@@ -340,10 +453,14 @@ class CustomizationRepository(context: Context) {
         val enabledSet = if (savedEnabledRaw == null) {
             HubWidgetIds.defaultOrder.toSet()
         } else {
-            savedEnabledRaw.split(",")
+            val baseSet = savedEnabledRaw.split(",")
                 .map { it.trim() }
                 .filter { it in HubWidgetIds.defaultOrder }
-                .toSet()
+                .toMutableSet()
+            if (savedOrderRaw != null && !savedOrderRaw.contains(HubWidgetIds.HEALTH_SUMMARY)) {
+                baseSet.add(HubWidgetIds.HEALTH_SUMMARY)
+            }
+            baseSet
         }
 
         val savedPhotoPath = prefs.getString(KEY_PROFILE_PHOTO_PATH, "") ?: ""
@@ -375,7 +492,14 @@ class CustomizationRepository(context: Context) {
             primaryHex = prefs.getLong(KEY_PRIMARY_HEX, preset.primaryHex),
             accentHex = prefs.getLong(KEY_ACCENT_HEX, preset.accentHex),
             fontFamilyId = prefs.getString(KEY_FONT_ID, "NUNITO") ?: "NUNITO",
-            cardCornerRadiusDp = prefs.getInt(KEY_CORNER_RADIUS, 30),
+            cardCornerRadiusDp = prefs.getInt(KEY_CORNER_RADIUS, 34),
+            organicVisualStyle = prefs.getString(KEY_ORGANIC_VISUAL_STYLE, OrganicVisualStyle.ORGANICO_FLUIDO)
+                ?: OrganicVisualStyle.ORGANICO_FLUIDO,
+            hubColorHex = prefs.getLong(KEY_HUB_COLOR_HEX, preset.hubColorHex),
+            agendaColorHex = prefs.getLong(KEY_AGENDA_COLOR_HEX, prefs.getLong(KEY_PROFILE_COLOR_HEX, preset.agendaColorHex)),
+            healthColorHex = prefs.getLong(KEY_HEALTH_COLOR_HEX, preset.healthColorHex),
+            diaryColorHex = prefs.getLong(KEY_DIARY_COLOR_HEX, preset.diaryColorHex),
+            financeColorHex = prefs.getLong(KEY_FINANCE_COLOR_HEX, preset.financeColorHex),
             taskAlarmSoundUri = prefs.getString(KEY_TASK_SOUND_URI, defaultTaskUri) ?: defaultTaskUri,
             taskAlarmSoundTitle = prefs.getString(KEY_TASK_SOUND_TITLE, "Alarme Padrão do Sistema")
                 ?: "Alarme Padrão do Sistema",
@@ -385,9 +509,11 @@ class CustomizationRepository(context: Context) {
                 ?: "Notificação Padrão do Sistema",
             billVibrateEnabled = prefs.getBoolean(KEY_BILL_VIBRATE, true),
             profileName = prefs.getString(KEY_PROFILE_NAME, "Você") ?: "Você",
-            profileColorHex = prefs.getLong(KEY_PROFILE_COLOR_HEX, 0xFF0B6E4F),
+            profileColorHex = prefs.getLong(KEY_PROFILE_COLOR_HEX, prefs.getLong(KEY_AGENDA_COLOR_HEX, 0xFFE88378)),
             profilePhotoPath = validPhotoPath,
             profilePhotoVersion = prefs.getLong(KEY_PROFILE_PHOTO_VERSION, 0L),
+            agendaLayoutMode = prefs.getString(KEY_AGENDA_LAYOUT_MODE, AgendaLayoutMode.COMPLETO)
+                ?: AgendaLayoutMode.COMPLETO,
             hubWidgetOrder = completeOrder,
             enabledHubWidgets = enabledSet,
             hasCompletedModularOnboarding = prefs.getBoolean(KEY_HAS_COMPLETED_ONBOARDING, false),
@@ -464,6 +590,12 @@ class CustomizationRepository(context: Context) {
             .putLong(KEY_ACCENT_HEX, updated.accentHex)
             .putString(KEY_FONT_ID, updated.fontFamilyId)
             .putInt(KEY_CORNER_RADIUS, updated.cardCornerRadiusDp)
+            .putString(KEY_ORGANIC_VISUAL_STYLE, updated.organicVisualStyle)
+            .putLong(KEY_HUB_COLOR_HEX, updated.hubColorHex)
+            .putLong(KEY_AGENDA_COLOR_HEX, updated.agendaColorHex)
+            .putLong(KEY_HEALTH_COLOR_HEX, updated.healthColorHex)
+            .putLong(KEY_DIARY_COLOR_HEX, updated.diaryColorHex)
+            .putLong(KEY_FINANCE_COLOR_HEX, updated.financeColorHex)
             .putString(KEY_TASK_SOUND_URI, updated.taskAlarmSoundUri)
             .putString(KEY_TASK_SOUND_TITLE, updated.taskAlarmSoundTitle)
             .putBoolean(KEY_TASK_VIBRATE, updated.taskVibrateEnabled)
@@ -474,6 +606,7 @@ class CustomizationRepository(context: Context) {
             .putLong(KEY_PROFILE_COLOR_HEX, updated.profileColorHex)
             .putString(KEY_PROFILE_PHOTO_PATH, updated.profilePhotoPath)
             .putLong(KEY_PROFILE_PHOTO_VERSION, updated.profilePhotoVersion)
+            .putString(KEY_AGENDA_LAYOUT_MODE, updated.agendaLayoutMode)
             .putString(KEY_HUB_WIDGET_ORDER, updated.hubWidgetOrder.joinToString(","))
             .putString(KEY_HUB_ENABLED_WIDGETS, updated.enabledHubWidgets.joinToString(","))
             .putBoolean(KEY_HAS_COMPLETED_ONBOARDING, updated.hasCompletedModularOnboarding)
@@ -497,6 +630,64 @@ class CustomizationRepository(context: Context) {
             .putString(KEY_DAILY_STATES_JSON, serializeDailyStates(updated.dailyStatesByDate))
             .apply()
         _configFlow.value = updated
+    }
+
+    fun updateAgendaLayoutMode(layoutMode: String) {
+        val valid = when (layoutMode) {
+            AgendaLayoutMode.COMPLETO,
+            AgendaLayoutMode.SIMPLIFICADO,
+            AgendaLayoutMode.MINIMO -> layoutMode
+            else -> AgendaLayoutMode.COMPLETO
+        }
+        val current = _configFlow.value
+        saveAndEmit(current.copy(agendaLayoutMode = valid))
+    }
+
+    fun updateOrganicVisualStyle(style: String) {
+        val valid = when (style) {
+            OrganicVisualStyle.ORGANICO_FLUIDO,
+            OrganicVisualStyle.TRANSLUCIDO_GLASS,
+            OrganicVisualStyle.MINIMALISTA_ACOLHEDOR -> style
+            else -> OrganicVisualStyle.ORGANICO_FLUIDO
+        }
+        val radius = when (valid) {
+            OrganicVisualStyle.ORGANICO_FLUIDO -> 34
+            OrganicVisualStyle.TRANSLUCIDO_GLASS -> 30
+            OrganicVisualStyle.MINIMALISTA_ACOLHEDOR -> 28
+            else -> 34
+        }
+        val current = _configFlow.value
+        saveAndEmit(
+            current.copy(
+                organicVisualStyle = valid,
+                cardCornerRadiusDp = radius
+            )
+        )
+    }
+
+    fun updateModuleColor(moduleId: String, colorHex: Long) {
+        val current = _configFlow.value
+        val updated = when (moduleId) {
+            AppModuleId.HUB -> current.copy(hubColorHex = colorHex, primaryHex = colorHex)
+            AppModuleId.AGENDA -> current.copy(agendaColorHex = colorHex, profileColorHex = colorHex)
+            AppModuleId.HEALTH -> current.copy(healthColorHex = colorHex)
+            AppModuleId.DIARY -> current.copy(diaryColorHex = colorHex)
+            AppModuleId.FINANCE -> current.copy(financeColorHex = colorHex)
+            else -> current.copy(primaryHex = colorHex, profileColorHex = colorHex)
+        }
+        saveAndEmit(updated)
+    }
+
+    fun updateStructuredAppColor(colorHex: Long) {
+        val current = _configFlow.value
+        saveAndEmit(
+            current.copy(
+                useCustomColors = true,
+                primaryHex = colorHex,
+                agendaColorHex = colorHex,
+                profileColorHex = colorHex
+            )
+        )
     }
 
     // =========================================================================
@@ -671,7 +862,8 @@ class CustomizationRepository(context: Context) {
         saveAndEmit(
             current.copy(
                 profileName = name.trim().ifBlank { "Você" },
-                profileColorHex = colorHex
+                profileColorHex = colorHex,
+                agendaColorHex = colorHex
             )
         )
     }
@@ -756,7 +948,13 @@ class CustomizationRepository(context: Context) {
                 cardHex = preset.cardHex,
                 textHex = preset.textHex,
                 primaryHex = preset.primaryHex,
-                accentHex = preset.accentHex
+                accentHex = preset.accentHex,
+                hubColorHex = preset.hubColorHex,
+                agendaColorHex = preset.agendaColorHex,
+                healthColorHex = preset.healthColorHex,
+                diaryColorHex = preset.diaryColorHex,
+                financeColorHex = preset.financeColorHex,
+                profileColorHex = preset.agendaColorHex
             )
         )
     }
@@ -864,5 +1062,12 @@ class CustomizationRepository(context: Context) {
         private const val KEY_AI_SUPPORT_LETTER_ENABLED = "ai_support_letter_enabled"
         private const val KEY_CURRENT_STREAK_DAYS = "current_streak_days"
         private const val KEY_DAILY_STATES_JSON = "daily_states_json"
+        private const val KEY_AGENDA_LAYOUT_MODE = "agenda_layout_mode"
+        private const val KEY_ORGANIC_VISUAL_STYLE = "organic_visual_style"
+        private const val KEY_HUB_COLOR_HEX = "hub_color_hex"
+        private const val KEY_AGENDA_COLOR_HEX = "agenda_color_hex"
+        private const val KEY_HEALTH_COLOR_HEX = "health_color_hex"
+        private const val KEY_DIARY_COLOR_HEX = "diary_color_hex"
+        private const val KEY_FINANCE_COLOR_HEX = "finance_color_hex"
     }
 }

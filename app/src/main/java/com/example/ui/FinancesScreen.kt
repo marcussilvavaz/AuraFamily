@@ -278,116 +278,98 @@ fun FinancesScreen(
             }
         }
 
-        // 2. Interactive Multi-Currency Converter Card
+        // 2. Interactive Multi-Currency Converter Card (Menu Expansível)
         item {
             val amountVal = quickConverterAmountText.replace(",", ".").toDoubleOrNull() ?: 0.0
             val rate = currencyRates.rateFor(quickConverterCurrency)
             val convertedBrl = amountVal * rate
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(cardRadius),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            AuraExpandableSectionCard(
+                title = "💱 Simulador & Câmbio Automático (BRL)",
+                subtitle = "${currencyRates.lastUpdatedLabel} • 1 $quickConverterCurrency = ${String.format(Locale("pt", "BR"), "R$ %.2f", rate)}",
+                icon = Icons.Default.CurrencyExchange,
+                accentColor = MaterialTheme.colorScheme.primary,
+                badgeText = formatCurrencyBrl(convertedBrl),
+                initiallyExpanded = false,
+                testTag = "expandable_currency_converter_card"
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.CurrencyExchange,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = "Simulador & Câmbio Automático (BRL)",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = currencyRates.lastUpdatedLabel,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-
-                        Row {
-                            IconButton(
-                                onClick = { showEditRatesDialog = true },
-                                modifier = Modifier.testTag("edit_rates_btn")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Edit,
-                                    contentDescription = "Ajustar taxas manualmente"
-                                )
-                            }
-                            IconButton(onClick = onRefreshRates) {
-                                Icon(
-                                    imageVector = Icons.Default.Refresh,
-                                    contentDescription = "Atualizar cotações"
-                                )
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = quickConverterAmountText,
-                            onValueChange = { quickConverterAmountText = it },
-                            label = { Text("Valor em $quickConverterCurrency") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("converter_amount_input")
-                        )
-
-                        Column(
-                            horizontalAlignment = Alignment.End,
-                            modifier = Modifier.weight(1f)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = currencyRates.lastUpdatedLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row {
+                        IconButton(
+                            onClick = { showEditRatesDialog = true },
+                            modifier = Modifier.testTag("edit_rates_btn")
                         ) {
-                            Text(
-                                text = "Equivalente em Real",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Ajustar taxas manualmente"
                             )
-                            Text(
-                                text = formatCurrencyBrl(convertedBrl),
-                                style = MaterialTheme.typography.titleLarge,
-                                fontFamily = JetBrainsMonoFontFamily,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                text = String.format(Locale("pt", "BR"), "1 %s = R$ %.2f", quickConverterCurrency, rate),
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = JetBrainsMonoFontFamily,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                        IconButton(onClick = onRefreshRates) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Atualizar cotações"
                             )
                         }
                     }
+                }
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = quickConverterAmountText,
+                        onValueChange = { quickConverterAmountText = it },
+                        label = { Text("Valor em $quickConverterCurrency") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("converter_amount_input")
+                    )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("USD", "EUR", "GBP").forEach { code ->
-                            FilterChip(
-                                selected = quickConverterCurrency == code,
-                                onClick = { quickConverterCurrency = code },
-                                label = { Text("$code (${currencyRates.symbolFor(code)})") }
-                            )
-                        }
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "Equivalente em Real",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = formatCurrencyBrl(convertedBrl),
+                            style = MaterialTheme.typography.titleLarge,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = String.format(Locale("pt", "BR"), "1 %s = R$ %.2f", quickConverterCurrency, rate),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("USD", "EUR", "GBP").forEach { code ->
+                        FilterChip(
+                            selected = quickConverterCurrency == code,
+                            onClick = { quickConverterCurrency = code },
+                            label = { Text("$code (${currencyRates.symbolFor(code)})") }
+                        )
                     }
                 }
             }
@@ -985,7 +967,19 @@ fun AddTransactionDialog(
     var generateCalendarTask by remember { mutableStateOf(true) }
 
     val currencies = listOf("BRL", "USD", "EUR", "GBP")
-    val expenseCategories = listOf("Alimentação", "Moradia", "Transporte", "Lazer", "Saúde", "Educação", "Tecnologia")
+    val expenseCategories = listOf(
+        "Alimentação",
+        "Moradia",
+        "Farmácia",
+        "Exames",
+        "Consultas",
+        "Pré-Natal",
+        "Saúde",
+        "Transporte",
+        "Lazer",
+        "Educação",
+        "Tecnologia"
+    )
     val incomeCategories = listOf("Salário", "Freelance", "Rendimentos", "Bônus")
 
     val parsedAmount = amountText.replace(",", ".").toDoubleOrNull() ?: 0.0
@@ -1089,9 +1083,32 @@ fun AddTransactionDialog(
 
                 OutlinedTextField(
                     value = title,
-                    onValueChange = { title = it },
-                    label = { Text("Descrição") },
-                    placeholder = { Text("Ex: Supermercado / Conta de Luz / Cartão") },
+                    onValueChange = { newTitle ->
+                        title = newTitle
+                        if (type == "EXPENSE") {
+                            val lower = newTitle.lowercase(Locale.ROOT)
+                            when {
+                                lower.contains("farm") || lower.contains("reméd") || lower.contains("remed") || lower.contains("vitamina") || lower.contains("insulina") -> {
+                                    category = "Farmácia"
+                                    budgetBucket = "NEEDS"
+                                }
+                                lower.contains("exame") || lower.contains("ultrassom") || lower.contains("sangue") || lower.contains("laborat") || lower.contains("curva") -> {
+                                    category = "Exames"
+                                    budgetBucket = "NEEDS"
+                                }
+                                lower.contains("consulta") || lower.contains("médic") || lower.contains("medic") || lower.contains("obstetra") || lower.contains("cardio") -> {
+                                    category = "Consultas"
+                                    budgetBucket = "NEEDS"
+                                }
+                                lower.contains("gesta") || lower.contains("bebê") || lower.contains("bebe") || lower.contains("enxoval") || lower.contains("pré-natal") || lower.contains("prenatal") -> {
+                                    category = "Pré-Natal"
+                                    budgetBucket = "NEEDS"
+                                }
+                            }
+                        }
+                    },
+                    label = { Text("Descrição (sugere Farmácia/Exames automaticamente)") },
+                    placeholder = { Text("Ex: Farmácia / Exame de Sangue / Supermercado / Luz") },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1462,7 +1479,7 @@ private fun AddSubscriptionDialog(
                     fontWeight = FontWeight.SemiBold
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("Moradia", "Energia", "Internet", "Streaming", "Educação", "Saúde").forEach { cat ->
+                    listOf("Moradia", "Energia", "Farmácia", "Exames", "Consultas", "Pré-Natal", "Saúde", "Internet", "Streaming", "Educação").forEach { cat ->
                         FilterChip(
                             selected = category == cat,
                             onClick = {

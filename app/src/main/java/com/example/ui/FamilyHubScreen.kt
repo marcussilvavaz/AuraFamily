@@ -107,12 +107,18 @@ fun FamilyHubScreen(
     savingsGoals: List<SavingsGoal>,
     currencyRates: CurrencyRatesState,
     customizationConfig: AppCustomizationConfig,
+    healthState: com.example.data.HealthModuleState = com.example.data.HealthModuleState(),
+    diaryState: com.example.data.PrivateDiaryState? = null,
     onShiftMonth: (Int) -> Unit,
     onToggleTask: (TaskItem) -> Unit,
     onPostSubscriptionNow: (SubscriptionBill) -> Unit,
+    onIncrementHealthTracker: (dateIso: String, trackerId: String, step: Int) -> Unit = { _, _, _ -> },
+    onNextShiftQuote: () -> Unit = {},
     onOpenNewTaskDialog: () -> Unit,
     onOpenNewTransactionDialog: () -> Unit,
     onOpenAgendaScreen: () -> Unit,
+    onOpenHealthScreen: () -> Unit = {},
+    onOpenDiaryScreen: () -> Unit = {},
     onOpenFinanceScreen: (subSection: Int) -> Unit,
     onOpenProfileSettings: () -> Unit
 ) {
@@ -122,6 +128,7 @@ fun FamilyHubScreen(
     val expandedWidgets = remember {
         mutableStateMapOf(
             HubWidgetIds.TASKS_TODAY to false,
+            HubWidgetIds.HEALTH_SUMMARY to false,
             HubWidgetIds.BALANCE_RING to false,
             HubWidgetIds.BILLS_CURRENCY to false,
             HubWidgetIds.FAMILY_COLORS to false
@@ -340,7 +347,7 @@ fun FamilyHubScreen(
                             FilledTonalButton(
                                 onClick = onOpenAgendaScreen,
                                 shape = RoundedCornerShape(50),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                 modifier = Modifier
                                     .height(36.dp)
                                     .testTag("enter_agenda_module_btn")
@@ -348,16 +355,27 @@ fun FamilyHubScreen(
                                 Icon(
                                     imageVector = Icons.Default.CalendarMonth,
                                     contentDescription = null,
-                                    modifier = Modifier.size(15.dp)
+                                    modifier = Modifier.size(14.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("Agenda", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                             }
 
                             FilledTonalButton(
+                                onClick = onOpenHealthScreen,
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .height(36.dp)
+                                    .testTag("enter_health_module_btn")
+                            ) {
+                                Text("🩺 Saúde", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                            }
+
+                            FilledTonalButton(
                                 onClick = { onOpenFinanceScreen(0) },
                                 shape = RoundedCornerShape(50),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                 modifier = Modifier
                                     .height(36.dp)
                                     .testTag("enter_finance_module_btn")
@@ -365,7 +383,7 @@ fun FamilyHubScreen(
                                 Icon(
                                     imageVector = Icons.Default.AccountBalanceWallet,
                                     contentDescription = null,
-                                    modifier = Modifier.size(15.dp)
+                                    modifier = Modifier.size(14.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("Finanças", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
@@ -373,6 +391,17 @@ fun FamilyHubScreen(
                         }
                     }
                 }
+            }
+        }
+
+        // PASSO 4: Frases Motivacionais por Turno (Manhã 05:00-11:59, Tarde 12:00-17:59, Noite 18:00-04:59) + Atalho Diário
+        if (customizationConfig.threeShiftQuotesEnabled && diaryState != null) {
+            item {
+                ShiftMotivationalQuoteCard(
+                    diaryState = diaryState,
+                    onNextQuote = onNextShiftQuote,
+                    onOpenDiary = onOpenDiaryScreen
+                )
             }
         }
 
@@ -478,6 +507,15 @@ fun FamilyHubScreen(
                         onToggleTask = onToggleTask,
                         onOpenNewTaskDialog = onOpenNewTaskDialog,
                         onOpenAgendaScreen = onOpenAgendaScreen
+                    )
+
+                    HubWidgetIds.HEALTH_SUMMARY -> SmartwatchHealthWidget(
+                        healthState = healthState,
+                        customizationConfig = customizationConfig,
+                        expanded = isExpanded,
+                        onToggleExpand = { expandedWidgets[widgetId] = !isExpanded },
+                        onIncrementTracker = onIncrementHealthTracker,
+                        onOpenHealthScreen = onOpenHealthScreen
                     )
 
                     HubWidgetIds.BALANCE_RING -> SmartwatchBalanceRingWidget(
@@ -1399,3 +1437,268 @@ private fun SmartwatchFamilyColorsWidget(
         }
     }
 }
+
+// ============================================================================
+// WIDGET 5: SAÚDE, INEGOCIÁVEIS & MEDIÇÕES (SMARTWATCH COMPACT TILE)
+// ============================================================================
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SmartwatchHealthWidget(
+    healthState: com.example.data.HealthModuleState,
+    customizationConfig: AppCustomizationConfig,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onIncrementTracker: (dateIso: String, trackerId: String, step: Int) -> Unit,
+    onOpenHealthScreen: () -> Unit
+) {
+    val cardRadius = LocalOrganicCardRadius.current
+    val todayIso = remember { DateCalendarUtils.formatIsoDate(DateCalendarUtils.todayEpochDay()) }
+    val totalTrackers = healthState.trackers.size.coerceAtLeast(1)
+    val completedTrackers = healthState.completedTrackersCount(todayIso)
+    val progressRatio = (completedTrackers.toFloat() / totalTrackers.toFloat()).coerceIn(0f, 1f)
+
+    val latestGlucose = healthState.glucoseRecords.firstOrNull()
+    val latestBp = healthState.bloodPressureRecords.firstOrNull()
+    val timer = healthState.postMealTimer
+    val ringColor = Color(0xFF0077B6)
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("smartwatch_widget_health"),
+        shape = RoundedCornerShape(cardRadius),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Compact Smartwatch Header Row (Always visible, taps to expand)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggleExpand() }
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    // Smartwatch Circular Progress Ring for Daily Trackers (Inegociáveis)
+                    Box(
+                        modifier = Modifier.size(54.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            val stroke = 6.dp.toPx()
+                            drawArc(
+                                color = ringColor.copy(alpha = 0.18f),
+                                startAngle = 0f,
+                                sweepAngle = 360f,
+                                useCenter = false,
+                                style = Stroke(width = stroke, cap = StrokeCap.Round)
+                            )
+                            drawArc(
+                                color = if (completedTrackers == totalTrackers) IncomeEmerald else ringColor,
+                                startAngle = -90f,
+                                sweepAngle = 360f * progressRatio,
+                                useCenter = false,
+                                style = Stroke(width = stroke, cap = StrokeCap.Round)
+                            )
+                        }
+                        Text(
+                            text = "$completedTrackers/$totalTrackers",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = if (completedTrackers == totalTrackers) IncomeEmerald else ringColor
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(14.dp))
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Saúde & Inegociáveis",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        val glucoseLabel = latestGlucose?.let { "🩸 ${it.valueMgDl} mg/dL" } ?: "🩸 Sem glicemia"
+                        val bpLabel = latestBp?.let { "❤️ ${it.systolic}/${it.diastolic} mmHg" } ?: "❤️ Sem pressão"
+                        Text(
+                            text = "$glucoseLabel • $bpLabel",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (timer.isRunning || timer.completedAlertPending) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (timer.completedAlertPending) {
+                                    "🔔 1h pós-${timer.mealLabel} concluída! Hora de medir"
+                                } else {
+                                    "⏱️ Timer 1h pós-${timer.mealLabel} em andamento"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (timer.completedAlertPending) ExpenseCoral else ringColor
+                            )
+                        } else if (customizationConfig.pregnancyEnabled) {
+                            val preg = com.example.data.PregnancyCalculator.calculateFromDpp(customizationConfig.pregnancyDppDate)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "🤰 Gestação: Semana ${preg.currentWeek} (+${preg.currentDaysRemainder}d)",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFD84B72)
+                            )
+                        }
+                    }
+                }
+
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Recolher" else "Expandir",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // Expandable Drawer with Quick Daily Trackers (+1) and Latest Measurements
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Marcação Rápida dos Inegociáveis de Hoje:",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    healthState.trackers.take(4).forEach { habit ->
+                        val currentVal = healthState.progressForTracker(todayIso, habit.id)
+                        val isDone = currentVal >= habit.targetValue
+                        val habitColor = Color(habit.colorHex.toInt())
+
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = habitColor.copy(alpha = 0.10f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, habitColor.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+                                .testTag("hub_health_tracker_${habit.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(text = habit.emoji, style = MaterialTheme.typography.titleMedium)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = habit.title,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "$currentVal / ${habit.targetValue} ${habit.unit}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isDone) IncomeEmerald else habitColor
+                                        )
+                                    }
+                                }
+
+                                FilledTonalButton(
+                                    onClick = { onIncrementTracker(todayIso, habit.id, habit.stepValue) },
+                                    shape = RoundedCornerShape(50),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.testTag("hub_tracker_plus_${habit.id}")
+                                ) {
+                                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    Text("+${habit.stepValue}", fontFamily = JetBrainsMonoFontFamily, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+
+                    // Latest clinical measurements summary chips
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(
+                                    text = "Última Glicemia",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = latestGlucose?.let { "${it.valueMgDl} mg/dL (${it.slot})" } ?: "Sem registro",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(
+                                    text = "Última Pressão",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = latestBp?.let { "${it.systolic}/${it.diastolic} mmHg" } ?: "Sem registro",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = onOpenHealthScreen,
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("hub_open_health_module_btn")
+                    ) {
+                        Text("Abrir Módulo de Saúde, Timer 1h & Relatório PDF")
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+

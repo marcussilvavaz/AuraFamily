@@ -24,13 +24,17 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.outlined.AccountBalanceWallet
+import androidx.compose.material.icons.outlined.Book
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -45,6 +49,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -62,10 +67,17 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.AppCustomizationConfig
+import com.example.data.AppUpdateManager
 import com.example.data.CustomizationRepository
+import com.example.data.HealthRepository
 import com.example.data.Household
+import com.example.data.LocalOfflineStore
+import com.example.data.PrivateDiaryRepository
 import com.example.data.UiState
 import com.example.viewmodel.AuraViewModel
 
@@ -86,7 +98,14 @@ fun MainFeatureScreen(
     onSignOut: () -> Unit
 ) {
     val context = LocalContext.current
-    // Tabs: 0 = Hub, 1 = Agenda, 2 = Finanças, 3 = Perfil & Configurações, 4 = Estúdio Visual Completo
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val healthRepo = remember { HealthRepository(context.applicationContext) }
+    val healthState by healthRepo.stateFlow.collectAsStateWithLifecycle()
+
+    val updateManager = remember { AppUpdateManager(context.applicationContext) }
+    val updateState by updateManager.uiState.collectAsStateWithLifecycle()
+
+    // Tabs: 0 = Hub, 1 = Agenda, 2 = Finanças, 3 = Perfil & Configurações, 4 = Estúdio Visual Completo, 5 = Saúde, 6 = Diário Privado
     var currentTab by rememberSaveable { mutableIntStateOf(0) }
     // Inside Finance Screen (Tab 2): 0 = Visão Geral, 1 = Gastos & Fixas, 2 = Economia 50/30/20
     var financeSubSection by rememberSaveable { mutableIntStateOf(0) }
@@ -101,6 +120,8 @@ fun MainFeatureScreen(
 
     var showAddTransactionDialog by remember { mutableStateOf(false) }
     var showModularOnboardingModal by rememberSaveable { mutableStateOf(false) }
+    var showVoiceCommandSheet by remember { mutableStateOf(false) }
+    var startVoiceListeningImmediately by remember { mutableStateOf(true) }
 
     // Mandatory BackHandler for secondary screens and manual onboarding modal
     if (showModularOnboardingModal) {
@@ -140,6 +161,25 @@ fun MainFeatureScreen(
     val savingsGoalsState by viewModel.savingsGoalsState.collectAsStateWithLifecycle()
 
     val userProfile = (userProfileState as? UiState.Success)?.data
+    val effectiveDiaryUserId = userProfile?.userId ?: LocalOfflineStore.LOCAL_USER_ID
+    val diaryRepo = remember(effectiveDiaryUserId) {
+        PrivateDiaryRepository(context.applicationContext, effectiveDiaryUserId)
+    }
+    val diaryState by diaryRepo.stateFlow.collectAsStateWithLifecycle()
+
+    DisposableEffect(lifecycleOwner, updateManager, diaryRepo) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                updateManager.checkNow()
+                diaryRepo.refreshShiftQuote(forceNewQuote = false)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     val household = (householdState as? UiState.Success)?.data
         ?: Household(
             householdId = userProfile?.householdId ?: "FAM_PADRAO",
@@ -164,6 +204,8 @@ fun MainFeatureScreen(
         listOf(
             NavDestination(0, "Hub", Icons.Filled.Home, Icons.Outlined.Home, "nav_tab_dashboard"),
             NavDestination(1, "Agenda", Icons.Filled.CalendarMonth, Icons.Outlined.CalendarMonth, "nav_tab_tasks"),
+            NavDestination(5, "Saúde", Icons.Filled.MonitorHeart, Icons.Outlined.MonitorHeart, "nav_tab_health"),
+            NavDestination(6, "Diário", Icons.Filled.Book, Icons.Outlined.Book, "nav_tab_diary"),
             NavDestination(2, "Finanças", Icons.Filled.AccountBalanceWallet, Icons.Outlined.AccountBalanceWallet, "nav_tab_finances"),
             NavDestination(3, "Perfil", Icons.Filled.Person, Icons.Outlined.Person, "nav_tab_family")
         )
@@ -176,6 +218,18 @@ fun MainFeatureScreen(
 
         Scaffold(
             contentWindowInsets = WindowInsets.safeDrawing,
+            floatingActionButton = {
+                GlobalVoiceMicFab(
+                    onOpenVoiceCommandSheet = { listenImmediately ->
+                        startVoiceListeningImmediately = listenImmediately
+                        showVoiceCommandSheet = true
+                    },
+                    onPermissionDeniedMessage = { msg ->
+                        localStudioBanner = msg
+                    },
+                    modifier = Modifier.padding(bottom = if (currentTab == 1) 72.dp else 0.dp)
+                )
+            },
             bottomBar = {
                 if (!isExpandedScreen) {
                     FloatingOrganicPillNavBar(
@@ -229,6 +283,18 @@ fun MainFeatureScreen(
                 ) {
                     if (isBusy) {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .widthIn(max = 760.dp)
+                    ) {
+                        AppUpdateTopPillBanner(
+                            updateState = updateState,
+                            onOpenUpdateModal = { updateManager.reopenUpdateModal() },
+                            onClearUpgradedBanner = { updateManager.clearJustUpgradedBanner() }
+                        )
                     }
 
                     AnimatedVisibility(visible = activeBanner != null) {
@@ -289,6 +355,14 @@ fun MainFeatureScreen(
                                 savingsGoals = savingsGoals,
                                 currencyRates = currencyRates,
                                 customizationConfig = customizationConfig,
+                                healthState = healthState,
+                                diaryState = diaryState,
+                                onIncrementHealthTracker = { dateIso, trackerId, step ->
+                                    healthRepo.incrementTrackerProgress(dateIso, trackerId, step)
+                                },
+                                onNextShiftQuote = { diaryRepo.refreshShiftQuote(forceNewQuote = true) },
+                                onOpenHealthScreen = { currentTab = 5 },
+                                onOpenDiaryScreen = { currentTab = 6 },
                                 onShiftMonth = { viewModel.shiftMonth(it) },
                                 onToggleTask = { viewModel.toggleTaskCompletion(context, it) },
                                 onPostSubscriptionNow = { viewModel.postSingleSubscriptionNow(it) },
@@ -462,6 +536,8 @@ fun MainFeatureScreen(
                                 onChangeThemeMode = { viewModel.setThemeMode(it) },
                                 onOpenCustomizationStudio = { currentTab = 4 },
                                 onOpenModularOnboardingScreen = { showModularOnboardingModal = true },
+                                updateState = updateState,
+                                updateManager = updateManager,
                                 onBackToHub = { currentTab = 0 },
                                 onShowMessage = { localStudioBanner = it },
                                 onSignOut = onSignOut
@@ -473,11 +549,105 @@ fun MainFeatureScreen(
                                 customizationRepo = customizationRepo,
                                 onShowMessage = { localStudioBanner = it }
                             )
+
+                            // 5: PASSO 3 — SAÚDE, INEGOCIÁVEIS, GESTAÇÃO, SUGESTÕES FINANCEIRAS E RELATÓRIO PDF NATIVO
+                            5 -> HealthModuleScreen(
+                                selectedEpochDay = selectedEpochDay,
+                                customizationConfig = customizationConfig,
+                                customizationRepo = customizationRepo,
+                                healthRepo = healthRepo,
+                                onCreateHealthFinanceExpense = { title, amountBrl, category, scope ->
+                                    viewModel.createTransaction(
+                                        title = title,
+                                        amountOriginal = amountBrl,
+                                        currency = "BRL",
+                                        type = "EXPENSE",
+                                        budgetBucket = "NEEDS",
+                                        category = category,
+                                        dateEpochDay = selectedEpochDay,
+                                        privacyScope = scope,
+                                        generateCalendarTask = true,
+                                        overrideMemberColorHex = customizationConfig.profileColorHex
+                                    )
+                                },
+                                onShowBannerMessage = { localStudioBanner = it }
+                            )
+
+                            // 6: PASSO 4 — DIÁRIO PRIVADO, FRASES POR TURNO E CARTA DE APOIO VIA IA
+                            6 -> PrivateDiaryScreen(
+                                initialEpochDay = selectedEpochDay,
+                                customizationConfig = customizationConfig,
+                                diaryRepo = diaryRepo,
+                                onShowBannerMessage = { localStudioBanner = it }
+                            )
                         }
                     }
                 }
             }
         }
+    }
+
+    // Real-time In-App Update Modal Dialog (triggers automatically when new changes are built)
+    AppUpdateAvailableDialog(
+        updateState = updateState,
+        updateManager = updateManager,
+        onShowMessage = { localStudioBanner = it }
+    )
+
+    // PASSO 4: Botão Global de Microfone -> Bottom Sheet Rápido de Confirmação
+    if (showVoiceCommandSheet) {
+        GlobalVoiceCommandBottomSheet(
+            referenceEpochDay = selectedEpochDay,
+            startListeningImmediately = startVoiceListeningImmediately,
+            onDismiss = { showVoiceCommandSheet = false },
+            onSaveExpense = { title, amountBrl, category, privacyScope ->
+                viewModel.createTransaction(
+                    title = title,
+                    amountOriginal = amountBrl,
+                    currency = "BRL",
+                    type = "EXPENSE",
+                    budgetBucket = "NEEDS",
+                    category = category,
+                    dateEpochDay = selectedEpochDay,
+                    privacyScope = privacyScope,
+                    generateCalendarTask = true,
+                    overrideMemberColorHex = customizationConfig.profileColorHex
+                )
+                localStudioBanner = "💸 Despesa por voz salva: $title (R$ ${String.format(java.util.Locale.US, "%.2f", amountBrl)} em $category)!"
+            },
+            onSaveTask = { title, epochDay, hour, minute, category, isEssential, privacyScope ->
+                viewModel.createTask(
+                    context = context,
+                    title = title,
+                    notes = "Criada por Comando de Voz",
+                    category = category,
+                    priority = if (isEssential) "HIGH" else "MEDIUM",
+                    dateEpochDay = epochDay,
+                    alarmHour = hour,
+                    alarmMinute = minute,
+                    alarmEnabled = true,
+                    privacyScope = privacyScope,
+                    estimatedCostBrl = 0.0,
+                    autoCreateExpenseOnComplete = false,
+                    overrideMemberColorHex = customizationConfig.profileColorHex,
+                    isEssential = isEssential,
+                    isInbox = false,
+                    durationMinutes = 30
+                )
+                localStudioBanner = "📅 Tarefa por voz agendada: $title às ${String.format(java.util.Locale.US, "%02d:%02d", hour, minute)}!"
+            },
+            onSaveDiaryEntry = { epochDay, hour, minute, moodId, symptomTags, freeText ->
+                diaryRepo.addDiaryEntry(
+                    epochDay = epochDay,
+                    hour = hour,
+                    minute = minute,
+                    moodId = moodId,
+                    symptomTags = symptomTags,
+                    freeText = freeText
+                )
+                localStudioBanner = "📔 Entrada por voz salva no seu Diário Privado!"
+            }
+        )
     }
 
     if (showAddTaskDialog) {
@@ -571,9 +741,19 @@ private fun FloatingOrganicPillNavBar(
             ) {
                 items.forEach { dest ->
                     val selected = selectedIndex == dest.index
+                    val moduleColor = remember(dest.index, customizationConfig) {
+                        when (dest.index) {
+                            0 -> Color(customizationConfig.hubColorHex)
+                            1 -> Color(customizationConfig.agendaColorHex)
+                            5 -> Color(customizationConfig.healthColorHex)
+                            6 -> Color(customizationConfig.diaryColorHex)
+                            2 -> Color(customizationConfig.financeColorHex)
+                            else -> Color(customizationConfig.profileColorHex)
+                        }
+                    }
                     val pillBg by animateColorAsState(
                         targetValue = if (selected) {
-                            MaterialTheme.colorScheme.primaryContainer
+                            moduleColor.copy(alpha = 0.22f)
                         } else {
                             Color.Transparent
                         },
@@ -581,7 +761,7 @@ private fun FloatingOrganicPillNavBar(
                     )
                     val contentColor by animateColorAsState(
                         targetValue = if (selected) {
-                            MaterialTheme.colorScheme.primary
+                            moduleColor
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
