@@ -1,6 +1,19 @@
 package com.example.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -33,10 +46,10 @@ import androidx.compose.material.icons.filled.AddAlert
 import androidx.compose.material.icons.filled.AlarmOn
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.CurrencyExchange
-import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Tune
@@ -66,6 +79,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -78,7 +92,6 @@ import com.example.data.DateCalendarUtils
 import com.example.data.FinanceTransaction
 import com.example.data.Household
 import com.example.data.HubWidgetIds
-import com.example.data.PrivacyScope
 import com.example.data.SavingsGoal
 import com.example.data.SubscriptionBill
 import com.example.data.TaskItem
@@ -95,6 +108,62 @@ private data class MemberColorFilterOption(
     val colorHex: Long
 )
 
+private fun hubOrganicEnterTransition(): EnterTransition =
+    expandVertically(
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        expandFrom = Alignment.Top
+    ) + fadeIn(
+        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing)
+    )
+
+private fun hubOrganicExitTransition(): ExitTransition =
+    shrinkVertically(
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        shrinkTowards = Alignment.Top
+    ) + fadeOut(
+        animationSpec = tween(durationMillis = 200, easing = FastOutLinearInEasing)
+    )
+
+@Composable
+private fun OrganicExpandChevronBadge(
+    expanded: Boolean,
+    accentColor: Color,
+    testTag: String? = null
+) {
+    val rotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "hubChevronRotation"
+    )
+    Surface(
+        shape = CircleShape,
+        color = accentColor.copy(alpha = if (expanded) 0.22f else 0.12f),
+        modifier = Modifier
+            .size(32.dp)
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = Icons.Default.ExpandMore,
+                contentDescription = if (expanded) "Recolher menu" else "Expandir menu",
+                tint = accentColor,
+                modifier = Modifier
+                    .size(20.dp)
+                    .graphicsLayer { rotationZ = rotation }
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun FamilyHubScreen(
@@ -109,6 +178,8 @@ fun FamilyHubScreen(
     customizationConfig: AppCustomizationConfig,
     healthState: com.example.data.HealthModuleState = com.example.data.HealthModuleState(),
     diaryState: com.example.data.PrivateDiaryState? = null,
+    userEmail: String? = null,
+    onRequestGoogleLogin: () -> Unit = {},
     onShiftMonth: (Int) -> Unit,
     onToggleTask: (TaskItem) -> Unit,
     onPostSubscriptionNow: (SubscriptionBill) -> Unit,
@@ -124,7 +195,7 @@ fun FamilyHubScreen(
 ) {
     val cardRadius = LocalOrganicCardRadius.current
 
-    // Track which smartwatch widgets are expanded (all start compact except the first widget)
+    // All expandable smartwatch widgets start collapsed (false) by default
     val expandedWidgets = remember {
         mutableStateMapOf(
             HubWidgetIds.TASKS_TODAY to false,
@@ -144,6 +215,9 @@ fun FamilyHubScreen(
         }
     }
     val profileColorHex = customizationConfig.profileColorHex
+    val hubAccentColor = remember(customizationConfig.hubColorHex) {
+        Color(customizationConfig.hubColorHex.toInt())
+    }
 
     // Enabled widgets in the user's chosen order
     val activeWidgetIds = remember(customizationConfig.hubWidgetOrder, customizationConfig.enabledHubWidgets) {
@@ -174,7 +248,6 @@ fun FamilyHubScreen(
     }
 
     // Agenda metrics
-    val todayEpoch = DateCalendarUtils.todayEpochDay()
     val filteredTasksByColor = remember(tasks, selectedMemberColorFilter) {
         if (selectedMemberColorFilter == null) {
             tasks
@@ -229,10 +302,16 @@ fun FamilyHubScreen(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // 1. Clean Smartwatch-Inspired Hub Header with Clickable Profile Avatar
+        // 1. Clean Smartwatch-Inspired Hub Header with Clickable Profile Avatar & Google Account Option
         item {
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        width = 1.dp,
+                        color = hubAccentColor.copy(alpha = 0.22f),
+                        shape = RoundedCornerShape(cardRadius)
+                    ),
                 shape = RoundedCornerShape(cardRadius),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
@@ -243,7 +322,7 @@ fun FamilyHubScreen(
                         .background(
                             Brush.verticalGradient(
                                 colors = listOf(
-                                    Color(profileColorHex.toInt()).copy(alpha = 0.14f),
+                                    hubAccentColor.copy(alpha = 0.15f),
                                     MaterialTheme.colorScheme.surface
                                 )
                             )
@@ -264,10 +343,69 @@ fun FamilyHubScreen(
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                text = "${household.name} • Toque nos blocos para expandir",
+                                text = "${household.name} • Toque nos menus para expandir",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            // Google Login / Cloud status pill (supports "Fazer login depois")
+                            if (userEmail.isNullOrBlank()) {
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = hubAccentColor.copy(alpha = 0.14f),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(50))
+                                        .clickable { onRequestGoogleLogin() }
+                                        .testTag("hub_google_login_pill")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CloudSync,
+                                            contentDescription = null,
+                                            tint = hubAccentColor,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(5.dp))
+                                        Text(
+                                            text = "Conectar conta Google",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = hubAccentColor
+                                        )
+                                    }
+                                }
+                            } else {
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = IncomeEmerald.copy(alpha = 0.14f),
+                                    modifier = Modifier.testTag("hub_google_connected_badge")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CloudDone,
+                                            contentDescription = null,
+                                            tint = IncomeEmerald,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(5.dp))
+                                        Text(
+                                            text = userEmail,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = IncomeEmerald,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
                         }
 
                         // Clickable Profile Avatar -> opens Unified Profile & Settings Menu
@@ -298,7 +436,7 @@ fun FamilyHubScreen(
                         }
                     }
 
-                    // Month Selector + Quick Direct Buttons for Agenda & Finanças
+                    // Month Selector + Quick Direct Buttons for Agenda, Saúde & Finanças
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -395,12 +533,16 @@ fun FamilyHubScreen(
         }
 
         // PASSO 4: Frases Motivacionais por Turno (Manhã 05:00-11:59, Tarde 12:00-17:59, Noite 18:00-04:59) + Atalho Diário
+        // Collapsible with smooth AnimatedVisibility and collapsed by default in the Hub
         if (customizationConfig.threeShiftQuotesEnabled && diaryState != null) {
             item {
                 ShiftMotivationalQuoteCard(
                     diaryState = diaryState,
                     onNextQuote = onNextShiftQuote,
-                    onOpenDiary = onOpenDiaryScreen
+                    onOpenDiary = onOpenDiaryScreen,
+                    collapsible = true,
+                    initiallyExpanded = false,
+                    accentOverrideHex = customizationConfig.diaryColorHex
                 )
             }
         }
@@ -452,7 +594,7 @@ fun FamilyHubScreen(
             }
         }
 
-        // 2. User-Configured Smartwatch Widgets (Compact tiles that expand on tap)
+        // 2. User-Configured Smartwatch Widgets (Compact tiles that start collapsed and expand smoothly on tap)
         if (activeWidgetIds.isEmpty()) {
             item {
                 Card(
@@ -501,7 +643,7 @@ fun FamilyHubScreen(
                         completedCount = completedTasksCount,
                         totalCount = monthTasks.size,
                         progressRatio = tasksCompletionRatio,
-                        profileColorHex = profileColorHex,
+                        moduleColorHex = customizationConfig.agendaColorHex,
                         expanded = isExpanded,
                         onToggleExpand = { expandedWidgets[widgetId] = !isExpanded },
                         onToggleTask = onToggleTask,
@@ -512,6 +654,7 @@ fun FamilyHubScreen(
                     HubWidgetIds.HEALTH_SUMMARY -> SmartwatchHealthWidget(
                         healthState = healthState,
                         customizationConfig = customizationConfig,
+                        moduleColorHex = customizationConfig.healthColorHex,
                         expanded = isExpanded,
                         onToggleExpand = { expandedWidgets[widgetId] = !isExpanded },
                         onIncrementTracker = onIncrementHealthTracker,
@@ -526,6 +669,7 @@ fun FamilyHubScreen(
                         wantsSpentBrl = wantsSpentBrl,
                         savingsSpentBrl = savingsSpentBrl,
                         household = household,
+                        moduleColorHex = customizationConfig.financeColorHex,
                         expanded = isExpanded,
                         onToggleExpand = { expandedWidgets[widgetId] = !isExpanded },
                         onOpenNewTransactionDialog = onOpenNewTransactionDialog,
@@ -537,6 +681,7 @@ fun FamilyHubScreen(
                         pendingSubscriptions = pendingSubscriptions,
                         paidRatio = billsPaidRatio,
                         currencyRates = currencyRates,
+                        moduleColorHex = customizationConfig.financeColorHex,
                         expanded = isExpanded,
                         onToggleExpand = { expandedWidgets[widgetId] = !isExpanded },
                         onPostSubscriptionNow = onPostSubscriptionNow,
@@ -546,6 +691,7 @@ fun FamilyHubScreen(
                     HubWidgetIds.FAMILY_COLORS -> SmartwatchFamilyColorsWidget(
                         profileName = profileName,
                         profileColorHex = profileColorHex,
+                        moduleColorHex = customizationConfig.hubColorHex,
                         memberOptions = memberColorOptions,
                         selectedColorFilter = selectedMemberColorFilter,
                         tasks = tasks,
@@ -586,7 +732,7 @@ fun FamilyHubScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Personalizar Foto, Cor na Agenda & Montar Meu Hub",
+                        text = "Personalizar Foto, Cores dos Módulos & Montar Meu Hub",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
@@ -606,7 +752,7 @@ private fun SmartwatchTasksWidget(
     completedCount: Int,
     totalCount: Int,
     progressRatio: Float,
-    profileColorHex: Long,
+    moduleColorHex: Long,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onToggleTask: (TaskItem) -> Unit,
@@ -614,7 +760,8 @@ private fun SmartwatchTasksWidget(
     onOpenAgendaScreen: () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
-    val ringColor = remember(profileColorHex) { Color(profileColorHex.toInt()) }
+    val organicShape = RoundedCornerShape(cardRadius)
+    val ringColor = remember(moduleColorHex) { Color(moduleColorHex.toInt()) }
     val nextAlarmTask = remember(pendingTasks) {
         pendingTasks.firstOrNull { it.alarmEnabled }
     }
@@ -622,12 +769,35 @@ private fun SmartwatchTasksWidget(
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .animateContentSize(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+            .border(
+                width = 1.dp,
+                color = ringColor.copy(alpha = if (expanded) 0.34f else 0.14f),
+                shape = organicShape
+            )
             .testTag("smartwatch_widget_tasks"),
-        shape = RoundedCornerShape(cardRadius),
+        shape = organicShape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 4.dp else 2.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            ringColor.copy(alpha = if (expanded) 0.12f else 0.06f),
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.surface
+                        )
+                    )
+                )
+        ) {
             // Compact Smartwatch Header Row (Always visible, taps to expand)
             Row(
                 modifier = Modifier
@@ -712,15 +882,18 @@ private fun SmartwatchTasksWidget(
                     }
                 }
 
-                Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = if (expanded) "Recolher" else "Expandir",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                OrganicExpandChevronBadge(
+                    expanded = expanded,
+                    accentColor = ringColor
                 )
             }
 
             // Expandable Drawer with Task Checklist colored by Member Profile Color
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = hubOrganicEnterTransition(),
+                exit = hubOrganicExitTransition()
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -861,12 +1034,15 @@ private fun SmartwatchBalanceRingWidget(
     wantsSpentBrl: Double,
     savingsSpentBrl: Double,
     household: Household,
+    moduleColorHex: Long,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onOpenNewTransactionDialog: () -> Unit,
     onOpenFinanceScreen: (Int) -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
+    val organicShape = RoundedCornerShape(cardRadius)
+    val financeColor = remember(moduleColorHex) { Color(moduleColorHex.toInt()) }
     val safeIncome = effectiveIncomeBrl.coerceAtLeast(1.0)
     val spentRatio = (totalExpensesBrl / safeIncome).toFloat().coerceIn(0f, 1f)
 
@@ -881,12 +1057,35 @@ private fun SmartwatchBalanceRingWidget(
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .animateContentSize(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+            .border(
+                width = 1.dp,
+                color = financeColor.copy(alpha = if (expanded) 0.34f else 0.14f),
+                shape = organicShape
+            )
             .testTag("smartwatch_widget_balance"),
-        shape = RoundedCornerShape(cardRadius),
+        shape = organicShape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 4.dp else 2.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            financeColor.copy(alpha = if (expanded) 0.12f else 0.06f),
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.surface
+                        )
+                    )
+                )
+        ) {
             // Compact Smartwatch Header Row
             Row(
                 modifier = Modifier
@@ -909,14 +1108,14 @@ private fun SmartwatchBalanceRingWidget(
                             val outerStroke = 5.dp.toPx()
                             // Outer ring: Needs (50%)
                             drawArc(
-                                color = IncomeEmerald.copy(alpha = 0.2f),
+                                color = financeColor.copy(alpha = 0.2f),
                                 startAngle = 0f,
                                 sweepAngle = 360f,
                                 useCenter = false,
                                 style = Stroke(width = outerStroke, cap = StrokeCap.Round)
                             )
                             drawArc(
-                                color = IncomeEmerald,
+                                color = financeColor,
                                 startAngle = -90f,
                                 sweepAngle = 360f * needsRatio,
                                 useCenter = false,
@@ -974,15 +1173,18 @@ private fun SmartwatchBalanceRingWidget(
                     }
                 }
 
-                Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = if (expanded) "Recolher" else "Expandir",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                OrganicExpandChevronBadge(
+                    expanded = expanded,
+                    accentColor = financeColor
                 )
             }
 
             // Expandable 50/30/20 Breakdown & Quick Expense Action
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = hubOrganicEnterTransition(),
+                exit = hubOrganicExitTransition()
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -994,7 +1196,7 @@ private fun SmartwatchBalanceRingWidget(
                         spentBrl = needsSpentBrl,
                         targetBrl = needsTargetBrl,
                         ratio = needsRatio,
-                        color = IncomeEmerald
+                        color = financeColor
                     )
                     SmartwatchBucketBar(
                         label = "Estilo de Vida (${household.wantsPercentage}%)",
@@ -1092,23 +1294,49 @@ private fun SmartwatchBillsCurrencyWidget(
     pendingSubscriptions: List<SubscriptionBill>,
     paidRatio: Float,
     currencyRates: CurrencyRatesState,
+    moduleColorHex: Long,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onPostSubscriptionNow: (SubscriptionBill) -> Unit,
     onOpenFinanceBills: () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
+    val organicShape = RoundedCornerShape(cardRadius)
+    val financeColor = remember(moduleColorHex) { Color(moduleColorHex.toInt()) }
     val nextBill = pendingSubscriptions.firstOrNull()
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .animateContentSize(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+            .border(
+                width = 1.dp,
+                color = financeColor.copy(alpha = if (expanded) 0.34f else 0.14f),
+                shape = organicShape
+            )
             .testTag("smartwatch_widget_bills_currency"),
-        shape = RoundedCornerShape(cardRadius),
+        shape = organicShape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 4.dp else 2.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            financeColor.copy(alpha = if (expanded) 0.12f else 0.06f),
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.surface
+                        )
+                    )
+                )
+        ) {
             // Compact Smartwatch Header Row
             Row(
                 modifier = Modifier
@@ -1129,14 +1357,14 @@ private fun SmartwatchBillsCurrencyWidget(
                         Canvas(modifier = Modifier.fillMaxSize()) {
                             val stroke = 6.dp.toPx()
                             drawArc(
-                                color = SavingsGold.copy(alpha = 0.22f),
+                                color = financeColor.copy(alpha = 0.22f),
                                 startAngle = 0f,
                                 sweepAngle = 360f,
                                 useCenter = false,
                                 style = Stroke(width = stroke, cap = StrokeCap.Round)
                             )
                             drawArc(
-                                color = SavingsGold,
+                                color = financeColor,
                                 startAngle = -90f,
                                 sweepAngle = 360f * paidRatio,
                                 useCenter = false,
@@ -1146,7 +1374,7 @@ private fun SmartwatchBillsCurrencyWidget(
                         Icon(
                             imageVector = Icons.Default.CurrencyExchange,
                             contentDescription = null,
-                            tint = SavingsGold,
+                            tint = financeColor,
                             modifier = Modifier.size(22.dp)
                         )
                     }
@@ -1173,15 +1401,18 @@ private fun SmartwatchBillsCurrencyWidget(
                     }
                 }
 
-                Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = if (expanded) "Recolher" else "Expandir",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                OrganicExpandChevronBadge(
+                    expanded = expanded,
+                    accentColor = financeColor
                 )
             }
 
             // Expandable Drawer with Monthly Bills & Exchange Rates
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = hubOrganicEnterTransition(),
+                exit = hubOrganicExitTransition()
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1200,13 +1431,14 @@ private fun SmartwatchBillsCurrencyWidget(
                         ).forEach { (code, rate) ->
                             Surface(
                                 shape = RoundedCornerShape(50),
-                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f)
+                                color = financeColor.copy(alpha = 0.14f)
                             ) {
                                 Text(
                                     text = "1 $code = R$ ${"%.2f".format(rate)}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = JetBrainsMonoFontFamily,
                                     fontWeight = FontWeight.Bold,
+                                    color = financeColor,
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                                 )
                             }
@@ -1250,7 +1482,7 @@ private fun SmartwatchBillsCurrencyWidget(
                                             text = formatCurrencyBrl(sub.amountBrl),
                                             style = MaterialTheme.typography.labelSmall,
                                             fontFamily = JetBrainsMonoFontFamily,
-                                            color = MaterialTheme.colorScheme.primary
+                                            color = financeColor
                                         )
                                     }
                                     FilledTonalButton(
@@ -1286,6 +1518,7 @@ private fun SmartwatchBillsCurrencyWidget(
 private fun SmartwatchFamilyColorsWidget(
     profileName: String,
     profileColorHex: Long,
+    moduleColorHex: Long,
     memberOptions: List<MemberColorFilterOption>,
     selectedColorFilter: Long?,
     tasks: List<TaskItem>,
@@ -1295,7 +1528,9 @@ private fun SmartwatchFamilyColorsWidget(
     onOpenProfileSettings: () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
+    val organicShape = RoundedCornerShape(cardRadius)
     val myColor = remember(profileColorHex) { Color(profileColorHex.toInt()) }
+    val hubColor = remember(moduleColorHex) { Color(moduleColorHex.toInt()) }
     val myColorName = remember(profileColorHex) {
         CustomizationCatalog.memberAgendaColors.firstOrNull { it.second == profileColorHex }?.first
             ?: "Cor do Perfil"
@@ -1304,12 +1539,35 @@ private fun SmartwatchFamilyColorsWidget(
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .animateContentSize(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+            .border(
+                width = 1.dp,
+                color = hubColor.copy(alpha = if (expanded) 0.34f else 0.14f),
+                shape = organicShape
+            )
             .testTag("smartwatch_widget_family_colors"),
-        shape = RoundedCornerShape(cardRadius),
+        shape = organicShape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 4.dp else 2.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            hubColor.copy(alpha = if (expanded) 0.12f else 0.06f),
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.surface
+                        )
+                    )
+                )
+        ) {
             // Compact Smartwatch Header Row
             Row(
                 modifier = Modifier
@@ -1367,15 +1625,18 @@ private fun SmartwatchFamilyColorsWidget(
                     }
                 }
 
-                Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = if (expanded) "Recolher" else "Expandir",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                OrganicExpandChevronBadge(
+                    expanded = expanded,
+                    accentColor = hubColor
                 )
             }
 
             // Expandable Drawer to filter tasks by Member Profile Color or edit Profile Color
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = hubOrganicEnterTransition(),
+                exit = hubOrganicExitTransition()
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1446,12 +1707,14 @@ private fun SmartwatchFamilyColorsWidget(
 private fun SmartwatchHealthWidget(
     healthState: com.example.data.HealthModuleState,
     customizationConfig: AppCustomizationConfig,
+    moduleColorHex: Long,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onIncrementTracker: (dateIso: String, trackerId: String, step: Int) -> Unit,
     onOpenHealthScreen: () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
+    val organicShape = RoundedCornerShape(cardRadius)
     val todayIso = remember { DateCalendarUtils.formatIsoDate(DateCalendarUtils.todayEpochDay()) }
     val totalTrackers = healthState.trackers.size.coerceAtLeast(1)
     val completedTrackers = healthState.completedTrackersCount(todayIso)
@@ -1460,17 +1723,40 @@ private fun SmartwatchHealthWidget(
     val latestGlucose = healthState.glucoseRecords.firstOrNull()
     val latestBp = healthState.bloodPressureRecords.firstOrNull()
     val timer = healthState.postMealTimer
-    val ringColor = Color(0xFF0077B6)
+    val ringColor = remember(moduleColorHex) { Color(moduleColorHex.toInt()) }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .animateContentSize(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+            .border(
+                width = 1.dp,
+                color = ringColor.copy(alpha = if (expanded) 0.34f else 0.14f),
+                shape = organicShape
+            )
             .testTag("smartwatch_widget_health"),
-        shape = RoundedCornerShape(cardRadius),
+        shape = organicShape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 4.dp else 2.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            ringColor.copy(alpha = if (expanded) 0.12f else 0.06f),
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.surface
+                        )
+                    )
+                )
+        ) {
             // Compact Smartwatch Header Row (Always visible, taps to expand)
             Row(
                 modifier = Modifier
@@ -1557,15 +1843,18 @@ private fun SmartwatchHealthWidget(
                     }
                 }
 
-                Icon(
-                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = if (expanded) "Recolher" else "Expandir",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                OrganicExpandChevronBadge(
+                    expanded = expanded,
+                    accentColor = ringColor
                 )
             }
 
             // Expandable Drawer with Quick Daily Trackers (+1) and Latest Measurements
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = hubOrganicEnterTransition(),
+                exit = hubOrganicExitTransition()
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1701,4 +1990,3 @@ private fun SmartwatchHealthWidget(
         }
     }
 }
-

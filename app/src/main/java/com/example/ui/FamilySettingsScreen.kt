@@ -363,6 +363,65 @@ fun FamilySettingsScreen(
                             )
                         }
                     }
+
+                    // Quick Google Account Sign-In / Status row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (userEmail.isNullOrBlank()) {
+                            Text(
+                                text = "Modo Local (Login adiado)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            FilledTonalButton(
+                                onClick = onSignOut,
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .height(36.dp)
+                                    .testTag("profile_header_google_login_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CloudDone,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Entrar com Google",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = "Google: $userEmail",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            OutlinedButton(
+                                onClick = onSignOut,
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier
+                                    .height(34.dp)
+                                    .testTag("profile_header_google_logout_btn")
+                            ) {
+                                Text(
+                                    text = "Trocar / Sair",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -988,7 +1047,27 @@ private fun ExpandableProfileSectionCard(
                 }
             }
 
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = androidx.compose.animation.expandVertically(
+                    animationSpec = androidx.compose.animation.core.spring(
+                        dampingRatio = androidx.compose.animation.core.Spring.DampingRatioLowBouncy,
+                        stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow
+                    ),
+                    expandFrom = Alignment.Top
+                ) + androidx.compose.animation.fadeIn(
+                    animationSpec = androidx.compose.animation.core.tween(250)
+                ),
+                exit = androidx.compose.animation.shrinkVertically(
+                    animationSpec = androidx.compose.animation.core.spring(
+                        dampingRatio = androidx.compose.animation.core.Spring.DampingRatioNoBouncy,
+                        stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
+                    ),
+                    shrinkTowards = Alignment.Top
+                ) + androidx.compose.animation.fadeOut(
+                    animationSpec = androidx.compose.animation.core.tween(190)
+                )
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()

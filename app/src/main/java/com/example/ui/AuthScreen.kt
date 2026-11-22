@@ -5,6 +5,7 @@ import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudSync
@@ -35,6 +37,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -65,6 +68,7 @@ import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import com.example.R
+import com.example.ui.theme.LocalOrganicCardRadius
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -138,7 +142,7 @@ fun onGoogleSignInClicked(
         return
     }
     if (clientId.isBlank()) {
-        onAuthError("Web Client ID (oauth_client client_type 3) ausente no google-services.json do projeto auramaneger-e1830. Ative o provedor Google no Firebase Authentication e atualize o google-services.json.")
+        onAuthError("Web Client ID ausente no google-services.json. Você pode entrar agora tocando em 'Fazer login depois' abaixo.")
         return
     }
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
@@ -190,11 +194,13 @@ fun signOut(
 
 @Composable
 fun AuthScreen(
-    onAuthSuccess: () -> Unit
+    onAuthSuccess: () -> Unit,
+    onSkipLogin: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
+    val cardRadius = LocalOrganicCardRadius.current
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
@@ -218,8 +224,9 @@ fun AuthScreen(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
-                            MaterialTheme.colorScheme.background
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f),
+                            MaterialTheme.colorScheme.background,
+                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.22f)
                         )
                     )
                 )
@@ -237,8 +244,8 @@ fun AuthScreen(
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(180.dp),
-                    shape = RoundedCornerShape(28.dp),
+                        .height(190.dp),
+                    shape = RoundedCornerShape(cardRadius),
                     elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
                 ) {
                     Box(modifier = Modifier.fillMaxSize()) {
@@ -255,7 +262,7 @@ fun AuthScreen(
                                     Brush.verticalGradient(
                                         listOf(
                                             MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                                            MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                                            MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
                                         )
                                     )
                                 )
@@ -264,13 +271,13 @@ fun AuthScreen(
                         ) {
                             Column {
                                 Text(
-                                    text = "AURA FINANÇAS & TAREFAS",
+                                    text = "AURA FINANÇAS, SAÚDE & ROTINA",
                                     style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.secondary,
+                                    color = MaterialTheme.colorScheme.primary,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "Orçamento Familiar, Rotina Diária e Metas Inteligentes",
+                                    text = "Orçamento Familiar, Agenda Limpa, Saúde & Diário Privado",
                                     style = MaterialTheme.typography.headlineSmall,
                                     color = MaterialTheme.colorScheme.onSurface,
                                     fontWeight = FontWeight.Bold
@@ -280,11 +287,17 @@ fun AuthScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(20.dp))
 
                 Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+                            shape = RoundedCornerShape(cardRadius)
+                        ),
+                    shape = RoundedCornerShape(cardRadius),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                 ) {
@@ -294,38 +307,38 @@ fun AuthScreen(
                     ) {
                         FeatureRow(
                             icon = Icons.Default.CheckCircle,
-                            title = "Calendário Mensal & Check de Tarefas",
-                            subtitle = "Marque tarefas concluídas e receba alarmes no horário exato."
+                            title = "Agenda Limpa & Check de Tarefas",
+                            subtitle = "Time blocking, modo dia difícil e alarmes no horário exato."
                         )
                         FeatureRow(
                             icon = Icons.Default.CurrencyExchange,
-                            title = "Múltiplas Moedas (BRL, USD, EUR, GBP)",
-                            subtitle = "Conversão automática instantânea de gastos e assinaturas."
+                            title = "Finanças, Saúde & Relatório PDF",
+                            subtitle = "Múltiplas moedas, glicemia, pressão arterial e inegociáveis."
                         )
                         FeatureRow(
                             icon = Icons.Default.NotificationsActive,
-                            title = "Contas Fixas & Plano de Economia 50/30/20",
-                            subtitle = "Lembretes recorrentes e metas familiares por porcentagem."
+                            title = "Diário Privado & Comando de Voz",
+                            subtitle = "Frases por turno, carta de apoio via IA e atalho global de voz."
                         )
                         FeatureRow(
                             icon = Icons.Default.CloudSync,
                             title = "Sincronização Familiar na Nuvem",
-                            subtitle = "Compartilhe o orçamento em tempo real entre dispositivos."
+                            subtitle = "Conecte sua conta Google agora ou escolha fazer login depois."
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(22.dp))
 
                 if (errorMessage != null) {
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(bottom = 16.dp),
+                            .padding(bottom = 14.dp),
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.errorContainer
                         ),
-                        shape = RoundedCornerShape(16.dp)
+                        shape = RoundedCornerShape(22.dp)
                     ) {
                         Text(
                             text = errorMessage!!,
@@ -337,6 +350,7 @@ fun AuthScreen(
                     }
                 }
 
+                // Primary Action: Sign in with Google
                 Button(
                     onClick = {
                         isLoading = true
@@ -359,7 +373,7 @@ fun AuthScreen(
                         )
                     },
                     enabled = !isLoading,
-                    shape = RoundedCornerShape(18.dp),
+                    shape = RoundedCornerShape(50),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary
@@ -389,6 +403,45 @@ fun AuthScreen(
                         )
                     }
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Secondary Action: Login later ("Fazer login depois")
+                FilledTonalButton(
+                    onClick = onSkipLogin,
+                    enabled = !isLoading,
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f),
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .testTag("skip_google_login_btn")
+                ) {
+                    Text(
+                        text = "Fazer login depois",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = "Continuar sem login por enquanto",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Você pode usar todos os módulos imediatamente e conectar sua conta Google quando quiser pelo Hub ou Perfil.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
             }
         }
     }

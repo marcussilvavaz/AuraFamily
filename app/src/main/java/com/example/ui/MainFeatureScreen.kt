@@ -357,6 +357,8 @@ fun MainFeatureScreen(
                                 customizationConfig = customizationConfig,
                                 healthState = healthState,
                                 diaryState = diaryState,
+                                userEmail = userEmail,
+                                onRequestGoogleLogin = onSignOut,
                                 onIncrementHealthTracker = { dateIso, trackerId, step ->
                                     healthRepo.incrementTrackerProgress(dateIso, trackerId, step)
                                 },

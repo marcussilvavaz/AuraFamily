@@ -12,6 +12,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.credentials.CredentialManager
@@ -52,8 +53,9 @@ fun AuraAppRoot() {
     val customizationConfig by customizationRepo.configFlow.collectAsStateWithLifecycle()
 
     var currentUser by remember { mutableStateOf(Firebase.auth.currentUser) }
-    // Login is disabled by default so the app launches directly into the Family Hub for testing
-    var showOptionalLoginScreen by remember { mutableStateOf(false) }
+    // Show Google Sign-In screen on launch with the option "Fazer login depois"
+    var hasSkippedGoogleLogin by rememberSaveable { mutableStateOf(false) }
+    var showOptionalLoginScreen by rememberSaveable { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         val listener = FirebaseAuth.AuthStateListener { auth ->
@@ -66,8 +68,11 @@ fun AuraAppRoot() {
     }
 
     val user = currentUser
-    if (showOptionalLoginScreen && user == null) {
+    val shouldShowAuthScreen = user == null && (!hasSkippedGoogleLogin || showOptionalLoginScreen)
+
+    if (shouldShowAuthScreen) {
         BackHandler {
+            hasSkippedGoogleLogin = true
             showOptionalLoginScreen = false
         }
         AuraFinancasTheme(
@@ -77,6 +82,10 @@ fun AuraAppRoot() {
             AuthScreen(
                 onAuthSuccess = {
                     currentUser = Firebase.auth.currentUser
+                    showOptionalLoginScreen = false
+                },
+                onSkipLogin = {
+                    hasSkippedGoogleLogin = true
                     showOptionalLoginScreen = false
                 }
             )
@@ -126,7 +135,8 @@ fun AuraAppRoot() {
                                 scope = scope,
                                 onSignOutComplete = {
                                     currentUser = null
-                                    showOptionalLoginScreen = false
+                                    hasSkippedGoogleLogin = false
+                                    showOptionalLoginScreen = true
                                 }
                             )
                         }

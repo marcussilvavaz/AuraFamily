@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.BookmarkAdded
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
@@ -66,6 +67,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -101,11 +103,24 @@ fun ShiftMotivationalQuoteCard(
     diaryState: PrivateDiaryState,
     onNextQuote: () -> Unit,
     onOpenDiary: (() -> Unit)? = null,
+    collapsible: Boolean = false,
+    initiallyExpanded: Boolean = true,
+    accentOverrideHex: Long? = null,
     modifier: Modifier = Modifier
 ) {
     val cardRadius = LocalOrganicCardRadius.current
     val shift = diaryState.activeShift
-    val accentColor = remember(shift.accentColorHex) { Color(shift.accentColorHex.toInt()) }
+    val effectiveHex = accentOverrideHex ?: shift.accentColorHex
+    val accentColor = remember(effectiveHex) { Color(effectiveHex.toInt()) }
+    var isExpanded by remember { mutableStateOf(if (collapsible) initiallyExpanded else true) }
+    val chevronRotation by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (isExpanded) 180f else 0f,
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+            stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
+        ),
+        label = "shiftQuoteChevron"
+    )
 
     Card(
         modifier = modifier
@@ -113,14 +128,34 @@ fun ShiftMotivationalQuoteCard(
             .testTag("shift_motivational_quote_card"),
         shape = RoundedCornerShape(cardRadius),
         colors = CardDefaults.cardColors(
-            containerColor = accentColor.copy(alpha = 0.10f)
-        )
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (isExpanded) 3.dp else 1.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .border(1.dp, accentColor.copy(alpha = 0.32f), RoundedCornerShape(cardRadius))
-                .padding(16.dp)
+                .background(
+                    androidx.compose.ui.graphics.Brush.horizontalGradient(
+                        colors = listOf(
+                            accentColor.copy(alpha = if (isExpanded) 0.14f else 0.08f),
+                            MaterialTheme.colorScheme.surface
+                        )
+                    )
+                )
+                .border(
+                    width = 1.dp,
+                    color = accentColor.copy(alpha = if (isExpanded) 0.34f else 0.18f),
+                    shape = RoundedCornerShape(cardRadius)
+                )
+                .then(
+                    if (collapsible) {
+                        Modifier.clickable { isExpanded = !isExpanded }
+                    } else {
+                        Modifier
+                    }
+                )
+                .padding(horizontal = 18.dp, vertical = 14.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -129,7 +164,8 @@ fun ShiftMotivationalQuoteCard(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
                     Surface(
                         shape = RoundedCornerShape(50),
@@ -143,61 +179,119 @@ fun ShiftMotivationalQuoteCard(
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                         )
                     }
+                    if (collapsible && !isExpanded) {
+                        Text(
+                            text = "Mensagem do turno",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
 
-                IconButton(
-                    onClick = onNextQuote,
-                    modifier = Modifier
-                        .size(30.dp)
-                        .testTag("btn_next_shift_quote")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "Outra frase para este turno",
-                        tint = accentColor,
-                        modifier = Modifier.size(18.dp)
-                    )
+                    IconButton(
+                        onClick = onNextQuote,
+                        modifier = Modifier
+                            .size(30.dp)
+                            .testTag("btn_next_shift_quote")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Outra frase para este turno",
+                            tint = accentColor,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    if (collapsible) {
+                        Surface(
+                            shape = CircleShape,
+                            color = accentColor.copy(alpha = 0.14f),
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.ExpandMore,
+                                    contentDescription = if (isExpanded) "Recolher mensagem" else "Expandir mensagem",
+                                    tint = accentColor,
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .graphicsLayer { rotationZ = chevronRotation }
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "“${diaryState.currentShiftQuote}”",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-                fontStyle = FontStyle.Italic,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "— ${diaryState.currentShiftQuoteAuthor}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            AnimatedVisibility(
+                visible = isExpanded,
+                enter = androidx.compose.animation.expandVertically(
+                    animationSpec = androidx.compose.animation.core.spring(
+                        dampingRatio = androidx.compose.animation.core.Spring.DampingRatioLowBouncy,
+                        stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow
+                    ),
+                    expandFrom = Alignment.Top
+                ) + androidx.compose.animation.fadeIn(
+                    animationSpec = androidx.compose.animation.core.tween(240)
+                ),
+                exit = androidx.compose.animation.shrinkVertically(
+                    animationSpec = androidx.compose.animation.core.spring(
+                        dampingRatio = androidx.compose.animation.core.Spring.DampingRatioNoBouncy,
+                        stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
+                    ),
+                    shrinkTowards = Alignment.Top
+                ) + androidx.compose.animation.fadeOut(
+                    animationSpec = androidx.compose.animation.core.tween(180)
                 )
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                if (onOpenDiary != null) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.surface,
-                        modifier = Modifier
-                            .clickable { onOpenDiary() }
-                            .testTag("btn_open_diary_from_quote")
+                    Text(
+                        text = "“${diaryState.currentShiftQuote}”",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        fontStyle = FontStyle.Italic,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = "📔 Abrir Diário Privado",
+                            text = "— ${diaryState.currentShiftQuoteAuthor}",
                             style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = accentColor,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        if (onOpenDiary != null) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = accentColor.copy(alpha = 0.14f),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .clickable { onOpenDiary() }
+                                    .testTag("btn_open_diary_from_quote")
+                            ) {
+                                Text(
+                                    text = "📔 Abrir Diário Privado",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = accentColor,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
