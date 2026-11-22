@@ -18,11 +18,19 @@ import com.example.R
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.DataOutputStream
 import java.io.File
 import java.io.FileInputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -34,7 +42,7 @@ data class AppReleaseMetadata(
     val versionName: String = BuildConfig.VERSION_NAME,
     val dexSignatureChain: String = "",
     val releaseNotes: String = DEFAULT_RELEASE_NOTES,
-    val downloadUrl: String = "",
+    val downloadUrl: String = BuildConfig.DEFAULT_UPDATE_URL,
     val mandatory: Boolean = false,
     val publishedBy: String = "Aura Studio Auto-Sync",
     val updatedAtEpochMs: Long = System.currentTimeMillis(),
@@ -70,7 +78,7 @@ data class AppUpdateUiState(
     val isModalDismissedForSession: Boolean = false,
     val isCheckingOrPublishing: Boolean = false,
     val lastCheckStatusMessage: String = "Sincronizado com o servidor de atualizações",
-    val customDownloadUrl: String = "",
+    val customDownloadUrl: String = BuildConfig.DEFAULT_UPDATE_URL,
     val justUpgradedBannerMessage: String? = null
 )
 
@@ -89,6 +97,7 @@ class AppUpdateManager(
     private val localBuildTimestampMs: Long = BuildConfig.BUILD_TIMESTAMP_MS
     private val isStudioPreview: Boolean = isRunningOnEmulatorOrPreview()
     private val localApkSizeLabel: String = computeLocalApkSizeLabel(appContext)
+    private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var snapshotListener: ListenerRegistration? = null
 
     private val _uiState = MutableStateFlow(
@@ -101,8 +110,8 @@ class AppUpdateManager(
             localKnownRevision = prefs.getLong(KEY_LOCAL_KNOWN_REVISION, 1L),
             isRunningOnStudioPreview = isStudioPreview,
             customDownloadUrl = sanitizeAndNormalizeUrl(
-                prefs.getString(KEY_CUSTOM_DOWNLOAD_URL, "").orEmpty()
-            )
+                prefs.getString(KEY_CUSTOM_DOWNLOAD_URL, BuildConfig.DEFAULT_UPDATE_URL).orEmpty()
+            ).ifBlank { BuildConfig.DEFAULT_UPDATE_URL }
         )
     )
     val uiState: StateFlow<AppUpdateUiState> = _uiState.asStateFlow()
@@ -358,8 +367,26 @@ class AppUpdateManager(
                 _uiState.value = _uiState.value.copy(
                     isCheckingOrPublishing = false,
                     isUpdateAvailable = false,
-                    lastCheckStatusMessage = "✅ Nova compilação #$localSignature (v${BuildConfig.VERSION_NAME} • Rev #$nextRevision) publicada! Aparelhos anteriores serão avisados."
+                    lastCheckStatusMessage = "✅ Nova compilação #$localSignature (v${BuildConfig.VERSION_NAME} • Rev #$nextRevision) publicada! Gerando link direto do .APK na nuvem..."
                 )
+                // Automatically upload the running compiled .APK binary in the background so other devices get a fresh direct download URL
+                backgroundScope.launch {
+                    val freshDirectUrl = uploadCurrentInstalledApkToCloud()
+                    if (!freshDirectUrl.isNullOrBlank()) {
+                        prefs.edit().putString(KEY_CUSTOM_DOWNLOAD_URL, freshDirectUrl).apply()
+                        val updatedPayload = payload.toMutableMap().apply {
+                            put("downloadUrl", freshDirectUrl.take(500))
+                            put("updatedAtEpochMs", System.currentTimeMillis())
+                        }
+                        firestore.collection(COLLECTION_APP_RELEASES)
+                            .document(DOC_LATEST)
+                            .set(updatedPayload)
+                        _uiState.value = _uiState.value.copy(
+                            customDownloadUrl = freshDirectUrl,
+                            lastCheckStatusMessage = "✅ Compilação #$localSignature (v${BuildConfig.VERSION_NAME}) e link direto do .APK sincronizados para todos os celulares!"
+                        )
+                    }
+                }
             }
             .addOnFailureListener { e ->
                 _uiState.value = _uiState.value.copy(
@@ -370,7 +397,61 @@ class AppUpdateManager(
     }
 
     /**
-     * Quick 1-tap action to publish the current build and notify all installed phones immediately.
+     * Uploads the currently running compiled `.APK` (`applicationInfo.sourceDir`) to temporary cloud storage
+     * and returns a direct binary download URL (`https://tmpfiles.org/dl/.../AuraFinancas-vX.Y.Z-SIG.apk`).
+     */
+    private suspend fun uploadCurrentInstalledApkToCloud(): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val sourceApk = File(appContext.applicationInfo.sourceDir)
+            if (!sourceApk.exists() || sourceApk.length() <= 0L) return@runCatching null
+
+            val lastUploadedSig = prefs.getString(KEY_LAST_UPLOADED_APK_SIG, "")
+            val cachedUploadedUrl = prefs.getString(KEY_LAST_UPLOADED_APK_URL, "").orEmpty()
+            if (lastUploadedSig == localSignature && cachedUploadedUrl.startsWith("https://")) {
+                return@runCatching cachedUploadedUrl
+            }
+
+            val boundary = "----AuraAutoApkBoundary" + System.currentTimeMillis()
+            val url = URL("https://tmpfiles.org/api/v1/upload")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                doOutput = true
+                requestMethod = "POST"
+                connectTimeout = 30000
+                readTimeout = 90000
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Android) AuraAutoUpdater/1.10")
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            }
+            val fileName = suggestedApkFileName()
+            DataOutputStream(conn.outputStream).use { out ->
+                out.writeBytes("--$boundary\r\n")
+                out.writeBytes("Content-Disposition: form-data; name=\"file\"; filename=\"$fileName\"\r\n")
+                out.writeBytes("Content-Type: application/vnd.android.package-archive\r\n\r\n")
+                FileInputStream(sourceApk).use { input -> input.copyTo(out) }
+                out.writeBytes("\r\n--$boundary--\r\n")
+                out.flush()
+            }
+            val status = conn.responseCode
+            val respStream = if (status in 200..299) conn.inputStream else conn.errorStream
+            val respText = respStream?.bufferedReader()?.readText()?.trim().orEmpty()
+            val regex = Regex("https://tmpfiles\\.org/([0-9a-zA-Z/_\\-.]+)")
+            val match = regex.find(respText)
+            if (match != null) {
+                val directUrl = "https://tmpfiles.org/dl/${match.groupValues[1]}"
+                prefs.edit()
+                    .putString(KEY_LAST_UPLOADED_APK_SIG, localSignature)
+                    .putString(KEY_LAST_UPLOADED_APK_URL, directUrl)
+                    .putString(KEY_CUSTOM_DOWNLOAD_URL, directUrl)
+                    .apply()
+                directUrl
+            } else {
+                null
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * Quick 1-tap action to upload the current APK binary to the cloud, publish its direct link to Firestore,
+     * and notify all installed phones immediately.
      */
     fun publishCurrentBuildImmediately(
         onResult: (Boolean, String) -> Unit = { _, _ -> }
@@ -378,13 +459,25 @@ class AppUpdateManager(
         val currentRemote = _uiState.value.remoteRelease
         val notes = currentRemote?.releaseNotes?.takeIf { it.isNotBlank() }
             ?: buildAutoChangelogNote((currentRemote?.buildRevision ?: _uiState.value.localKnownRevision) + 1L)
-        publishManualUpdateToInstalledDevices(
-            releaseNotes = notes,
-            downloadUrl = _uiState.value.customDownloadUrl,
-            mandatory = currentRemote?.mandatory ?: false,
-            alsoShowPromptOnThisDevice = false,
-            onResult = onResult
+
+        _uiState.value = _uiState.value.copy(
+            isCheckingOrPublishing = true,
+            lastCheckStatusMessage = "Enviando pacote .APK (#$localSignature) para a nuvem e avisando celulares..."
         )
+
+        backgroundScope.launch {
+            val freshDirectUrl = uploadCurrentInstalledApkToCloud()
+                ?: _uiState.value.customDownloadUrl
+            withContext(Dispatchers.Main) {
+                publishManualUpdateToInstalledDevices(
+                    releaseNotes = notes,
+                    downloadUrl = freshDirectUrl,
+                    mandatory = currentRemote?.mandatory ?: false,
+                    alsoShowPromptOnThisDevice = false,
+                    onResult = onResult
+                )
+            }
+        }
     }
 
     /**
@@ -815,6 +908,8 @@ class AppUpdateManager(
         private const val KEY_LAST_INSTALLED_VERSION_CODE = "last_installed_version_code"
         private const val KEY_LAST_NOTIFIED_REVISION = "last_notified_revision"
         private const val KEY_CUSTOM_DOWNLOAD_URL = "custom_download_url"
+        private const val KEY_LAST_UPLOADED_APK_SIG = "last_uploaded_apk_sig"
+        private const val KEY_LAST_UPLOADED_APK_URL = "last_uploaded_apk_url"
 
         private const val COLLECTION_APP_RELEASES = "app_releases"
         private const val DOC_LATEST = "latest"

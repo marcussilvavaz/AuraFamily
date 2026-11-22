@@ -756,7 +756,7 @@ fun AppUpdateControlCenterCard(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "Avisar Aparelhos",
+                        text = "Publicar .APK p/ Todos",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold
                     )

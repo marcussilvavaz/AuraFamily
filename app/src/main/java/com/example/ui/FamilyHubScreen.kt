@@ -185,7 +185,6 @@ fun FamilyHubScreen(
     onToggleTask: (TaskItem) -> Unit,
     onPostSubscriptionNow: (SubscriptionBill) -> Unit,
     onIncrementHealthTracker: (dateIso: String, trackerId: String, step: Int) -> Unit = { _, _, _ -> },
-    onQuickAdvanceAchievement: (com.example.data.AchievementGoal) -> Unit = {},
     onNextShiftQuote: () -> Unit = {},
     onOpenNewTaskDialog: () -> Unit,
     onOpenNewTransactionDialog: () -> Unit,
@@ -713,8 +712,7 @@ fun FamilyHubScreen(
                         customizationConfig = customizationConfig,
                         expanded = isExpanded,
                         onToggleExpand = { expandedWidgets[widgetId] = !isExpanded },
-                        onOpenAchievementsScreen = onOpenAchievementsScreen,
-                        onQuickAdvanceGoal = onQuickAdvanceAchievement
+                        onOpenAchievementsScreen = onOpenAchievementsScreen
                     )
 
                     HubWidgetIds.FAMILY_COLORS -> SmartwatchFamilyColorsWidget(

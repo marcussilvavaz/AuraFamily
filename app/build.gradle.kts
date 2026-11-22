@@ -16,13 +16,13 @@ android {
     applicationId = "com.auramanager.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 9
-    versionName = "1.9.0"
+    versionCode = 11
+    versionName = "1.11.0"
 
     buildConfigField(
       "String",
       "DEFAULT_UPDATE_URL",
-      "\"\""
+      "\"https://tmpfiles.org/dl/wCA6jA6CtRvw/aurafinancas-v1.10.0-47bc98c9.apk\""
     )
     buildConfigField(
       "long",
@@ -153,3 +153,4 @@ dependencies {
   // "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
+

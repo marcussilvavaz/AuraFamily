@@ -235,42 +235,42 @@ class ExampleRobolectricTest {
         val healthRepo = HealthRepository(context)
         val config = AppCustomizationConfig()
 
-        // Create a custom objective tied to Financeiro with a Gold Medal
+        // Create a custom objective tied to Financeiro (automatically evaluated by active funded savings goals)
         val customGoal = achievementsRepo.addCustomAchievementGoal(
-            title = "Aporte Extra na Reserva",
-            description = "Realizar 2 aportes extras na reserva de emergência",
+            title = "Duas Caixinhas Ativas",
+            description = "Manter 2 caixinhas de reserva com saldo positivo",
             module = AchievementModule.FINANCE,
             medalTier = MedalTier.GOLD,
             targetValue = 2,
-            unitLabel = "aportes"
+            unitLabel = "caixinhas"
         )
 
-        // Increment progress twice to unlock the Gold Medal
-        assertFalse(achievementsRepo.incrementGoalProgress(customGoal.id, step = 1, targetValue = 2))
-        assertTrue(achievementsRepo.incrementGoalProgress(customGoal.id, step = 1, targetValue = 2))
+        val baseTransactions = listOf(
+            FinanceTransaction(id = "tx1", householdId = "FAM", title = "Salário", amountOriginal = 6000.0, amountBrl = 6000.0, type = "INCOME", budgetBucket = "INCOME", category = "Renda", yearMonth = "2026-11"),
+            FinanceTransaction(id = "tx2", householdId = "FAM", title = "Mercado", amountOriginal = 450.0, amountBrl = 450.0, type = "EXPENSE", budgetBucket = "NEEDS", category = "Alimentação", yearMonth = "2026-11"),
+            FinanceTransaction(id = "tx3", householdId = "FAM", title = "Farmácia", amountOriginal = 120.0, amountBrl = 120.0, type = "EXPENSE", budgetBucket = "NEEDS", category = "Saúde", yearMonth = "2026-11")
+        )
+        val baseTasks = listOf(
+            TaskItem(
+                id = "t1",
+                householdId = "FAM",
+                title = "Revisar orçamento",
+                notes = "",
+                category = "Finanças",
+                priority = "HIGH",
+                dateEpochDay = DateCalendarUtils.todayEpochDay(),
+                yearMonth = "2026-11",
+                completed = true,
+                isEssential = true
+            )
+        )
 
-        val summary = achievementsRepo.evaluateAchievements(
+        // With only 1 funded savings goal, the custom goal (target = 2 caixinhas) is NOT unlocked yet
+        val summaryWithOneGoal = achievementsRepo.evaluateAchievements(
             healthState = healthRepo.stateFlow.value,
             customizationConfig = config,
-            tasks = listOf(
-                TaskItem(
-                    id = "t1",
-                    householdId = "FAM",
-                    title = "Revisar orçamento",
-                    notes = "",
-                    category = "Finanças",
-                    priority = "HIGH",
-                    dateEpochDay = DateCalendarUtils.todayEpochDay(),
-                    yearMonth = "2026-11",
-                    completed = true,
-                    isEssential = true
-                )
-            ),
-            transactions = listOf(
-                FinanceTransaction(id = "tx1", householdId = "FAM", title = "Salário", amountOriginal = 6000.0, amountBrl = 6000.0, type = "INCOME", budgetBucket = "INCOME", category = "Renda", yearMonth = "2026-11"),
-                FinanceTransaction(id = "tx2", householdId = "FAM", title = "Mercado", amountOriginal = 450.0, amountBrl = 450.0, type = "EXPENSE", budgetBucket = "NEEDS", category = "Alimentação", yearMonth = "2026-11"),
-                FinanceTransaction(id = "tx3", householdId = "FAM", title = "Farmácia", amountOriginal = 120.0, amountBrl = 120.0, type = "EXPENSE", budgetBucket = "NEEDS", category = "Saúde", yearMonth = "2026-11")
-            ),
+            tasks = baseTasks,
+            transactions = baseTransactions,
             subscriptions = emptyList(),
             savingsGoals = listOf(
                 SavingsGoal(id = "sg1", householdId = "FAM", title = "Reserva", targetAmountBrl = 5000.0, currentAmountBrl = 1500.0, incomePercentage = 10L, category = "Emergência", targetYearMonth = "2027-06")
@@ -278,12 +278,29 @@ class ExampleRobolectricTest {
             household = Household(householdId = "FAM", name = "Família", monthlyIncomeBrl = 6000.0),
             selectedYearMonth = "2026-11"
         )
+        assertFalse(summaryWithOneGoal.goals.first { it.id == customGoal.id }.isUnlocked)
 
-        // Verify goals exist across all 3 pillars (Saúde, Financeiro, Calendário)
-        assertTrue(summary.healthTotal >= 4)
-        assertTrue(summary.financeTotal >= 4)
-        assertTrue(summary.calendarTotal >= 4)
-        assertTrue(summary.unlockedCount >= 3)
+        // When the user genuinely adds a 2nd funded savings goal, the custom Gold Medal unlocks automatically!
+        val summary = achievementsRepo.evaluateAchievements(
+            healthState = healthRepo.stateFlow.value,
+            customizationConfig = config,
+            tasks = baseTasks,
+            transactions = baseTransactions,
+            subscriptions = emptyList(),
+            savingsGoals = listOf(
+                SavingsGoal(id = "sg1", householdId = "FAM", title = "Reserva", targetAmountBrl = 5000.0, currentAmountBrl = 1500.0, incomePercentage = 10L, category = "Emergência", targetYearMonth = "2027-06"),
+                SavingsGoal(id = "sg2", householdId = "FAM", title = "Viagem", targetAmountBrl = 3000.0, currentAmountBrl = 600.0, incomePercentage = 5L, category = "Lazer", targetYearMonth = "2027-12")
+            ),
+            household = Household(householdId = "FAM", name = "Família", monthlyIncomeBrl = 6000.0),
+            selectedYearMonth = "2026-11"
+        )
+
+        // Verify expanded automatic goals exist across all pillars (7 Saúde + 7 Financeiro + 7 Calendário + 7 Tríade + 1 custom = 29)
+        assertTrue(summary.healthTotal >= 7)
+        assertTrue(summary.financeTotal >= 7)
+        assertTrue(summary.calendarTotal >= 7)
+        assertTrue(summary.totalCount >= 28)
+        assertTrue(summary.unlockedCount >= 5)
         assertTrue(summary.totalXp > 0)
         assertTrue(summary.goals.any { it.id == customGoal.id && it.isUnlocked && it.medalTier == MedalTier.GOLD })
     }

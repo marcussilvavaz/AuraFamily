@@ -236,8 +236,7 @@ fun SmartwatchAchievementsWidget(
     customizationConfig: AppCustomizationConfig,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
-    onOpenAchievementsScreen: () -> Unit,
-    onQuickAdvanceGoal: (AchievementGoal) -> Unit
+    onOpenAchievementsScreen: () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
     val organicShape = RoundedCornerShape(cardRadius)
@@ -519,7 +518,7 @@ fun SmartwatchAchievementsWidget(
 
                     if (nextInProgress.isNotEmpty()) {
                         Text(
-                            text = "Próximas Medalhas para Desbloquear:",
+                            text = "Próximas Medalhas (Desbloqueio Automático):",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -528,7 +527,9 @@ fun SmartwatchAchievementsWidget(
                             Surface(
                                 shape = RoundedCornerShape(16.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenAchievementsScreen() }
                             ) {
                                 Row(
                                     modifier = Modifier
@@ -564,17 +565,17 @@ fun SmartwatchAchievementsWidget(
                                             )
                                         }
                                     }
-                                    FilledTonalButton(
-                                        onClick = { onQuickAdvanceGoal(goal) },
+                                    Surface(
                                         shape = RoundedCornerShape(50),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                        modifier = Modifier.testTag("hub_advance_goal_${goal.id}")
+                                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
                                     ) {
                                         Text(
-                                            text = "+1",
+                                            text = "${goal.progressPercentage}%",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontFamily = JetBrainsMonoFontFamily,
-                                            fontWeight = FontWeight.Bold
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                         )
                                     }
                                 }
@@ -671,7 +672,6 @@ private fun PillarMiniProgressChip(
 fun AchievementsMedalsScreen(
     summary: AchievementsEvaluationSummary,
     customizationConfig: AppCustomizationConfig,
-    onAdvanceGoalProgress: (AchievementGoal) -> Unit,
     onCreateCustomGoal: (
         title: String,
         description: String,
@@ -694,6 +694,7 @@ fun AchievementsMedalsScreen(
             "HEALTH" -> summary.goals.filter { it.module == AchievementModule.HEALTH }
             "FINANCE" -> summary.goals.filter { it.module == AchievementModule.FINANCE }
             "CALENDAR" -> summary.goals.filter { it.module == AchievementModule.CALENDAR }
+            "TRINITY" -> summary.goals.filter { it.module == AchievementModule.TRINITY }
             "UNLOCKED" -> summary.goals.filter { it.isUnlocked }
             "IN_PROGRESS" -> summary.goals.filter { !it.isUnlocked }
             else -> summary.goals
@@ -914,12 +915,15 @@ fun AchievementsMedalsScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val trinityUnlocked = summary.goals.count { it.module == AchievementModule.TRINITY && it.isUnlocked }
+                val trinityTotal = summary.goals.count { it.module == AchievementModule.TRINITY }
                 listOf(
                     "ALL" to "Todas (${summary.totalCount})",
                     "HEALTH" to "🩺 Saúde (${summary.healthUnlocked}/${summary.healthTotal})",
                     "FINANCE" to "💰 Financeiro (${summary.financeUnlocked}/${summary.financeTotal})",
                     "CALENDAR" to "📅 Calendário (${summary.calendarUnlocked}/${summary.calendarTotal})",
-                    "UNLOCKED" to "🏆 Conquistadas (${summary.unlockedCount})",
+                    "TRINITY" to "🏆 Tríade 360° ($trinityUnlocked/$trinityTotal)",
+                    "UNLOCKED" to "✨ Conquistadas (${summary.unlockedCount})",
                     "IN_PROGRESS" to "🎯 Em Progresso (${summary.totalCount - summary.unlockedCount})"
                 ).forEach { (filterId, label) ->
                     FilterChip(
@@ -1094,20 +1098,20 @@ fun AchievementsMedalsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        OutlinedButton(
-                            onClick = { onNavigateToModule(goal.module) },
-                            shape = RoundedCornerShape(50),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.testTag("open_goal_module_btn_${goal.id}")
-                        ) {
-                            Text(
-                                text = "Abrir ${goal.module.shortLabel}",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
                         if (goal.isUnlocked) {
+                            OutlinedButton(
+                                onClick = { onNavigateToModule(goal.module) },
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("open_goal_module_btn_${goal.id}")
+                            ) {
+                                Text(
+                                    text = "Abrir ${goal.module.shortLabel}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
                             FilledTonalButton(
                                 onClick = { inspectedGoal = goal },
                                 shape = RoundedCornerShape(50),
@@ -1127,22 +1131,46 @@ fun AchievementsMedalsScreen(
                                 )
                             }
                         } else {
-                            Button(
-                                onClick = { onAdvanceGoalProgress(goal) },
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(13.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = "Desbloqueio Automático",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            FilledTonalButton(
+                                onClick = { onNavigateToModule(goal.module) },
                                 shape = RoundedCornerShape(50),
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                                modifier = Modifier.testTag("advance_goal_progress_btn_${goal.id}")
+                                modifier = Modifier.testTag("open_goal_module_btn_${goal.id}")
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "Registrar +1 Etapa",
+                                    text = "Ir para ${goal.module.shortLabel}",
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp)
                                 )
                             }
                         }
@@ -1157,10 +1185,6 @@ fun AchievementsMedalsScreen(
         val goal = inspectedGoal!!
         MedalCertificateDialog(
             goal = goal,
-            onAdvanceProgress = {
-                onAdvanceGoalProgress(goal)
-                inspectedGoal = null
-            },
             onOpenModule = {
                 val mod = goal.module
                 inspectedGoal = null
@@ -1217,7 +1241,6 @@ private fun MedalTierCountBadge(
 @Composable
 private fun MedalCertificateDialog(
     goal: AchievementGoal,
-    onAdvanceProgress: () -> Unit,
     onOpenModule: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1248,7 +1271,7 @@ private fun MedalCertificateDialog(
                     text = if (goal.isUnlocked) {
                         "${goal.medalTier.emoji} ${goal.medalTier.badgeTitle} Conquistada!"
                     } else {
-                        "${goal.medalTier.emoji} Objetivo para ${goal.medalTier.badgeTitle}"
+                        "${goal.medalTier.emoji} Objetivo Automático • ${goal.medalTier.badgeTitle}"
                     },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.ExtraBold,
@@ -1290,7 +1313,7 @@ private fun MedalCertificateDialog(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Progresso: ${goal.currentValue} / ${goal.targetValue} ${goal.unitLabel} • Recompensa: +${goal.medalTier.xpReward} XP",
+                            text = "Progresso Automático: ${goal.currentValue} / ${goal.targetValue} ${goal.unitLabel} • +${goal.medalTier.xpReward} XP",
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = JetBrainsMonoFontFamily
                         )
@@ -1301,26 +1324,24 @@ private fun MedalCertificateDialog(
                                 color = IncomeEmerald,
                                 fontWeight = FontWeight.Bold
                             )
+                        } else {
+                            Text(
+                                text = "🔒 Esta medalha é concedida automaticamente assim que você concluir as ações reais no módulo de ${goal.module.shortLabel}.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
                         }
                     }
                 }
             }
         },
         confirmButton = {
-            if (!goal.isUnlocked) {
-                Button(
-                    onClick = onAdvanceProgress,
-                    shape = RoundedCornerShape(50)
-                ) {
-                    Text("Avançar +1 Etapa Agora")
-                }
-            } else {
-                Button(
-                    onClick = onOpenModule,
-                    shape = RoundedCornerShape(50)
-                ) {
-                    Text("Ir para ${goal.module.shortLabel}")
-                }
+            Button(
+                onClick = onOpenModule,
+                shape = RoundedCornerShape(50)
+            ) {
+                Text("Ir para ${goal.module.shortLabel}")
             }
         },
         dismissButton = {

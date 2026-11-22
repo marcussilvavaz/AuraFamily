@@ -231,6 +231,13 @@ fun MainFeatureScreen(
         )
     }
 
+    LaunchedEffect(achievementsSummary.newlyUnlockedGoalTitle) {
+        val unlockedTitle = achievementsSummary.newlyUnlockedGoalTitle
+        if (!unlockedTitle.isNullOrBlank()) {
+            localStudioBanner = "🏆 Nova Medalha Desbloqueada Automaticamente: $unlockedTitle!"
+        }
+    }
+
     // Keep repository member color synced with persisted profile color on startup
     LaunchedEffect(customizationConfig.profileName, customizationConfig.profileColorHex) {
         if (customizationConfig.profileName.isNotBlank()) {
@@ -403,18 +410,6 @@ fun MainFeatureScreen(
                                 onRequestGoogleLogin = onSignOut,
                                 onIncrementHealthTracker = { dateIso, trackerId, step ->
                                     healthRepo.incrementTrackerProgress(dateIso, trackerId, step)
-                                },
-                                onQuickAdvanceAchievement = { goal ->
-                                    val unlocked = achievementsRepo.incrementGoalProgress(
-                                        goalId = goal.id,
-                                        step = 1,
-                                        targetValue = goal.targetValue
-                                    )
-                                    localStudioBanner = if (unlocked) {
-                                        "🏆 Parabéns! Você conquistou a ${goal.medalTier.badgeTitle} (${goal.medalTier.emoji}): ${goal.title} (+${goal.medalTier.xpReward} XP)!"
-                                    } else {
-                                        "🎯 Progresso registrado em '${goal.title}'!"
-                                    }
                                 },
                                 onNextShiftQuote = { diaryRepo.refreshShiftQuote(forceNewQuote = true) },
                                 onOpenHealthScreen = { currentTab = 5 },
@@ -640,22 +635,10 @@ fun MainFeatureScreen(
                                 onShowBannerMessage = { localStudioBanner = it }
                             )
 
-                            // 7: GALERIA DE CONQUISTAS & MEDALHAS (Vinculada a Saúde, Financeiro e Calendário)
+                            // 7: GALERIA DE CONQUISTAS & MEDALHAS (100% Automática vinculada a Saúde, Financeiro e Calendário)
                             7 -> AchievementsMedalsScreen(
                                 summary = achievementsSummary,
                                 customizationConfig = customizationConfig,
-                                onAdvanceGoalProgress = { goal ->
-                                    val unlocked = achievementsRepo.incrementGoalProgress(
-                                        goalId = goal.id,
-                                        step = 1,
-                                        targetValue = goal.targetValue
-                                    )
-                                    localStudioBanner = if (unlocked) {
-                                        "🏆 Parabéns! Você conquistou a ${goal.medalTier.badgeTitle} (${goal.medalTier.emoji}): ${goal.title} (+${goal.medalTier.xpReward} XP)!"
-                                    } else {
-                                        "🎯 +1 etapa concluída no objetivo '${goal.title}'!"
-                                    }
-                                },
                                 onCreateCustomGoal = { title, desc, module, tier, target, unit ->
                                     val created = achievementsRepo.addCustomAchievementGoal(
                                         title = title,
