@@ -196,6 +196,8 @@ fun FamilySettingsScreen(
     onChangeThemeMode: (String) -> Unit,
     onOpenCustomizationStudio: () -> Unit,
     onOpenModularOnboardingScreen: () -> Unit = {},
+    achievementsSummary: com.example.data.AchievementsEvaluationSummary? = null,
+    onOpenAchievementsScreen: () -> Unit = {},
     updateState: AppUpdateUiState? = null,
     updateManager: AppUpdateManager? = null,
     onBackToHub: () -> Unit,
@@ -361,6 +363,52 @@ fun FamilySettingsScreen(
                                 tint = selectedMemberColor,
                                 modifier = Modifier.size(22.dp)
                             )
+                        }
+                    }
+
+                    // Compact Trophy & Medals Summary Bar in Profile Header
+                    if (achievementsSummary != null) {
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(20.dp))
+                                .clickable { onOpenAchievementsScreen() }
+                                .testTag("profile_open_achievements_card")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "🏆 Conquistas & Medalhas • Nível ${achievementsSummary.currentLevel}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                    Text(
+                                        text = "${achievementsSummary.unlockedCount}/${achievementsSummary.totalCount} medalhas (🩺 Saúde • 💰 Finanças • 📅 Agenda) • ${achievementsSummary.totalXp} XP",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                FilledTonalButton(
+                                    onClick = onOpenAchievementsScreen,
+                                    shape = RoundedCornerShape(50),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.testTag("profile_open_achievements_btn")
+                                ) {
+                                    Text(
+                                        text = "Ver Medalhas",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                         }
                     }
 

@@ -395,7 +395,7 @@ sealed interface UiState<out T> {
 }
 
 fun formatCurrencyBrl(amount: Double): String {
-    return String.format(Locale("pt", "BR"), "R$ %,.2f", amount)
+    return String.format(Locale.forLanguageTag("pt-BR"), "R$ %,.2f", amount)
 }
 
 fun formatCurrencyOriginal(amount: Double, currency: String): String {
@@ -405,5 +405,5 @@ fun formatCurrencyOriginal(amount: Double, currency: String): String {
         "GBP" -> "£"
         else -> "R$"
     }
-    return String.format(Locale("pt", "BR"), "%s %,.2f", symbol, amount)
+    return String.format(Locale.forLanguageTag("pt-BR"), "%s %,.2f", symbol, amount)
 }

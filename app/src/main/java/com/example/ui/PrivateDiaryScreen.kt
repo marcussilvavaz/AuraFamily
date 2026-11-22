@@ -345,7 +345,7 @@ fun PrivateDiaryScreen(
     }
 
     val dateFormatter = remember {
-        DateTimeFormatter.ofPattern("EEEE, dd 'de' MMMM", Locale("pt", "BR"))
+        DateTimeFormatter.ofPattern("EEEE, dd 'de' MMMM", Locale.forLanguageTag("pt-BR"))
     }
 
     LazyColumn(
@@ -434,7 +434,7 @@ fun PrivateDiaryScreen(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(
                                 text = selectedDate.format(dateFormatter)
-                                    .replaceFirstChar { it.titlecase(Locale("pt", "BR")) },
+                                    .replaceFirstChar { it.titlecase(Locale.forLanguageTag("pt-BR")) },
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.ExtraBold
                             )
@@ -576,10 +576,11 @@ fun PrivateDiaryScreen(
             }
         }
 
-        // 4. NOVO REGISTRO DE HUMOR E SINTOMAS POR HORA (Menu Expansível)
-        item {
-            AuraExpandableSectionCard(
-                title = "📝 Registrar Humor & Sintomas por Hora",
+        // 4. NOVO REGISTRO DE HUMOR E SINTOMAS POR HORA (Menu Expansível - Somente se marcado no questionário)
+        if (customizationConfig.hourlyMoodEnabled) {
+            item {
+                AuraExpandableSectionCard(
+                    title = "📝 Registrar Humor & Sintomas por Hora",
                 subtitle = "Carimbo das ${String.format(Locale.US, "%02d:%02d", entryHour, entryMinute)} • Humor, tags e relato livre",
                 icon = Icons.Default.EditNote,
                 accentColor = Color(customizationConfig.diaryColorHex),
@@ -763,6 +764,7 @@ fun PrivateDiaryScreen(
                     )
                 }
             }
+        }
         }
 
         // 5. LINHA DO TEMPO DIÁRIA ORDENADA POR HORA

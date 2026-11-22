@@ -43,12 +43,14 @@ object HubWidgetIds {
     const val HEALTH_SUMMARY = "HEALTH_SUMMARY"
     const val BALANCE_RING = "BALANCE_RING"
     const val BILLS_CURRENCY = "BILLS_CURRENCY"
+    const val ACHIEVEMENTS_MEDALS = "ACHIEVEMENTS_MEDALS"
     const val FAMILY_COLORS = "FAMILY_COLORS"
 
     val defaultOrder: List<String> = listOf(
         TASKS_TODAY,
         HEALTH_SUMMARY,
         BALANCE_RING,
+        ACHIEVEMENTS_MEDALS,
         BILLS_CURRENCY,
         FAMILY_COLORS
     )
@@ -132,7 +134,7 @@ data class AppCustomizationConfig(
     val diabetesSlots: Set<String> = DiabetesSlotCatalog.defaultSelectedSlots,
     val bloodPressureEnabled: Boolean = false,
     val bloodPressureReminderTime: String = "21:30 (Antes de dormir)",
-    val chronicPainFatigueEnabled: Boolean = true, // Ativa o botão "Modo Dia Difícil"
+    val chronicPainFatigueEnabled: Boolean = false, // Ativa o botão "Modo Dia Difícil" somente se marcado no questionário
     // 4. Diário e Acolhimento (switches)
     val hourlyMoodEnabled: Boolean = true,
     val threeShiftQuotesEnabled: Boolean = true,
@@ -205,6 +207,11 @@ object CustomizationCatalog {
             id = HubWidgetIds.BILLS_CURRENCY,
             title = "Contas a Vencer & Câmbio Rápido",
             subtitle = "Próximos vencimentos do mês e cotações USD, EUR e GBP"
+        ),
+        HubWidgetCatalogItem(
+            id = HubWidgetIds.ACHIEVEMENTS_MEDALS,
+            title = "Conquistas & Medalhas (Saúde, Finanças e Agenda)",
+            subtitle = "Objetivos integrados, medalhas de Bronze a Diamante e nível de evolução"
         ),
         HubWidgetCatalogItem(
             id = HubWidgetIds.FAMILY_COLORS,
@@ -460,6 +467,9 @@ class CustomizationRepository(context: Context) {
             if (savedOrderRaw != null && !savedOrderRaw.contains(HubWidgetIds.HEALTH_SUMMARY)) {
                 baseSet.add(HubWidgetIds.HEALTH_SUMMARY)
             }
+            if (savedOrderRaw != null && !savedOrderRaw.contains(HubWidgetIds.ACHIEVEMENTS_MEDALS)) {
+                baseSet.add(HubWidgetIds.ACHIEVEMENTS_MEDALS)
+            }
             baseSet
         }
 
@@ -530,7 +540,7 @@ class CustomizationRepository(context: Context) {
             bloodPressureEnabled = prefs.getBoolean(KEY_BP_ENABLED, false),
             bloodPressureReminderTime = prefs.getString(KEY_BP_REMINDER_TIME, "21:30 (Antes de dormir)")
                 ?: "21:30 (Antes de dormir)",
-            chronicPainFatigueEnabled = prefs.getBoolean(KEY_PAIN_FATIGUE_ENABLED, true),
+            chronicPainFatigueEnabled = prefs.getBoolean(KEY_PAIN_FATIGUE_ENABLED, false),
             hourlyMoodEnabled = prefs.getBoolean(KEY_HOURLY_MOOD_ENABLED, true),
             threeShiftQuotesEnabled = prefs.getBoolean(KEY_THREE_SHIFT_QUOTES_ENABLED, true),
             aiSupportLetterEnabled = prefs.getBoolean(KEY_AI_SUPPORT_LETTER_ENABLED, true),

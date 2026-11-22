@@ -3,6 +3,8 @@ package com.example.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,14 +27,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -51,7 +57,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -166,7 +171,7 @@ fun AppUpdateTopPillBanner(
                                 color = MaterialTheme.colorScheme.onPrimaryContainer
                             )
                             Text(
-                                text = "Alterações foram feitas no projeto. Toque para atualizar seu app instalado.",
+                                text = "Alterações foram feitas no projeto. Toque para baixar o APK ou atualizar.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                             )
@@ -177,7 +182,7 @@ fun AppUpdateTopPillBanner(
                             color = MaterialTheme.colorScheme.primary
                         ) {
                             Text(
-                                text = "Atualizar",
+                                text = "Baixar APK",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = MaterialTheme.colorScheme.onPrimary,
@@ -203,8 +208,28 @@ fun AppUpdateAvailableDialog(
 
     val context = LocalContext.current
     val dateFormatted = remember(remote.updatedAtEpochMs) {
-        SimpleDateFormat("dd/MM/yyyy 'às' HH:mm", Locale("pt", "BR"))
+        SimpleDateFormat("dd/MM/yyyy 'às' HH:mm", Locale.forLanguageTag("pt-BR"))
             .format(Date(remote.updatedAtEpochMs))
+    }
+
+    val hasExternalApkLink = remember(remote.downloadUrl, updateState.customDownloadUrl) {
+        updateManager.hasValidExternalDownloadUrl(remote.downloadUrl)
+    }
+    val effectiveExternalUrl = remember(remote.downloadUrl, updateState.customDownloadUrl) {
+        updateManager.getEffectiveExternalDownloadUrl(remote.downloadUrl)
+    }
+
+    // Native Android Storage Access Framework launcher to save the .APK file directly to Downloads / Drive
+    val saveApkLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/vnd.android.package-archive")
+    ) { destUri ->
+        if (destUri != null) {
+            updateManager.exportCurrentInstalledApkToUri(context, destUri)
+                .onSuccess { msg -> onShowMessage(msg) }
+                .onFailure { e ->
+                    onShowMessage("Não foi possível salvar o APK: ${e.localizedMessage ?: "erro de gravação"}")
+                }
+        }
     }
 
     AlertDialog(
@@ -271,10 +296,10 @@ fun AppUpdateAvailableDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "Foram feitas novas alterações no projeto Aura Finanças. Atualize seu aplicativo instalado para receber as novidades mais recentes.",
+                    text = "Foram feitas novas alterações no projeto Aura Finanças. Escolha abaixo como deseja baixar o instalador .APK ou sincronizar seu aparelho:",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -322,7 +347,7 @@ fun AppUpdateAvailableDialog(
                             )
                         }
                         Text(
-                            text = "Publicada em $dateFormatted",
+                            text = "Publicada em $dateFormatted • Pacote ${updateState.localApkSizeLabel}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -351,58 +376,143 @@ fun AppUpdateAvailableDialog(
                     }
                 }
 
-                // Download action buttons
-                Button(
+                // PRIMARY ACTION 1: If a custom external APK link (Google Drive / GitHub) is configured, open it directly;
+                // otherwise, directly download/save the compiled .APK file onto the device!
+                if (hasExternalApkLink) {
+                    Button(
+                        onClick = {
+                            val opened = updateManager.openUpdateDownloadLink(context, effectiveExternalUrl)
+                            if (!opened) {
+                                copyUrlToClipboard(context, effectiveExternalUrl)
+                                onShowMessage("Link direto do APK copiado: $effectiveExternalUrl")
+                            }
+                        },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("btn_confirm_update_now")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Baixar Novo APK (Link Direto)",
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+
+                    FilledTonalButton(
+                        onClick = {
+                            saveApkLauncher.launch(updateManager.suggestedApkFileName())
+                        },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("btn_save_apk_direct_modal")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SystemUpdate,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Salvar Instalador .APK no Celular (${updateState.localApkSizeLabel})",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                } else {
+                    Button(
+                        onClick = {
+                            saveApkLauncher.launch(updateManager.suggestedApkFileName())
+                        },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("btn_confirm_update_now")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Baixar Arquivo .APK no Celular (${updateState.localApkSizeLabel})",
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+
+                // ACTION 2: Share .APK directly to Google Drive / WhatsApp / Quick Share
+                FilledTonalButton(
                     onClick = {
-                        val opened = updateManager.openUpdateDownloadLink(context, remote.downloadUrl)
-                        if (!opened) {
-                            copyUrlToClipboard(context, remote.downloadUrl)
-                            onShowMessage("Link de atualização copiado para a área de transferência!")
-                        }
+                        updateManager.shareCurrentInstalledApk(context)
+                            .onSuccess { msg -> onShowMessage(msg) }
+                            .onFailure {
+                                saveApkLauncher.launch(updateManager.suggestedApkFileName())
+                            }
                     },
                     shape = RoundedCornerShape(50),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("btn_confirm_update_now")
+                        .testTag("btn_share_apk_modal")
                 ) {
                     Icon(
-                        imageVector = Icons.Default.SystemUpdate,
+                        imageVector = Icons.Default.Share,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Baixar e Atualizar Agora",
-                        fontWeight = FontWeight.ExtraBold
+                        text = "Enviar / Salvar .APK (Google Drive ou WhatsApp)",
+                        fontWeight = FontWeight.Bold
                     )
                 }
 
+                // ACTION 3: Open AI Studio Apps Portal or Copy External Link + Mark as Updated
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     OutlinedButton(
                         onClick = {
-                            copyUrlToClipboard(context, remote.downloadUrl)
-                            onShowMessage("Link de download copiado: ${remote.downloadUrl}")
+                            if (hasExternalApkLink) {
+                                copyUrlToClipboard(context, effectiveExternalUrl)
+                                onShowMessage("Link direto do APK copiado: $effectiveExternalUrl")
+                            } else {
+                                val opened = updateManager.openAiStudioPortal(context)
+                                if (opened) {
+                                    onShowMessage("No AI Studio: toque no menu ⋮ / Configurações → Generate APK para baixar da nuvem.")
+                                } else {
+                                    copyUrlToClipboard(context, AppReleaseMetadata.AI_STUDIO_PORTAL_URL)
+                                    onShowMessage("Link do AI Studio copiado!")
+                                }
+                            }
                         },
                         shape = RoundedCornerShape(50),
                         modifier = Modifier.weight(1f)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.ContentCopy,
+                            imageVector = if (hasExternalApkLink) Icons.Default.ContentCopy else Icons.Default.OpenInBrowser,
                             contentDescription = null,
                             modifier = Modifier.size(15.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Copiar Link", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            text = if (hasExternalApkLink) "Copiar Link" else "Abrir AI Studio",
+                            style = MaterialTheme.typography.labelMedium
+                        )
                     }
 
                     if (!remote.mandatory) {
                         OutlinedButton(
                             onClick = {
                                 updateManager.acknowledgeCurrentRevisionOnThisDevice()
-                                onShowMessage("Revisão #${remote.buildRevision} marcada como instalada neste aparelho.")
+                                onShowMessage("✅ Revisão #${remote.buildRevision} sincronizada e confirmada neste aparelho!")
                             },
                             shape = RoundedCornerShape(50),
                             modifier = Modifier.weight(1f)
@@ -433,6 +543,7 @@ fun AppUpdateControlCenterCard(
     updateManager: AppUpdateManager,
     onShowMessage: (String) -> Unit
 ) {
+    val context = LocalContext.current
     val cardRadius = LocalOrganicCardRadius.current
     var downloadUrlInput by remember(updateState.customDownloadUrl) {
         mutableStateOf(updateState.customDownloadUrl)
@@ -445,7 +556,19 @@ fun AppUpdateControlCenterCard(
     var mandatoryToggle by remember(updateState.remoteRelease?.mandatory) {
         mutableStateOf(updateState.remoteRelease?.mandatory ?: false)
     }
-    var isExpanded by remember { mutableStateOf(true) }
+    var isExpanded by remember { mutableStateOf(false) }
+
+    val saveApkLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/vnd.android.package-archive")
+    ) { destUri ->
+        if (destUri != null) {
+            updateManager.exportCurrentInstalledApkToUri(context, destUri)
+                .onSuccess { msg -> onShowMessage(msg) }
+                .onFailure { e ->
+                    onShowMessage("Não foi possível salvar o APK: ${e.localizedMessage ?: "erro de gravação"}")
+                }
+        }
+    }
 
     Card(
         modifier = Modifier
@@ -485,7 +608,7 @@ fun AppUpdateControlCenterCard(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "Atualizações Automáticas do App",
+                            text = "Atualizações & Instalador .APK",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.ExtraBold
                         )
@@ -503,7 +626,7 @@ fun AppUpdateControlCenterCard(
                         }
                     }
                     Text(
-                        text = "v${updateState.localVersionName} • Build #${updateState.localBuildSignature} • Rev #${updateState.remoteRelease?.buildRevision ?: updateState.localKnownRevision}",
+                        text = "v${updateState.localVersionName} • Build #${updateState.localBuildSignature} • ${updateState.localApkSizeLabel} • Rev #${updateState.remoteRelease?.buildRevision ?: updateState.localKnownRevision}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -545,9 +668,115 @@ fun AppUpdateControlCenterCard(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Como funciona: toda vez que uma alteração é compilada aqui no Studio, a assinatura do código (#${updateState.localBuildSignature}) muda automaticamente e avisa em tempo real (via Firebase) os celulares com o APK anterior instalado para atualizarem.",
+                        text = "Você pode baixar o arquivo instalador .APK diretamente para a pasta Downloads do celular, enviar para o Google Drive/WhatsApp ou avisar outros aparelhos em tempo real.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Direct APK Download & Share Row (works 100% offline/locally without any broken web link)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = {
+                        saveApkLauncher.launch(updateManager.suggestedApkFileName())
+                    },
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("btn_export_local_apk_file")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Download,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Baixar .APK (${updateState.localApkSizeLabel})",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+
+                FilledTonalButton(
+                    onClick = {
+                        updateManager.shareCurrentInstalledApk(context)
+                            .onSuccess { msg -> onShowMessage(msg) }
+                            .onFailure {
+                                saveApkLauncher.launch(updateManager.suggestedApkFileName())
+                            }
+                    },
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("btn_share_local_apk_file")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Enviar (Drive/Zap)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Live Sync Broadcast & Test Modal Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        updateManager.publishCurrentBuildImmediately { _, msg ->
+                            onShowMessage(msg)
+                        }
+                    },
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("btn_quick_publish_update_now")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.NotificationsActive,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Avisar Aparelhos",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        updateManager.simulateIncomingUpdatePrompt(
+                            customNotes = releaseNotesInput,
+                            customUrl = downloadUrlInput,
+                            mandatory = mandatoryToggle
+                        )
+                    },
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.testTag("btn_quick_preview_update_modal")
+                ) {
+                    Text(
+                        text = "Testar Modal",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }
@@ -559,19 +788,26 @@ fun AppUpdateControlCenterCard(
                     Spacer(modifier = Modifier.height(14.dp))
 
                     Text(
-                        text = "Configurar Aviso de Atualização nos Aparelhos Instalados",
+                        text = "Configurar Link na Nuvem (Google Drive / GitHub) & Notas",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.ExtraBold,
                         color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "💡 Dica: Toque em 'Enviar (Drive/Zap)' acima para salvar o APK no seu Google Drive. Se colar o link de compartilhamento do Google Drive abaixo, o app converte automaticamente em download direto!",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
                     OutlinedTextField(
                         value = downloadUrlInput,
                         onValueChange = { downloadUrlInput = it },
-                        label = { Text("Link para Baixar o Novo APK / Projeto") },
+                        label = { Text("Link Externo do APK (Opcional: Google Drive / Dropbox / GitHub)") },
+                        placeholder = { Text("Ex: https://drive.google.com/file/d/.../view") },
                         supportingText = {
-                            Text("Link aberto quando o usuário toca em 'Baixar e Atualizar Agora' (ex: link do Studio, Google Drive ou GitHub)")
+                            Text("Se deixado em branco, o botão 'Baixar Arquivo .APK' salvará o instalador diretamente na memória do celular.")
                         },
                         singleLine = true,
                         modifier = Modifier
@@ -629,9 +865,11 @@ fun AppUpdateControlCenterCard(
 
                     Button(
                         onClick = {
+                            val normalized = AppUpdateManager.sanitizeAndNormalizeUrl(downloadUrlInput)
+                            downloadUrlInput = normalized
                             updateManager.publishManualUpdateToInstalledDevices(
                                 releaseNotes = releaseNotesInput,
-                                downloadUrl = downloadUrlInput,
+                                downloadUrl = normalized,
                                 mandatory = mandatoryToggle,
                                 alsoShowPromptOnThisDevice = false
                             ) { _, msg ->
@@ -650,7 +888,7 @@ fun AppUpdateControlCenterCard(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Pedir Atualização nos Aparelhos Instalados Agora",
+                            text = "Salvar e Enviar Aviso aos Aparelhos Instalados",
                             fontWeight = FontWeight.ExtraBold
                         )
                     }

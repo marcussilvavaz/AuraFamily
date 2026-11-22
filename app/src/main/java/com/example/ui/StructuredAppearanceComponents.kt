@@ -47,7 +47,7 @@ import java.time.YearMonth
 import java.time.format.TextStyle
 import java.util.Locale
 
-private val PtBrLocale = Locale("pt", "BR")
+private val PtBrLocale = Locale.forLanguageTag("pt-BR")
 
 /**
  * Reusable Expandable Section Card to keep screens clean and organized.

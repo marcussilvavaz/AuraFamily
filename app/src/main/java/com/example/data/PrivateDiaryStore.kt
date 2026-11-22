@@ -574,7 +574,7 @@ class PrivateDiaryRepository(
         }
 
         val moodSummary = buildMoodAndSymptomsDigest(entriesForContext)
-        val nowTimeFormatted = SimpleDateFormat("HH:mm", Locale("pt", "BR")).format(Date())
+        val nowTimeFormatted = SimpleDateFormat("HH:mm", Locale.forLanguageTag("pt-BR")).format(Date())
         val currentShift = DayShift.currentShift()
         val apiKey = getConfiguredGeminiApiKey()
 
@@ -915,7 +915,7 @@ object VoiceCommandInterpreter {
         referenceEpochDay: Long = LocalDate.now().toEpochDay()
     ): ParsedVoiceCommand {
         val clean = transcript.trim()
-        val lower = clean.lowercase(Locale("pt", "BR"))
+        val lower = clean.lowercase(Locale.forLanguageTag("pt-BR"))
 
         // 1. Classify primary intent
         val hasExpenseKeyword = listOf(
@@ -1043,7 +1043,7 @@ object VoiceCommandInterpreter {
             .replace(Regex("""(?i)^(na|no|em|com|de|por)\s+"""), "")
             .replace(Regex("""\s+"""), " ")
             .trim()
-            .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale("pt", "BR")) else it.toString() }
+            .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.forLanguageTag("pt-BR")) else it.toString() }
 
         return if (cleaned.length >= 2) cleaned else category
     }
@@ -1079,7 +1079,7 @@ object VoiceCommandInterpreter {
             .replace(Regex("""(?i)\s+(hoje|amanhã|amanha|depois de amanhã)\s+(às|as)\s+\d{1,2}([h:]\d{0,2}|\s*horas?)?"""), "")
             .replace(Regex("""(?i)\s+(às|as)\s+\d{1,2}([h:]\d{0,2}|\s*horas?)?"""), "")
             .trim()
-            .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale("pt", "BR")) else it.toString() }
+            .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.forLanguageTag("pt-BR")) else it.toString() }
     }
 
     private fun inferMoodFromSpeech(lower: String): String {

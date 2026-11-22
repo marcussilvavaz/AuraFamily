@@ -178,18 +178,21 @@ fun FamilyHubScreen(
     customizationConfig: AppCustomizationConfig,
     healthState: com.example.data.HealthModuleState = com.example.data.HealthModuleState(),
     diaryState: com.example.data.PrivateDiaryState? = null,
+    achievementsSummary: com.example.data.AchievementsEvaluationSummary = com.example.data.AchievementsEvaluationSummary(),
     userEmail: String? = null,
     onRequestGoogleLogin: () -> Unit = {},
     onShiftMonth: (Int) -> Unit,
     onToggleTask: (TaskItem) -> Unit,
     onPostSubscriptionNow: (SubscriptionBill) -> Unit,
     onIncrementHealthTracker: (dateIso: String, trackerId: String, step: Int) -> Unit = { _, _, _ -> },
+    onQuickAdvanceAchievement: (com.example.data.AchievementGoal) -> Unit = {},
     onNextShiftQuote: () -> Unit = {},
     onOpenNewTaskDialog: () -> Unit,
     onOpenNewTransactionDialog: () -> Unit,
     onOpenAgendaScreen: () -> Unit,
     onOpenHealthScreen: () -> Unit = {},
     onOpenDiaryScreen: () -> Unit = {},
+    onOpenAchievementsScreen: () -> Unit = {},
     onOpenFinanceScreen: (subSection: Int) -> Unit,
     onOpenProfileSettings: () -> Unit
 ) {
@@ -201,6 +204,7 @@ fun FamilyHubScreen(
             HubWidgetIds.TASKS_TODAY to false,
             HubWidgetIds.HEALTH_SUMMARY to false,
             HubWidgetIds.BALANCE_RING to false,
+            HubWidgetIds.ACHIEVEMENTS_MEDALS to false,
             HubWidgetIds.BILLS_CURRENCY to false,
             HubWidgetIds.FAMILY_COLORS to false
         )
@@ -526,6 +530,22 @@ fun FamilyHubScreen(
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("Finanças", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                             }
+
+                            FilledTonalButton(
+                                onClick = onOpenAchievementsScreen,
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .height(36.dp)
+                                    .testTag("enter_achievements_module_btn")
+                            ) {
+                                Text(
+                                    text = "🏆 ${achievementsSummary.unlockedCount}/${achievementsSummary.totalCount}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
@@ -686,6 +706,15 @@ fun FamilyHubScreen(
                         onToggleExpand = { expandedWidgets[widgetId] = !isExpanded },
                         onPostSubscriptionNow = onPostSubscriptionNow,
                         onOpenFinanceBills = { onOpenFinanceScreen(1) }
+                    )
+
+                    HubWidgetIds.ACHIEVEMENTS_MEDALS -> SmartwatchAchievementsWidget(
+                        summary = achievementsSummary,
+                        customizationConfig = customizationConfig,
+                        expanded = isExpanded,
+                        onToggleExpand = { expandedWidgets[widgetId] = !isExpanded },
+                        onOpenAchievementsScreen = onOpenAchievementsScreen,
+                        onQuickAdvanceGoal = onQuickAdvanceAchievement
                     )
 
                     HubWidgetIds.FAMILY_COLORS -> SmartwatchFamilyColorsWidget(
@@ -1809,16 +1838,26 @@ private fun SmartwatchHealthWidget(
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
-                        val glucoseLabel = latestGlucose?.let { "🩸 ${it.valueMgDl} mg/dL" } ?: "🩸 Sem glicemia"
-                        val bpLabel = latestBp?.let { "❤️ ${it.systolic}/${it.diastolic} mmHg" } ?: "❤️ Sem pressão"
+                        val enabledVitalsSummary = buildList {
+                            if (customizationConfig.diabetesEnabled) {
+                                add(latestGlucose?.let { "🩸 ${it.valueMgDl} mg/dL" } ?: "🩸 Sem glicemia")
+                            }
+                            if (customizationConfig.bloodPressureEnabled) {
+                                add(latestBp?.let { "❤️ ${it.systolic}/${it.diastolic} mmHg" } ?: "❤️ Sem pressão")
+                            }
+                        }
                         Text(
-                            text = "$glucoseLabel • $bpLabel",
+                            text = if (enabledVitalsSummary.isNotEmpty()) {
+                                enabledVitalsSummary.joinToString(" • ")
+                            } else {
+                                "$completedTrackers de $totalTrackers inegociáveis concluídos hoje"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = JetBrainsMonoFontFamily,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        if (timer.isRunning || timer.completedAlertPending) {
+                        if (customizationConfig.diabetesEnabled && (timer.isRunning || timer.completedAlertPending)) {
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = if (timer.completedAlertPending) {
@@ -1924,48 +1963,54 @@ private fun SmartwatchHealthWidget(
                         }
                     }
 
-                    // Latest clinical measurements summary chips
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                            modifier = Modifier.weight(1f)
+                    // Latest clinical measurements summary chips (only for marked questionnaire modules)
+                    if (customizationConfig.diabetesEnabled || customizationConfig.bloodPressureEnabled) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Column(modifier = Modifier.padding(10.dp)) {
-                                Text(
-                                    text = "Última Glicemia",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Text(
-                                    text = latestGlucose?.let { "${it.valueMgDl} mg/dL (${it.slot})" } ?: "Sem registro",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    fontWeight = FontWeight.Bold
-                                )
+                            if (customizationConfig.diabetesEnabled) {
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text(
+                                            text = "Última Glicemia",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = latestGlucose?.let { "${it.valueMgDl} mg/dL (${it.slot})" } ?: "Sem registro",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
                             }
-                        }
 
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Column(modifier = Modifier.padding(10.dp)) {
-                                Text(
-                                    text = "Última Pressão",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Text(
-                                    text = latestBp?.let { "${it.systolic}/${it.diastolic} mmHg" } ?: "Sem registro",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    fontWeight = FontWeight.Bold
-                                )
+                            if (customizationConfig.bloodPressureEnabled) {
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text(
+                                            text = "Última Pressão",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = latestBp?.let { "${it.systolic}/${it.diastolic} mmHg" } ?: "Sem registro",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -1977,7 +2022,13 @@ private fun SmartwatchHealthWidget(
                             .fillMaxWidth()
                             .testTag("hub_open_health_module_btn")
                     ) {
-                        Text("Abrir Módulo de Saúde, Timer 1h & Relatório PDF")
+                        Text(
+                            if (customizationConfig.diabetesEnabled) {
+                                "Abrir Módulo de Saúde, Timer 1h & Relatório PDF"
+                            } else {
+                                "Abrir Módulo de Saúde & Relatório PDF"
+                            }
+                        )
                         Spacer(modifier = Modifier.width(6.dp))
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowForward,

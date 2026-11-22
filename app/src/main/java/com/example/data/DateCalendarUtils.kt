@@ -78,7 +78,7 @@ object DateCalendarUtils {
     fun formatEpochDayPt(epochDay: Long): String {
         val (y, m, d) = fromEpochDay(epochDay)
         val monthShort = monthNamesPt[(m - 1).coerceIn(0, 11)].take(3)
-        return String.format(Locale("pt", "BR"), "%02d de %s, %04d", d, monthShort, y)
+        return String.format(Locale.forLanguageTag("pt-BR"), "%02d de %s, %04d", d, monthShort, y)
     }
 
     fun formatIsoDate(epochDay: Long): String {
@@ -165,7 +165,7 @@ object DateCalendarUtils {
     }
 
     fun currentTimestampLabel(): String {
-        val sdf = SimpleDateFormat("dd/MM HH:mm", Locale("pt", "BR"))
+        val sdf = SimpleDateFormat("dd/MM HH:mm", Locale.forLanguageTag("pt-BR"))
         return sdf.format(Date())
     }
 }

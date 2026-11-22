@@ -60,7 +60,7 @@ service cloud.firestore {
                        incoming().keys().hasOnly([
                          'userId', 'displayName', 'householdId', 'themeMode', 'baseCurrency',
                          'memberColorHex', 'avatarInitials', 'avatarEmoji', 'memberRole',
-                         'createdAt', 'updatedAt'
+                         'defaultSplitPercentage', 'createdAt', 'updatedAt'
                        ]) &&
                        isValidUserProfile(incoming());
 
@@ -73,7 +73,7 @@ service cloud.firestore {
                        incoming().diff(existing()).affectedKeys().hasOnly([
                          'displayName', 'householdId', 'themeMode', 'baseCurrency',
                          'memberColorHex', 'avatarInitials', 'avatarEmoji', 'memberRole',
-                         'updatedAt'
+                         'defaultSplitPercentage', 'updatedAt'
                        ]);
 
       allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
@@ -202,7 +202,7 @@ service cloud.firestore {
                        incoming().keys().hasOnly([
                          'householdId', 'name', 'ownerId', 'monthlyIncomeBrl',
                          'needsPercentage', 'wantsPercentage', 'savingsPercentage',
-                         'memberIds', 'membersMap', 'defaultSplitMode', 'createdAt', 'updatedAt'
+                         'memberIds', 'members', 'membersMap', 'defaultSplitMode', 'createdAt', 'updatedAt'
                        ]) &&
                        isValidHousehold(incoming());
 
@@ -215,7 +215,7 @@ service cloud.firestore {
                        incoming().createdAt == existing().createdAt &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
                          'name', 'monthlyIncomeBrl', 'needsPercentage', 'wantsPercentage', 'savingsPercentage',
-                         'memberIds', 'membersMap', 'defaultSplitMode', 'updatedAt'
+                         'memberIds', 'members', 'membersMap', 'defaultSplitMode', 'updatedAt'
                        ]);
 
       allow delete: if isSignedIn() && isValidId(householdId) && existing().ownerId == request.auth.uid;
@@ -237,7 +237,9 @@ service cloud.firestore {
                            'assignedMemberColorHex', 'assignedMemberEmoji', 'createdByName', 'createdByColorHex',
                            'createdByEmoji', 'completedByUserId', 'completedByName', 'linkedTransactionId',
                            'linkedSubscriptionId', 'estimatedCostBrl', 'autoCreateExpenseOnComplete',
-                           'splitMode', 'splitWithMemberIds', 'splitSharesMap',
+                           'splitMode', 'splitWithMemberIds', 'splitShares', 'splitSharesMap',
+                           'isEssential', 'isInbox', 'durationMinutes', 'iconEmoji', 'taskColorHex',
+                           'recurrence', 'subtasks', 'ringtoneCategory',
                            'createdAt', 'updatedAt'
                          ]) &&
                          isValidTaskItem(incoming()) &&
@@ -257,7 +259,9 @@ service cloud.firestore {
                            'assignedMemberColorHex', 'assignedMemberEmoji', 'createdByName', 'createdByColorHex',
                            'createdByEmoji', 'completedByUserId', 'completedByName', 'linkedTransactionId',
                            'linkedSubscriptionId', 'estimatedCostBrl', 'autoCreateExpenseOnComplete',
-                           'splitMode', 'splitWithMemberIds', 'splitSharesMap',
+                           'splitMode', 'splitWithMemberIds', 'splitShares', 'splitSharesMap',
+                           'isEssential', 'isInbox', 'durationMinutes', 'iconEmoji', 'taskColorHex',
+                           'recurrence', 'subtasks', 'ringtoneCategory',
                            'updatedAt'
                          ]);
 
@@ -280,7 +284,7 @@ service cloud.firestore {
                            'recurringSourceId', 'createdByName', 'createdByColorHex', 'createdByEmoji',
                            'privacyScope', 'visibleToMemberIds', 'responsibleMemberId', 'responsibleMemberName',
                            'responsibleMemberColorHex', 'responsibleMemberEmoji', 'splitMode', 'splitWithMemberIds',
-                           'splitSharesMap', 'linkedTaskId', 'generateCalendarTask',
+                           'splitShares', 'splitSharesMap', 'linkedTaskId', 'generateCalendarTask',
                            'createdAt', 'updatedAt'
                          ]) &&
                          isValidFinanceTransaction(incoming()) &&
@@ -299,7 +303,7 @@ service cloud.firestore {
                            'createdByName', 'createdByColorHex', 'createdByEmoji',
                            'privacyScope', 'visibleToMemberIds', 'responsibleMemberId', 'responsibleMemberName',
                            'responsibleMemberColorHex', 'responsibleMemberEmoji', 'splitMode', 'splitWithMemberIds',
-                           'splitSharesMap', 'linkedTaskId', 'generateCalendarTask',
+                           'splitShares', 'splitSharesMap', 'linkedTaskId', 'generateCalendarTask',
                            'updatedAt'
                          ]);
 
@@ -322,8 +326,8 @@ service cloud.firestore {
                            'autoPostEnabled', 'lastPostedYearMonth', 'active',
                            'privacyScope', 'visibleToMemberIds', 'responsibleMemberId', 'responsibleMemberName',
                            'responsibleMemberColorHex', 'responsibleMemberEmoji', 'splitMode', 'splitWithMemberIds',
-                           'splitSharesMap', 'syncDueDayToCalendar', 'linkedTaskId',
-                           'createdAt', 'updatedAt'
+                           'splitShares', 'splitSharesMap', 'syncDueDayToCalendar', 'linkedTaskId',
+                           'ringtoneCategory', 'createdAt', 'updatedAt'
                          ]) &&
                          isValidSubscriptionBill(incoming()) &&
                          isHouseholdMember(householdId);
@@ -341,8 +345,8 @@ service cloud.firestore {
                            'autoPostEnabled', 'lastPostedYearMonth', 'active',
                            'privacyScope', 'visibleToMemberIds', 'responsibleMemberId', 'responsibleMemberName',
                            'responsibleMemberColorHex', 'responsibleMemberEmoji', 'splitMode', 'splitWithMemberIds',
-                           'splitSharesMap', 'syncDueDayToCalendar', 'linkedTaskId',
-                           'updatedAt'
+                           'splitShares', 'splitSharesMap', 'syncDueDayToCalendar', 'linkedTaskId',
+                           'ringtoneCategory', 'updatedAt'
                          ]);
 
         allow delete: if isSignedIn() && isValidId(subscriptionId) && isHouseholdMember(householdId);
@@ -399,11 +403,12 @@ service cloud.firestore {
              data.downloadUrl is string && data.downloadUrl.size() <= 500 &&
              data.mandatory is bool &&
              data.publishedBy is string && data.publishedBy.size() <= 80 &&
-             data.updatedAtEpochMs is int && data.updatedAtEpochMs >= 0;
+             data.updatedAtEpochMs is int && data.updatedAtEpochMs >= 0 &&
+             (!('buildTimestampMs' in data) || (data.buildTimestampMs is int && data.buildTimestampMs >= 0));
     }
 
     match /app_releases/{releaseId} {
-      allow get: if releaseId == 'latest';
+      allow read: if releaseId == 'latest';
       allow create, update: if releaseId == 'latest' &&
                                incoming().keys().hasAll([
                                  'buildRevision', 'versionCode', 'versionName', 'dexSignature',
@@ -413,7 +418,7 @@ service cloud.firestore {
                                incoming().keys().hasOnly([
                                  'buildRevision', 'versionCode', 'versionName', 'dexSignature',
                                  'releaseNotes', 'downloadUrl', 'mandatory',
-                                 'publishedBy', 'updatedAtEpochMs'
+                                 'publishedBy', 'updatedAtEpochMs', 'buildTimestampMs'
                                ]) &&
                                isValidAppRelease(incoming());
     }

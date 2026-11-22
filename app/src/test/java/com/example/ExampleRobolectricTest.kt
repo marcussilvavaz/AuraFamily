@@ -210,4 +210,139 @@ class ExampleRobolectricTest {
         assertEquals(OrganicVisualStyle.ORGANICO_FLUIDO, repo.configFlow.value.organicVisualStyle)
         assertEquals(34, repo.configFlow.value.cardCornerRadiusDp)
     }
+
+    @Test
+    fun `verify specific questionnaire modules only appear when marked by the user`() {
+        val defaultConfig = AppCustomizationConfig()
+        assertFalse(defaultConfig.pregnancyEnabled)
+        assertFalse(defaultConfig.diabetesEnabled)
+        assertFalse(defaultConfig.bloodPressureEnabled)
+        assertFalse(defaultConfig.chronicPainFatigueEnabled)
+
+        // When pregnancyEnabled is false, Pré-Natal suggestion must NOT be shown
+        val suggestionsWithoutPregnancy = HealthCatalog.financeSuggestionsFor(defaultConfig)
+        assertFalse(suggestionsWithoutPregnancy.any { it.id == "hf_prenatal" })
+
+        // When pregnancyEnabled is true, Pré-Natal suggestion MUST be shown
+        val configWithPregnancy = defaultConfig.copy(pregnancyEnabled = true, pregnancyDppDate = "15/03/2027")
+        val suggestionsWithPregnancy = HealthCatalog.financeSuggestionsFor(configWithPregnancy)
+        assertTrue(suggestionsWithPregnancy.any { it.id == "hf_prenatal" })
+    }
+
+    @Test
+    fun `verify Achievements and Medals system evaluates Health Finance and Calendar goals and unlocks medals`() {
+        val achievementsRepo = AchievementsRepository(context)
+        val healthRepo = HealthRepository(context)
+        val config = AppCustomizationConfig()
+
+        // Create a custom objective tied to Financeiro with a Gold Medal
+        val customGoal = achievementsRepo.addCustomAchievementGoal(
+            title = "Aporte Extra na Reserva",
+            description = "Realizar 2 aportes extras na reserva de emergência",
+            module = AchievementModule.FINANCE,
+            medalTier = MedalTier.GOLD,
+            targetValue = 2,
+            unitLabel = "aportes"
+        )
+
+        // Increment progress twice to unlock the Gold Medal
+        assertFalse(achievementsRepo.incrementGoalProgress(customGoal.id, step = 1, targetValue = 2))
+        assertTrue(achievementsRepo.incrementGoalProgress(customGoal.id, step = 1, targetValue = 2))
+
+        val summary = achievementsRepo.evaluateAchievements(
+            healthState = healthRepo.stateFlow.value,
+            customizationConfig = config,
+            tasks = listOf(
+                TaskItem(
+                    id = "t1",
+                    householdId = "FAM",
+                    title = "Revisar orçamento",
+                    notes = "",
+                    category = "Finanças",
+                    priority = "HIGH",
+                    dateEpochDay = DateCalendarUtils.todayEpochDay(),
+                    yearMonth = "2026-11",
+                    completed = true,
+                    isEssential = true
+                )
+            ),
+            transactions = listOf(
+                FinanceTransaction(id = "tx1", householdId = "FAM", title = "Salário", amountOriginal = 6000.0, amountBrl = 6000.0, type = "INCOME", budgetBucket = "INCOME", category = "Renda", yearMonth = "2026-11"),
+                FinanceTransaction(id = "tx2", householdId = "FAM", title = "Mercado", amountOriginal = 450.0, amountBrl = 450.0, type = "EXPENSE", budgetBucket = "NEEDS", category = "Alimentação", yearMonth = "2026-11"),
+                FinanceTransaction(id = "tx3", householdId = "FAM", title = "Farmácia", amountOriginal = 120.0, amountBrl = 120.0, type = "EXPENSE", budgetBucket = "NEEDS", category = "Saúde", yearMonth = "2026-11")
+            ),
+            subscriptions = emptyList(),
+            savingsGoals = listOf(
+                SavingsGoal(id = "sg1", householdId = "FAM", title = "Reserva", targetAmountBrl = 5000.0, currentAmountBrl = 1500.0, incomePercentage = 10L, category = "Emergência", targetYearMonth = "2027-06")
+            ),
+            household = Household(householdId = "FAM", name = "Família", monthlyIncomeBrl = 6000.0),
+            selectedYearMonth = "2026-11"
+        )
+
+        // Verify goals exist across all 3 pillars (Saúde, Financeiro, Calendário)
+        assertTrue(summary.healthTotal >= 4)
+        assertTrue(summary.financeTotal >= 4)
+        assertTrue(summary.calendarTotal >= 4)
+        assertTrue(summary.unlockedCount >= 3)
+        assertTrue(summary.totalXp > 0)
+        assertTrue(summary.goals.any { it.id == customGoal.id && it.isUnlocked && it.medalTier == MedalTier.GOLD })
+    }
+
+    @Test
+    fun `verify AppUpdateManager triggers update prompt on installed device when remote build changes`() {
+        val updateManager = AppUpdateManager(context)
+        val localState = updateManager.uiState.value
+
+        // Simulate a newer remote release published by AI Studio in Firestore (/app_releases/latest)
+        val newerRemoteRelease = AppReleaseMetadata(
+            buildRevision = localState.localKnownRevision + 3L,
+            versionCode = localState.localVersionCode,
+            versionName = localState.localVersionName,
+            dexSignatureChain = "${localState.localBuildSignature},A9F8E7D6",
+            releaseNotes = "Sistema de Conquistas & Medalhas e correção de atualização automática",
+            downloadUrl = "https://ais-pre-4si6mi2cx6qcf46zmdgzwc-153058406669.us-east1.run.app",
+            mandatory = false,
+            publishedBy = "Aura Studio Build #A9F8E7D6",
+            updatedAtEpochMs = System.currentTimeMillis() + 50_000L,
+            buildTimestampMs = localState.localBuildTimestampMs + 50_000L
+        )
+
+        // When running on an installed phone (isStudioPreviewOverride = false), it must NOT overwrite remote
+        // and MUST immediately flag isUpdateAvailable = true!
+        updateManager.handleRemoteReleaseForTesting(
+            remote = newerRemoteRelease,
+            isStudioPreviewOverride = false
+        )
+
+        val afterRemoteSnapshot = updateManager.uiState.value
+        assertTrue(afterRemoteSnapshot.isUpdateAvailable)
+        assertEquals(newerRemoteRelease.buildRevision, afterRemoteSnapshot.remoteRelease?.buildRevision)
+        assertEquals("A9F8E7D6", afterRemoteSnapshot.remoteRelease?.latestSignature)
+
+        // Verify snooze ("Lembrar Depois") hides the modal for the session while keeping top banner active
+        updateManager.dismissModalForSession()
+        assertTrue(updateManager.uiState.value.isModalDismissedForSession)
+        assertTrue(updateManager.uiState.value.isUpdateAvailable)
+
+        // Verify reopenUpdateModal brings back the dialog
+        updateManager.reopenUpdateModal()
+        assertFalse(updateManager.uiState.value.isModalDismissedForSession)
+
+        // Verify "Já Atualizei" acknowledges the revision on this device
+        updateManager.acknowledgeCurrentRevisionOnThisDevice()
+        assertFalse(updateManager.uiState.value.isUpdateAvailable)
+        assertEquals(newerRemoteRelease.buildRevision, updateManager.uiState.value.localKnownRevision)
+
+        // Verify broken .run.app placeholder URLs are scrubbed and Google Drive links are converted to direct download
+        assertEquals(
+            "",
+            AppUpdateManager.sanitizeAndNormalizeUrl("https://ais-pre-4si6mi2cx6qcf46zmdgzwc-153058406669.us-east1.run.app")
+        )
+        assertEquals(
+            "https://drive.google.com/uc?export=download&id=1AbCdEfGhIjKlMnOpQrStUvWxYz",
+            AppUpdateManager.sanitizeAndNormalizeUrl("https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/view?usp=sharing")
+        )
+        assertTrue(updateManager.suggestedApkFileName().endsWith(".apk"))
+    }
 }
+

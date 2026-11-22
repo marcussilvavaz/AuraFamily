@@ -269,8 +269,14 @@ fun HealthModuleScreen(
                                 style = MaterialTheme.typography.headlineSmall,
                                 fontWeight = FontWeight.Bold
                             )
+                            val activeSpecificModules = buildList {
+                                add("Trackers diários")
+                                if (customizationConfig.diabetesEnabled) add("Glicemia & Timer 1h")
+                                if (customizationConfig.bloodPressureEnabled) add("Pressão Arterial")
+                                if (customizationConfig.pregnancyEnabled) add("Gestação Familiar")
+                            }.joinToString(", ")
                             Text(
-                                text = "Trackers diários, Glicemia, Pressão, Timer 1h pós-refeição e Gestação Familiar",
+                                text = activeSpecificModules,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -337,7 +343,9 @@ fun HealthModuleScreen(
                                     modifier = Modifier.size(15.dp)
                                 )
                             },
-                            label = { Text("Familiar & Gestação") },
+                            label = {
+                                Text(if (customizationConfig.pregnancyEnabled) "Familiar & Gestação" else "Familiar")
+                            },
                             shape = RoundedCornerShape(50),
                             modifier = Modifier.testTag("health_scope_family")
                         )
@@ -416,246 +424,266 @@ fun HealthModuleScreen(
             }
         }
 
-        // 3. CRONÔMETRO / TIMER DE 1 HORA PÓS-REFEIÇÃO (AUXILIAR DE MEDIÇÃO DE GLICEMIA)
-        item {
-            PostMealOneHourTimerCard(
-                timerState = timerState,
-                liveRemainingSeconds = liveRemainingSeconds,
-                selectedMeal = selectedMealForTimer,
-                onSelectMeal = { selectedMealForTimer = it },
-                onStartTimer = {
-                    healthRepo.startPostMealTimer(selectedMealForTimer, 3600)
-                },
-                onPauseResumeTimer = {
-                    healthRepo.pauseOrResumePostMealTimer()
-                },
-                onResetTimer = {
-                    healthRepo.resetPostMealTimer(selectedMealForTimer)
-                },
-                onTriggerAlertNow = {
-                    healthRepo.markPostMealTimerFinished()
-                    TaskTonePreviewPlayer.playPreview("SUAVE")
-                    AlarmScheduler.showImmediateNotification(
-                        context = context,
-                        notificationId = 7745,
-                        title = "⏰ Hora de Medir a Glicemia (1h Pós-$selectedMealForTimer)!",
-                        message = "Toque para registrar o valor da sua glicemia pós-refeição."
-                    )
-                },
-                onLogPostMealGlucoseNow = {
-                    healthRepo.dismissPostMealTimerAlert()
-                    presetGlucoseSlot = when {
-                        selectedMealForTimer.contains("Café", ignoreCase = true) -> DiabetesSlotCatalog.POS_CAFE_1H
-                        selectedMealForTimer.contains("Jantar", ignoreCase = true) -> DiabetesSlotCatalog.POS_JANTAR_1H
-                        else -> DiabetesSlotCatalog.POS_ALMOCO_1H
+        // 3. CRONÔMETRO / TIMER DE 1 HORA PÓS-REFEIÇÃO (SOMENTE SE DIABETES / GLICEMIA ESTIVER MARCADO)
+        if (customizationConfig.diabetesEnabled) {
+            item {
+                PostMealOneHourTimerCard(
+                    timerState = timerState,
+                    liveRemainingSeconds = liveRemainingSeconds,
+                    selectedMeal = selectedMealForTimer,
+                    onSelectMeal = { selectedMealForTimer = it },
+                    onStartTimer = {
+                        healthRepo.startPostMealTimer(selectedMealForTimer, 3600)
+                    },
+                    onPauseResumeTimer = {
+                        healthRepo.pauseOrResumePostMealTimer()
+                    },
+                    onResetTimer = {
+                        healthRepo.resetPostMealTimer(selectedMealForTimer)
+                    },
+                    onTriggerAlertNow = {
+                        healthRepo.markPostMealTimerFinished()
+                        TaskTonePreviewPlayer.playPreview("SUAVE")
+                        AlarmScheduler.showImmediateNotification(
+                            context = context,
+                            notificationId = 7745,
+                            title = "⏰ Hora de Medir a Glicemia (1h Pós-$selectedMealForTimer)!",
+                            message = "Toque para registrar o valor da sua glicemia pós-refeição."
+                        )
+                    },
+                    onLogPostMealGlucoseNow = {
+                        healthRepo.dismissPostMealTimerAlert()
+                        presetGlucoseSlot = when {
+                            selectedMealForTimer.contains("Café", ignoreCase = true) -> DiabetesSlotCatalog.POS_CAFE_1H
+                            selectedMealForTimer.contains("Jantar", ignoreCase = true) -> DiabetesSlotCatalog.POS_JANTAR_1H
+                            else -> DiabetesSlotCatalog.POS_ALMOCO_1H
+                        }
+                        showAddGlucoseDialog = true
                     }
-                    showAddGlucoseDialog = true
-                }
-            )
+                )
+            }
         }
 
-        // 4. MÓDULOS ESPECÍFICOS DE SAÚDE: GLICEMIA (mg/dL) E PRESSÃO ARTERIAL (mmHg)
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("clinical_measurements_card"),
-                shape = RoundedCornerShape(cardRadius),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-            ) {
-                Column(
+        // 4. MÓDULOS ESPECÍFICOS DE SAÚDE: GLICEMIA (mg/dL) E/OU PRESSÃO ARTERIAL (mmHg) — SOMENTE SE MARCADOS NO QUESTIONÁRIO
+        if (customizationConfig.diabetesEnabled || customizationConfig.bloodPressureEnabled) {
+            item {
+                val activeClinicalMode = when {
+                    customizationConfig.diabetesEnabled && customizationConfig.bloodPressureEnabled -> clinicalTab
+                    customizationConfig.diabetesEnabled -> "GLUCOSE"
+                    else -> "BP"
+                }
+                val cardTitle = when {
+                    customizationConfig.diabetesEnabled && customizationConfig.bloodPressureEnabled ->
+                        "🩺 Medições de Glicemia & Pressão Arterial"
+                    customizationConfig.diabetesEnabled ->
+                        "🩸 Monitoramento de Glicemia Capilar (mg/dL)"
+                    else ->
+                        "❤️ Monitoramento de Pressão Arterial (mmHg)"
+                }
+
+                Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                        .testTag("clinical_measurements_card"),
+                    shape = RoundedCornerShape(cardRadius),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "🩺 Medições de Glicemia & Pressão Arterial",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Registre com data, hora, valor e observações para o Relatório PDF",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        FilterChip(
-                            selected = clinicalTab == "GLUCOSE",
-                            onClick = { clinicalTab = "GLUCOSE" },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.WaterDrop,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = "🩸 Glicemia (${filteredGlucose.size})",
-                                    fontWeight = FontWeight.Bold
-                                )
-                            },
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("clinical_tab_glucose")
-                        )
-
-                        FilterChip(
-                            selected = clinicalTab == "BP",
-                            onClick = { clinicalTab = "BP" },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.MonitorHeart,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = "❤️ Pressão (${filteredBp.size})",
-                                    fontWeight = FontWeight.Bold
-                                )
-                            },
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("clinical_tab_bp")
-                        )
-                    }
-
-                    if (clinicalTab == "GLUCOSE") {
-                        // Resumo + Botão Registrar Glicemia
-                        val avgGlucose = remember(filteredGlucose) {
-                            if (filteredGlucose.isNotEmpty()) {
-                                filteredGlucose.map { it.valueMgDl }.average().roundToInt()
-                            } else 0
-                        }
-
-                        Surface(
-                            shape = RoundedCornerShape(18.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
-                            modifier = Modifier.fillMaxWidth()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = cardTitle,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Registre com data, hora, valor e observações para o Relatório PDF",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        if (customizationConfig.diabetesEnabled && customizationConfig.bloodPressureEnabled) {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(14.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = if (avgGlucose > 0) "Média Recente: $avgGlucose mg/dL" else "Sem medições registradas",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Text(
-                                        text = "Slots ativos: ${customizationConfig.diabetesSlots.joinToString(", ")}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Button(
-                                    onClick = {
-                                        presetGlucoseSlot = DiabetesSlotCatalog.JEJUM
-                                        showAddGlucoseDialog = true
+                                FilterChip(
+                                    selected = activeClinicalMode == "GLUCOSE",
+                                    onClick = { clinicalTab = "GLUCOSE" },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.WaterDrop,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = "🩸 Glicemia (${filteredGlucose.size})",
+                                            fontWeight = FontWeight.Bold
+                                        )
                                     },
                                     shape = RoundedCornerShape(50),
-                                    modifier = Modifier.testTag("open_add_glucose_btn")
-                                ) {
-                                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("+ Glicemia")
-                                }
-                            }
-                        }
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("clinical_tab_glucose")
+                                )
 
-                        filteredGlucose.take(8).forEach { record ->
-                            GlucoseRecordRowCard(
-                                record = record,
-                                onDelete = { healthRepo.deleteGlucoseRecord(record.id) }
-                            )
-                        }
-                    } else {
-                        // Resumo + Botão Registrar Pressão Arterial
-                        val avgSys = remember(filteredBp) {
-                            if (filteredBp.isNotEmpty()) filteredBp.map { it.systolic }.average().roundToInt() else 0
-                        }
-                        val avgDia = remember(filteredBp) {
-                            if (filteredBp.isNotEmpty()) filteredBp.map { it.diastolic }.average().roundToInt() else 0
-                        }
-
-                        Surface(
-                            shape = RoundedCornerShape(18.dp),
-                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(14.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = if (avgSys > 0) "Média Recente: $avgSys/$avgDia mmHg" else "Sem aferições registradas",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        text = "Lembrete configurado: ${customizationConfig.bloodPressureReminderTime}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Button(
-                                    onClick = { showAddBpDialog = true },
+                                FilterChip(
+                                    selected = activeClinicalMode == "BP",
+                                    onClick = { clinicalTab = "BP" },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.MonitorHeart,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = "❤️ Pressão (${filteredBp.size})",
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    },
                                     shape = RoundedCornerShape(50),
-                                    modifier = Modifier.testTag("open_add_bp_btn")
-                                ) {
-                                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("+ Pressão")
-                                }
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("clinical_tab_bp")
+                                )
                             }
                         }
 
-                        filteredBp.take(8).forEach { record ->
-                            BloodPressureRecordRowCard(
-                                record = record,
-                                onDelete = { healthRepo.deleteBloodPressureRecord(record.id) }
-                            )
+                        if (activeClinicalMode == "GLUCOSE") {
+                            // Resumo + Botão Registrar Glicemia
+                            val avgGlucose = remember(filteredGlucose) {
+                                if (filteredGlucose.isNotEmpty()) {
+                                    filteredGlucose.map { it.valueMgDl }.average().roundToInt()
+                                } else 0
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(14.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = if (avgGlucose > 0) "Média Recente: $avgGlucose mg/dL" else "Sem medições registradas",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = "Slots ativos: ${customizationConfig.diabetesSlots.joinToString(", ")}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Button(
+                                        onClick = {
+                                            presetGlucoseSlot = DiabetesSlotCatalog.JEJUM
+                                            showAddGlucoseDialog = true
+                                        },
+                                        shape = RoundedCornerShape(50),
+                                        modifier = Modifier.testTag("open_add_glucose_btn")
+                                    ) {
+                                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("+ Glicemia")
+                                    }
+                                }
+                            }
+
+                            filteredGlucose.take(8).forEach { record ->
+                                GlucoseRecordRowCard(
+                                    record = record,
+                                    onDelete = { healthRepo.deleteGlucoseRecord(record.id) }
+                                )
+                            }
+                        } else {
+                            // Resumo + Botão Registrar Pressão Arterial
+                            val avgSys = remember(filteredBp) {
+                                if (filteredBp.isNotEmpty()) filteredBp.map { it.systolic }.average().roundToInt() else 0
+                            }
+                            val avgDia = remember(filteredBp) {
+                                if (filteredBp.isNotEmpty()) filteredBp.map { it.diastolic }.average().roundToInt() else 0
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(14.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = if (avgSys > 0) "Média Recente: $avgSys/$avgDia mmHg" else "Sem aferições registradas",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Lembrete configurado: ${customizationConfig.bloodPressureReminderTime}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Button(
+                                        onClick = { showAddBpDialog = true },
+                                        shape = RoundedCornerShape(50),
+                                        modifier = Modifier.testTag("open_add_bp_btn")
+                                    ) {
+                                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("+ Pressão")
+                                    }
+                                }
+                            }
+
+                            filteredBp.take(8).forEach { record ->
+                                BloodPressureRecordRowCard(
+                                    record = record,
+                                    onDelete = { healthRepo.deleteBloodPressureRecord(record.id) }
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        // 5. ESCOPO FAMILIAR: MÓDULO DE ACOMPANHAMENTO GESTACIONAL (Menu Expansível)
-        if (scopeFilter != PrivacyScope.PERSONAL || customizationConfig.pregnancyEnabled) {
+        // 5. ESCOPO FAMILIAR: MÓDULO DE ACOMPANHAMENTO GESTACIONAL (Somente quando Gestação estiver marcado no questionário)
+        if (customizationConfig.pregnancyEnabled) {
             item {
                 val pregProgress = remember(customizationConfig.pregnancyDppDate) {
                     PregnancyCalculator.calculateFromDpp(customizationConfig.pregnancyDppDate)
@@ -799,16 +827,24 @@ fun HealthModuleScreen(
 
         // 6. INTEGRAÇÃO FINANCEIRA: SUGESTÕES AUTOMÁTICAS DE CATEGORIAS DE SAÚDE (Menu Expansível)
         item {
+            val activeFinanceSuggestions = remember(customizationConfig.pregnancyEnabled) {
+                HealthCatalog.financeSuggestionsFor(customizationConfig)
+            }
+            val suggestionsSubtitle = if (customizationConfig.pregnancyEnabled) {
+                "Farmácia, Exames, Consultas & Pré-Natal integrados ao Financeiro e Agenda"
+            } else {
+                "Farmácia, Exames & Consultas integrados ao Financeiro e Agenda"
+            }
             AuraExpandableSectionCard(
                 title = "💊 Sugestões Financeiras de Saúde",
-                subtitle = "Farmácia, Exames, Consultas & Pré-Natal integrados ao Financeiro e Agenda",
+                subtitle = suggestionsSubtitle,
                 icon = Icons.Default.AccountBalanceWallet,
                 accentColor = MaterialTheme.colorScheme.primary,
-                badgeText = "${HealthCatalog.financeSuggestions.size} opções",
+                badgeText = "${activeFinanceSuggestions.size} opções",
                 initiallyExpanded = false,
                 testTag = "health_finance_suggestions_card"
             ) {
-                HealthCatalog.financeSuggestions.forEach { suggestion ->
+                activeFinanceSuggestions.forEach { suggestion ->
                     Surface(
                         shape = RoundedCornerShape(16.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),

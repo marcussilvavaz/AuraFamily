@@ -16,13 +16,18 @@ android {
     applicationId = "com.auramanager.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 5
-    versionName = "1.5.0"
+    versionCode = 9
+    versionName = "1.9.0"
 
     buildConfigField(
       "String",
       "DEFAULT_UPDATE_URL",
-      "\"https://ais-pre-4si6mi2cx6qcf46zmdgzwc-153058406669.us-east1.run.app\""
+      "\"\""
+    )
+    buildConfigField(
+      "long",
+      "BUILD_TIMESTAMP_MS",
+      "${System.currentTimeMillis()}L"
     )
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

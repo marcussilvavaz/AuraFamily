@@ -211,6 +211,12 @@ object HealthCatalog {
         )
     )
 
+    fun financeSuggestionsFor(config: AppCustomizationConfig): List<HealthFinanceSuggestion> {
+        return financeSuggestions.filter { suggestion ->
+            if (suggestion.id == "hf_prenatal") config.pregnancyEnabled else true
+        }
+    }
+
     val mealOptions: List<String> = listOf(
         "Café da Manhã",
         "Almoço",
@@ -1045,7 +1051,7 @@ object MedicalReportPdfGenerator {
             boxFillPaint
         )
         canvas.drawText("AURAMANAGER • RELATÓRIO MÉDICO E DE SAÚDE", leftMargin + 14f, y + 4f, titlePaint)
-        val emittedNow = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale("pt", "BR")).format(Date())
+        val emittedNow = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.forLanguageTag("pt-BR")).format(Date())
         canvas.drawText(
             "Paciente / Perfil: $profileName   •   Período: $periodLabel   •   Emissão: $emittedNow",
             leftMargin + 14f,
@@ -1082,20 +1088,24 @@ object MedicalReportPdfGenerator {
             filteredBp.map { it.pulseBpm }.average().roundToInt()
         } else 0
 
-        canvas.drawText(
-            "• Glicemia (${filteredGlucose.size} medições): Média = ${if (avgGlucose > 0) "$avgGlucose mg/dL (Mín: $minGlucose / Máx: $maxGlucose mg/dL)" else "Sem registros no período"}",
-            leftMargin + 8f,
-            y,
-            bodyBoldPaint
-        )
-        y += 15f
-        canvas.drawText(
-            "• Pressão Arterial (${filteredBp.size} aferições): Média = ${if (avgSys > 0) "$avgSys/$avgDia mmHg (Pulso médio: $avgPulse bpm)" else "Sem registros no período"}",
-            leftMargin + 8f,
-            y,
-            bodyBoldPaint
-        )
-        y += 15f
+        if (customizationConfig.diabetesEnabled) {
+            canvas.drawText(
+                "• Glicemia (${filteredGlucose.size} medições): Média = ${if (avgGlucose > 0) "$avgGlucose mg/dL (Mín: $minGlucose / Máx: $maxGlucose mg/dL)" else "Sem registros no período"}",
+                leftMargin + 8f,
+                y,
+                bodyBoldPaint
+            )
+            y += 15f
+        }
+        if (customizationConfig.bloodPressureEnabled) {
+            canvas.drawText(
+                "• Pressão Arterial (${filteredBp.size} aferições): Média = ${if (avgSys > 0) "$avgSys/$avgDia mmHg (Pulso médio: $avgPulse bpm)" else "Sem registros no período"}",
+                leftMargin + 8f,
+                y,
+                bodyBoldPaint
+            )
+            y += 15f
+        }
         val completedTrackersToday = healthState.completedTrackersCount(todayIso)
         canvas.drawText(
             "• Hábitos Inegociáveis Hoje ($todayIso): $completedTrackersToday de ${healthState.trackers.size} metas concluídas",
@@ -1107,56 +1117,65 @@ object MedicalReportPdfGenerator {
         canvas.drawLine(leftMargin, y, rightMargin, y, dividerPaint)
         y += 20f
 
-        // 2. Histórico de Glicemia
-        canvas.drawText("2. HISTÓRICO DE GLICEMIA CAPILAR (mg/dL)", leftMargin, y, sectionHeaderPaint)
-        y += 16f
-        canvas.drawText("DATA        HORA   MOMENTO / SLOT         VALOR      CLASSIFICAÇÃO & OBSERVAÇÕES", leftMargin, y, bodyBoldPaint)
-        y += 12f
+        // 2. Histórico de Glicemia (somente se Diabetes / Glicemia estiver marcado no questionário)
+        if (customizationConfig.diabetesEnabled) {
+            canvas.drawText("2. HISTÓRICO DE GLICEMIA CAPILAR (mg/dL)", leftMargin, y, sectionHeaderPaint)
+            y += 16f
+            canvas.drawText("DATA        HORA   MOMENTO / SLOT         VALOR      CLASSIFICAÇÃO & OBSERVAÇÕES", leftMargin, y, bodyBoldPaint)
+            y += 12f
 
-        if (filteredGlucose.isEmpty()) {
-            canvas.drawText("Nenhuma medição de glicemia registrada no período selecionado.", leftMargin, y, subtitlePaint)
-            y += 18f
-        } else {
-            filteredGlucose.take(12).forEach { rec ->
-                val slotFixed = rec.slot.take(20).padEnd(20, ' ')
-                val valFixed = "${rec.valueMgDl} mg/dL".padEnd(10, ' ')
-                val noteClean = if (rec.notes.isNotBlank()) " - ${rec.notes.take(30)}" else ""
-                val line = "${rec.dateIso}  ${rec.timeHHmm}  $slotFixed $valFixed ${rec.statusLabel()}$noteClean"
-                canvas.drawText(line, leftMargin, y, bodyPaint)
-                y += 13f
+            if (filteredGlucose.isEmpty()) {
+                canvas.drawText("Nenhuma medição de glicemia registrada no período selecionado.", leftMargin, y, subtitlePaint)
+                y += 18f
+            } else {
+                filteredGlucose.take(12).forEach { rec ->
+                    val slotFixed = rec.slot.take(20).padEnd(20, ' ')
+                    val valFixed = "${rec.valueMgDl} mg/dL".padEnd(10, ' ')
+                    val noteClean = if (rec.notes.isNotBlank()) " - ${rec.notes.take(30)}" else ""
+                    val line = "${rec.dateIso}  ${rec.timeHHmm}  $slotFixed $valFixed ${rec.statusLabel()}$noteClean"
+                    canvas.drawText(line, leftMargin, y, bodyPaint)
+                    y += 13f
+                }
             }
+
+            y += 10f
+            canvas.drawLine(leftMargin, y, rightMargin, y, dividerPaint)
+            y += 20f
         }
 
-        y += 10f
-        canvas.drawLine(leftMargin, y, rightMargin, y, dividerPaint)
-        y += 20f
+        // 3. Histórico de Pressão Arterial (somente se Pressão Arterial estiver marcado no questionário)
+        if (customizationConfig.bloodPressureEnabled) {
+            canvas.drawText("3. HISTÓRICO DE PRESSÃO ARTERIAL (mmHg) & PULSO (bpm)", leftMargin, y, sectionHeaderPaint)
+            y += 16f
+            canvas.drawText("DATA        HORA   PAS/PAD (mmHg)   PULSO     CLASSIFICAÇÃO & OBSERVAÇÕES", leftMargin, y, bodyBoldPaint)
+            y += 12f
 
-        // 3. Histórico de Pressão Arterial
-        canvas.drawText("3. HISTÓRICO DE PRESSÃO ARTERIAL (mmHg) & PULSO (bpm)", leftMargin, y, sectionHeaderPaint)
-        y += 16f
-        canvas.drawText("DATA        HORA   PAS/PAD (mmHg)   PULSO     CLASSIFICAÇÃO & OBSERVAÇÕES", leftMargin, y, bodyBoldPaint)
-        y += 12f
-
-        if (filteredBp.isEmpty()) {
-            canvas.drawText("Nenhuma aferição de pressão arterial registrada no período selecionado.", leftMargin, y, subtitlePaint)
-            y += 18f
-        } else {
-            filteredBp.take(12).forEach { bp ->
-                val bpFixed = "${bp.systolic}/${bp.diastolic} mmHg".padEnd(15, ' ')
-                val pulseFixed = "${bp.pulseBpm} bpm".padEnd(9, ' ')
-                val noteClean = if (bp.notes.isNotBlank()) " - ${bp.notes.take(30)}" else ""
-                val line = "${bp.dateIso}  ${bp.timeHHmm}  $bpFixed $pulseFixed ${bp.statusLabel()}$noteClean"
-                canvas.drawText(line, leftMargin, y, bodyPaint)
-                y += 13f
+            if (filteredBp.isEmpty()) {
+                canvas.drawText("Nenhuma aferição de pressão arterial registrada no período selecionado.", leftMargin, y, subtitlePaint)
+                y += 18f
+            } else {
+                filteredBp.take(12).forEach { bp ->
+                    val bpFixed = "${bp.systolic}/${bp.diastolic} mmHg".padEnd(15, ' ')
+                    val pulseFixed = "${bp.pulseBpm} bpm".padEnd(9, ' ')
+                    val noteClean = if (bp.notes.isNotBlank()) " - ${bp.notes.take(30)}" else ""
+                    val line = "${bp.dateIso}  ${bp.timeHHmm}  $bpFixed $pulseFixed ${bp.statusLabel()}$noteClean"
+                    canvas.drawText(line, leftMargin, y, bodyPaint)
+                    y += 13f
+                }
             }
+
+            y += 10f
+            canvas.drawLine(leftMargin, y, rightMargin, y, dividerPaint)
+            y += 20f
         }
 
-        y += 10f
-        canvas.drawLine(leftMargin, y, rightMargin, y, dividerPaint)
-        y += 20f
-
-        // 4. Inegociáveis Diários & Acompanhamento Gestacional
-        canvas.drawText("4. INEGOCIÁVEIS DIÁRIOS (TRACKERS) & GESTAÇÃO FAMILIAR", leftMargin, y, sectionHeaderPaint)
+        // 4. Inegociáveis Diários & Acompanhamento Gestacional (somente se Gestação estiver marcado)
+        val sectionTitle = if (customizationConfig.pregnancyEnabled) {
+            "INEGOCIÁVEIS DIÁRIOS (TRACKERS) & GESTAÇÃO FAMILIAR"
+        } else {
+            "INEGOCIÁVEIS DIÁRIOS (TRACKERS)"
+        }
+        canvas.drawText(sectionTitle, leftMargin, y, sectionHeaderPaint)
         y += 16f
 
         healthState.trackers.take(6).forEach { habit ->
@@ -1170,7 +1189,7 @@ object MedicalReportPdfGenerator {
             y += 13f
         }
 
-        if (customizationConfig.pregnancyEnabled || healthState.pregnancyChecklist.any { it.completed }) {
+        if (customizationConfig.pregnancyEnabled) {
             y += 8f
             val pregProgress = PregnancyCalculator.calculateFromDpp(customizationConfig.pregnancyDppDate)
             canvas.drawText(
@@ -1194,7 +1213,19 @@ object MedicalReportPdfGenerator {
         pdfDocument.writeTo(outputStream)
         pdfDocument.close()
 
-        return "PDF gerado ($periodLabel): ${filteredGlucose.size} glicemias (média ${avgGlucose}mg/dL), ${filteredBp.size} pressões (média ${avgSys}/${avgDia}mmHg)."
+        val summaryParts = buildList {
+            add("$completedTrackersToday/${healthState.trackers.size} inegociáveis")
+            if (customizationConfig.diabetesEnabled) {
+                add("${filteredGlucose.size} glicemias (média ${avgGlucose}mg/dL)")
+            }
+            if (customizationConfig.bloodPressureEnabled) {
+                add("${filteredBp.size} pressões (média ${avgSys}/${avgDia}mmHg)")
+            }
+            if (customizationConfig.pregnancyEnabled) {
+                add("Gestação ativa")
+            }
+        }
+        return "PDF gerado ($periodLabel): ${summaryParts.joinToString(", ")}."
     }
 
     fun exportToLocalAppFile(

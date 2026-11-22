@@ -95,17 +95,21 @@ fun MainFeatureScreen(
     customizationConfig: AppCustomizationConfig,
     customizationRepo: CustomizationRepository,
     userEmail: String?,
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    sharedUpdateManager: AppUpdateManager? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val healthRepo = remember { HealthRepository(context.applicationContext) }
     val healthState by healthRepo.stateFlow.collectAsStateWithLifecycle()
 
-    val updateManager = remember { AppUpdateManager(context.applicationContext) }
+    val updateManager = sharedUpdateManager ?: remember { AppUpdateManager(context.applicationContext) }
     val updateState by updateManager.uiState.collectAsStateWithLifecycle()
 
-    // Tabs: 0 = Hub, 1 = Agenda, 2 = Finanças, 3 = Perfil & Configurações, 4 = Estúdio Visual Completo, 5 = Saúde, 6 = Diário Privado
+    val achievementsRepo = remember { com.example.data.AchievementsRepository(context.applicationContext) }
+    val persistedAchievementsState by achievementsRepo.persistedStateFlow.collectAsStateWithLifecycle()
+
+    // Tabs: 0 = Hub, 1 = Agenda, 2 = Finanças, 3 = Perfil & Configurações, 4 = Estúdio Visual Completo, 5 = Saúde, 6 = Diário Privado, 7 = Conquistas & Medalhas
     var currentTab by rememberSaveable { mutableIntStateOf(0) }
     // Inside Finance Screen (Tab 2): 0 = Visão Geral, 1 = Gastos & Fixas, 2 = Economia 50/30/20
     var financeSubSection by rememberSaveable { mutableIntStateOf(0) }
@@ -136,13 +140,27 @@ fun MainFeatureScreen(
 
     // PASSO 1: Exibir "Meu Perfil e Módulos" no primeiro acesso como onboarding
     if (!customizationConfig.hasCompletedModularOnboarding || showModularOnboardingModal) {
-        ModularProfileOnboardingScreen(
-            config = customizationConfig,
-            customizationRepo = customizationRepo,
-            onFinishOnboarding = {
-                showModularOnboardingModal = false
-                localStudioBanner = "Perfil Modular configurado com sucesso! Suas preferências de rotina, saúde e acolhimento estão ativas."
+        Column(modifier = Modifier.fillMaxSize()) {
+            AppUpdateTopPillBanner(
+                updateState = updateState,
+                onOpenUpdateModal = { updateManager.reopenUpdateModal() },
+                onClearUpgradedBanner = { updateManager.clearJustUpgradedBanner() }
+            )
+            Box(modifier = Modifier.weight(1f)) {
+                ModularProfileOnboardingScreen(
+                    config = customizationConfig,
+                    customizationRepo = customizationRepo,
+                    onFinishOnboarding = {
+                        showModularOnboardingModal = false
+                        localStudioBanner = "Perfil Modular configurado com sucesso! Suas preferências de rotina, saúde e acolhimento estão ativas."
+                    }
+                )
             }
+        }
+        AppUpdateAvailableDialog(
+            updateState = updateState,
+            updateManager = updateManager,
+            onShowMessage = { localStudioBanner = it }
         )
         return
     }
@@ -189,6 +207,29 @@ fun MainFeatureScreen(
     val transactions = (transactionsState as? UiState.Success)?.data.orEmpty()
     val subscriptions = (subscriptionsState as? UiState.Success)?.data.orEmpty()
     val savingsGoals = (savingsGoalsState as? UiState.Success)?.data.orEmpty()
+
+    val achievementsSummary = remember(
+        persistedAchievementsState,
+        healthState,
+        customizationConfig,
+        tasks,
+        transactions,
+        subscriptions,
+        savingsGoals,
+        household,
+        selectedYearMonth
+    ) {
+        achievementsRepo.evaluateAchievements(
+            healthState = healthState,
+            customizationConfig = customizationConfig,
+            tasks = tasks,
+            transactions = transactions,
+            subscriptions = subscriptions,
+            savingsGoals = savingsGoals,
+            household = household,
+            selectedYearMonth = selectedYearMonth
+        )
+    }
 
     // Keep repository member color synced with persisted profile color on startup
     LaunchedEffect(customizationConfig.profileName, customizationConfig.profileColorHex) {
@@ -357,14 +398,28 @@ fun MainFeatureScreen(
                                 customizationConfig = customizationConfig,
                                 healthState = healthState,
                                 diaryState = diaryState,
+                                achievementsSummary = achievementsSummary,
                                 userEmail = userEmail,
                                 onRequestGoogleLogin = onSignOut,
                                 onIncrementHealthTracker = { dateIso, trackerId, step ->
                                     healthRepo.incrementTrackerProgress(dateIso, trackerId, step)
                                 },
+                                onQuickAdvanceAchievement = { goal ->
+                                    val unlocked = achievementsRepo.incrementGoalProgress(
+                                        goalId = goal.id,
+                                        step = 1,
+                                        targetValue = goal.targetValue
+                                    )
+                                    localStudioBanner = if (unlocked) {
+                                        "🏆 Parabéns! Você conquistou a ${goal.medalTier.badgeTitle} (${goal.medalTier.emoji}): ${goal.title} (+${goal.medalTier.xpReward} XP)!"
+                                    } else {
+                                        "🎯 Progresso registrado em '${goal.title}'!"
+                                    }
+                                },
                                 onNextShiftQuote = { diaryRepo.refreshShiftQuote(forceNewQuote = true) },
                                 onOpenHealthScreen = { currentTab = 5 },
                                 onOpenDiaryScreen = { currentTab = 6 },
+                                onOpenAchievementsScreen = { currentTab = 7 },
                                 onShiftMonth = { viewModel.shiftMonth(it) },
                                 onToggleTask = { viewModel.toggleTaskCompletion(context, it) },
                                 onPostSubscriptionNow = { viewModel.postSingleSubscriptionNow(it) },
@@ -538,6 +593,8 @@ fun MainFeatureScreen(
                                 onChangeThemeMode = { viewModel.setThemeMode(it) },
                                 onOpenCustomizationStudio = { currentTab = 4 },
                                 onOpenModularOnboardingScreen = { showModularOnboardingModal = true },
+                                achievementsSummary = achievementsSummary,
+                                onOpenAchievementsScreen = { currentTab = 7 },
                                 updateState = updateState,
                                 updateManager = updateManager,
                                 onBackToHub = { currentTab = 0 },
@@ -581,6 +638,48 @@ fun MainFeatureScreen(
                                 customizationConfig = customizationConfig,
                                 diaryRepo = diaryRepo,
                                 onShowBannerMessage = { localStudioBanner = it }
+                            )
+
+                            // 7: GALERIA DE CONQUISTAS & MEDALHAS (Vinculada a Saúde, Financeiro e Calendário)
+                            7 -> AchievementsMedalsScreen(
+                                summary = achievementsSummary,
+                                customizationConfig = customizationConfig,
+                                onAdvanceGoalProgress = { goal ->
+                                    val unlocked = achievementsRepo.incrementGoalProgress(
+                                        goalId = goal.id,
+                                        step = 1,
+                                        targetValue = goal.targetValue
+                                    )
+                                    localStudioBanner = if (unlocked) {
+                                        "🏆 Parabéns! Você conquistou a ${goal.medalTier.badgeTitle} (${goal.medalTier.emoji}): ${goal.title} (+${goal.medalTier.xpReward} XP)!"
+                                    } else {
+                                        "🎯 +1 etapa concluída no objetivo '${goal.title}'!"
+                                    }
+                                },
+                                onCreateCustomGoal = { title, desc, module, tier, target, unit ->
+                                    val created = achievementsRepo.addCustomAchievementGoal(
+                                        title = title,
+                                        description = desc,
+                                        module = module,
+                                        medalTier = tier,
+                                        targetValue = target,
+                                        unitLabel = unit
+                                    )
+                                    localStudioBanner = "🏅 Novo objetivo '${created.title}' criado para ${created.module.shortLabel} valendo ${created.medalTier.badgeTitle}!"
+                                },
+                                onDeleteCustomGoal = { goalId ->
+                                    achievementsRepo.deleteCustomGoal(goalId)
+                                    localStudioBanner = "Objetivo personalizado removido."
+                                },
+                                onNavigateToModule = { module ->
+                                    currentTab = when (module) {
+                                        com.example.data.AchievementModule.HEALTH -> 5
+                                        com.example.data.AchievementModule.FINANCE -> 2
+                                        com.example.data.AchievementModule.CALENDAR -> 1
+                                        com.example.data.AchievementModule.TRINITY -> 0
+                                    }
+                                },
+                                onBack = { currentTab = 0 }
                             )
                         }
                     }

@@ -562,7 +562,7 @@ private fun CurrencyRateBadge(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = String.format(Locale("pt", "BR"), "R$ %.2f", rateBrl),
+                text = String.format(Locale.forLanguageTag("pt-BR"), "R$ %.2f", rateBrl),
                 style = MaterialTheme.typography.labelLarge,
                 fontFamily = JetBrainsMonoFontFamily,
                 fontWeight = FontWeight.Bold,

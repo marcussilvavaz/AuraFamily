@@ -359,7 +359,7 @@ fun SavingsReportsScreen(
                                             )
                                         }
                                         Text(
-                                            text = "${String.format(Locale("pt", "BR"), "%.0f%%", pct)} • ${formatCurrencyBrl(entry.value)}",
+                                            text = "${String.format(Locale.forLanguageTag("pt-BR"), "%.0f%%", pct)} • ${formatCurrencyBrl(entry.value)}",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontFamily = JetBrainsMonoFontFamily,
                                             fontWeight = FontWeight.Bold

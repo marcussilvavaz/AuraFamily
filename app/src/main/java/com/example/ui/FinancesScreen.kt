@@ -286,7 +286,7 @@ fun FinancesScreen(
 
             AuraExpandableSectionCard(
                 title = "💱 Simulador & Câmbio Automático (BRL)",
-                subtitle = "${currencyRates.lastUpdatedLabel} • 1 $quickConverterCurrency = ${String.format(Locale("pt", "BR"), "R$ %.2f", rate)}",
+                subtitle = "${currencyRates.lastUpdatedLabel} • 1 $quickConverterCurrency = ${String.format(Locale.forLanguageTag("pt-BR"), "R$ %.2f", rate)}",
                 icon = Icons.Default.CurrencyExchange,
                 accentColor = MaterialTheme.colorScheme.primary,
                 badgeText = formatCurrencyBrl(convertedBrl),
@@ -355,7 +355,7 @@ fun FinancesScreen(
                             color = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            text = String.format(Locale("pt", "BR"), "1 %s = R$ %.2f", quickConverterCurrency, rate),
+                            text = String.format(Locale.forLanguageTag("pt-BR"), "1 %s = R$ %.2f", quickConverterCurrency, rate),
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = JetBrainsMonoFontFamily,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -695,7 +695,7 @@ private fun TransactionItemCard(
                             color = MaterialTheme.colorScheme.secondaryContainer
                         ) {
                             Text(
-                                text = "${formatCurrencyOriginal(tx.amountOriginal, tx.currency)} (R$ ${String.format(Locale("pt", "BR"), "%.2f", tx.exchangeRateToBrl)})",
+                                text = "${formatCurrencyOriginal(tx.amountOriginal, tx.currency)} (R$ ${String.format(Locale.forLanguageTag("pt-BR"), "%.2f", tx.exchangeRateToBrl)})",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontFamily = JetBrainsMonoFontFamily,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
@@ -1201,7 +1201,7 @@ fun AddTransactionDialog(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "Conversão Automática: ${formatCurrencyOriginal(parsedAmount, currency)} = ${formatCurrencyBrl(convertedBrl)} (Taxa: R$ ${String.format(Locale("pt", "BR"), "%.2f", rate)})",
+                            text = "Conversão Automática: ${formatCurrencyOriginal(parsedAmount, currency)} = ${formatCurrencyBrl(convertedBrl)} (Taxa: R$ ${String.format(Locale.forLanguageTag("pt-BR"), "%.2f", rate)})",
                             style = MaterialTheme.typography.labelMedium,
                             fontFamily = JetBrainsMonoFontFamily,
                             fontWeight = FontWeight.Bold,
