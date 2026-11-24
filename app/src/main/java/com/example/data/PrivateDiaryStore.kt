@@ -468,6 +468,43 @@ class PrivateDiaryRepository(
         return entry
     }
 
+    fun updateDiaryEntry(
+        entryId: String,
+        epochDay: Long,
+        hour: Int,
+        minute: Int,
+        moodId: String,
+        symptomTags: List<String>,
+        freeText: String
+    ) {
+        val dateIso = LocalDate.ofEpochDay(epochDay).toString()
+        var updatedEntry: PrivateDiaryEntry? = null
+        updateState { current ->
+            val mapped = current.entries.map { existing ->
+                if (existing.id == entryId) {
+                    val mod = existing.copy(
+                        dateIso = dateIso,
+                        epochDay = epochDay,
+                        hour = hour.coerceIn(0, 23),
+                        minute = minute.coerceIn(0, 59),
+                        moodId = moodId,
+                        symptomTags = symptomTags.distinct(),
+                        freeText = freeText.trim()
+                    )
+                    updatedEntry = mod
+                    mod
+                } else {
+                    existing
+                }
+            }.sortedWith(
+                compareByDescending<PrivateDiaryEntry> { it.epochDay }
+                    .thenBy { it.hour * 60 + it.minute }
+            )
+            current.copy(entries = mapped)
+        }
+        updatedEntry?.let { syncEntryToFirestore(it) }
+    }
+
     fun deleteDiaryEntry(entryId: String) {
         updateState { current ->
             current.copy(entries = current.entries.filterNot { it.id == entryId })
@@ -478,6 +515,51 @@ class PrivateDiaryRepository(
             ?.collection("private_diary")
             ?.document(entryId)
             ?.delete()
+    }
+
+    fun mergeImportedDiaryEntries(
+        importedEntries: List<PrivateDiaryEntry>,
+        importedLetters: List<SupportLetterRecord> = emptyList()
+    ): Int {
+        var addedCount = 0
+        val newEntriesToSync = mutableListOf<PrivateDiaryEntry>()
+        updateState { current ->
+            val mergedEntries = current.entries.toMutableList()
+            importedEntries.forEach { item ->
+                val isDuplicate = mergedEntries.any { existing ->
+                    existing.id == item.id ||
+                        (existing.epochDay == item.epochDay &&
+                            existing.hour == item.hour &&
+                            existing.minute == item.minute &&
+                            existing.freeText.trim().equals(item.freeText.trim(), ignoreCase = true))
+                }
+                if (!isDuplicate) {
+                    mergedEntries.add(item)
+                    newEntriesToSync.add(item)
+                    addedCount++
+                }
+            }
+            val mergedLetters = current.savedSupportLetters.toMutableList()
+            importedLetters.forEach { letter ->
+                val isDuplicate = mergedLetters.any { existing ->
+                    existing.id == letter.id ||
+                        (existing.dateIso == letter.dateIso && existing.content.trim() == letter.content.trim())
+                }
+                if (!isDuplicate) {
+                    mergedLetters.add(letter)
+                    addedCount++
+                }
+            }
+            current.copy(
+                entries = mergedEntries.sortedWith(
+                    compareByDescending<PrivateDiaryEntry> { it.epochDay }
+                        .thenBy { it.hour * 60 + it.minute }
+                ),
+                savedSupportLetters = mergedLetters.sortedByDescending { it.createdAtEpochMs }
+            )
+        }
+        newEntriesToSync.forEach { syncEntryToFirestore(it) }
+        return addedCount
     }
 
     fun addCustomSymptomTag(tag: String) {
@@ -650,31 +732,56 @@ class PrivateDiaryRepository(
         moodSummary: String
     ): String {
         val entriesBullets = if (entries.isEmpty()) {
-            "- O usuário abriu o diário agora buscando uma palavra de acolhimento."
+            "- $userName abriu o diário agora buscando uma conversa leve e acolhedora."
         } else {
             entries.joinToString("\n") { e ->
                 val mood = PrivateDiaryCatalog.moodById(e.moodId)
-                val sym = if (e.symptomTags.isNotEmpty()) " | Sintomas: ${e.symptomTags.joinToString(", ")}" else ""
-                val note = if (e.freeText.isNotBlank()) " | Relato: \"${e.freeText}\"" else ""
+                val sym = if (e.symptomTags.isNotEmpty()) " | Sensações: ${e.symptomTags.joinToString(", ")}" else ""
+                val note = if (e.freeText.isNotBlank()) " | O que escreveu: \"${e.freeText}\"" else ""
                 "- [${e.dateIso} às ${e.timeFormatted}] Humor: ${mood.label} (${mood.emoji})$sym$note"
             }
         }
 
+        val previousOpenings = _stateFlow.value.savedSupportLetters
+            .take(4)
+            .map { it.content.lines().firstOrNull()?.take(70).orEmpty() }
+            .filter { it.isNotBlank() }
+
+        val avoidPreviousBlock = if (previousOpenings.isNotEmpty()) {
+            "Evite repetir qualquer abertura parecida com estas cartas anteriores:\n" +
+                previousOpenings.joinToString("\n") { "- \"$it\"" }
+        } else {
+            ""
+        }
+
+        val styleAngles = listOf(
+            "Comece como um bilhete deixado na mesa com um café quentinho, direto e afetuoso, sem formalidades.",
+            "Comece puxando conversa sobre um detalhe específico do que a pessoa sentiu ou anotou hoje, como um amigo próximo que realmente prestou atenção.",
+            "Use um tom leve, íntimo e caloroso, misturando validação sincera com uma pitada de leveza para tirar o peso dos ombros.",
+            "Comece fazendo uma observação carinhosa sobre o momento do dia (${shift.label}) e como a pessoa merece respirar sem cobrança agora.",
+            "Escreva como uma mensagem de voz transcrita de alguém que torce muito por $userName: frases fluidas, naturais, zero clichês de autoajuda."
+        )
+        val chosenAngle = styleAngles[Random.nextInt(styleAngles.size)]
+
         val prompt = """
-            Você é um companheiro de jornada empático, caloroso e acolhedor dentro do aplicativo Aura Finanças & Saúde.
-            Escreva uma "Carta de Apoio" curta (3 a 4 parágrafos breves), profundamente humana, gentil e reconfortante em português do Brasil (pt-BR) para $userName.
+            Você é um amigo próximo, atento e muito carinhoso escrevendo um cartão/carta pessoal para $userName dentro do Omni.
             
-            Contexto atual:
-            - Turno atual: ${shift.label} (${shift.timeRangeLabel})
+            ESTILO DESTA GERAÇÃO (obrigatório variar):
+            $chosenAngle
+            
+            Contexto real de $userName agora:
+            - Momento do dia: ${shift.label} (${shift.timeRangeLabel})
             - Resumo recente: $moodSummary
-            - Registros recentes do Diário Privado por hora:
+            - Registros recentes no Diário:
             $entriesBullets
             
-            Diretrizes importantes:
-            1. Valide os sentimentos e eventuais sintomas físicos/emocionais relatados sem dar diagnósticos médicos.
-            2. Ofereça um acolhimento sincero, lembrando que dias difíceis ou cansativos não anulam o valor da jornada.
-            3. Sugira um pequeno gesto gentil de autocuidado para as próximas horas (como hidratar-se, respirar fundo ou respeitar o próprio limite).
-            4. Assine no final de forma afetuosa como "Com carinho, seu Espaço de Acolhimento Aura".
+            $avoidPreviousBlock
+            
+            Regras de ouro para o texto (pt-BR):
+            1. Linguagem informal, próxima, natural e carinhosa (como um amigo querido falando de perto, usando "você", contrações naturais do português falado no Brasil, sem soar robótico nem clínico).
+            2. Proibido usar fórmulas prontas ou repetitivas como "Olhando para os seus registros recentes, percebo que...", "Reconhecer e nomear o que você está sentindo...", ou "Reservar um momento do seu dia para parar...".
+            3. Escreva de 2 a 4 parágrafos curtos e gostosos de ler, conversando diretamente com o que $userName viveu ou sentiu hoje.
+            4. Feche com uma despedida calorosa e variada (ex.: "Um abraço bem apertado, Omni 🌿", "Tô por aqui com você, Omni ✨", "Com todo carinho, seu cantinho no Omni 💛").
         """.trimIndent()
 
         val modelsToTry = listOf("gemini-2.5-flash", "gemini-2.0-flash")
@@ -695,6 +802,13 @@ class PrivateDiaryRepository(
                             )
                         }
                     )
+                )
+                put(
+                    "generationConfig",
+                    JSONObject().apply {
+                        put("temperature", 0.95)
+                        put("topP", 0.95)
+                    }
                 )
             }
 
@@ -733,48 +847,129 @@ class PrivateDiaryRepository(
         val allSymptoms = entries.flatMap { it.symptomTags }.distinct()
         val latestNote = latest?.freeText?.takeIf { it.isNotBlank() }
 
-        val greeting = when (shift) {
-            DayShift.MORNING -> "Bom dia, $userName."
-            DayShift.AFTERNOON -> "Olá, $userName. Que esta tarde encontre um espaço de calma em você."
-            DayShift.NIGHT -> "Boa noite, $userName. Que bom que você reservou este instante para si."
+        val lastVariationKey = "last_fallback_letter_variation_idx"
+        val prevIdx = prefs.getInt(lastVariationKey, -1)
+        val totalVariations = 6
+        val candidateIndices = (0 until totalVariations).filter { it != prevIdx }
+        val variation = candidateIndices[Random.nextInt(candidateIndices.size)]
+        prefs.edit().putInt(lastVariationKey, variation).apply()
+
+        val hasHardSymptom = allSymptoms.any {
+            it.contains("dor", ignoreCase = true) ||
+                it.contains("fadiga", ignoreCase = true) ||
+                it.contains("tensão", ignoreCase = true) ||
+                it.contains("ansiedade", ignoreCase = true) ||
+                it.contains("enjoo", ignoreCase = true) ||
+                it.contains("cansa", ignoreCase = true)
         }
 
-        val moodParagraph = if (latestMood != null) {
-            "Olhando para os seus registros recentes, percebo que você esteve ${latestMood.empathyDescriptor}, marcando o humor \"${latestMood.label}\" ${latestMood.emoji} às ${latest.timeFormatted}. " +
-                if (latestNote != null) {
-                    "Ao ler suas palavras — \"$latestNote\" — quero lembrar que cada sensação que você registra aqui importa e merece ser ouvida sem julgamentos."
-                } else {
-                    "Reconhecer e nomear o que você está sentindo ao longo das horas já é um gesto poderoso de presença e cuidado consigo."
-                }
-        } else {
-            "Reservar um momento do seu dia para parar, respirar e observar como o seu corpo e o seu coração estão é um dos maiores gestos de respeito pela sua própria história."
+        val openingsByShift = when (shift) {
+            DayShift.MORNING -> listOf(
+                "Oi, $userName! Passando aqui rapidinho logo cedo pra te deixar um abraço.",
+                "Bom dia, $userName ☀️ Espero que você consiga começar essa manhã no seu próprio ritmo, sem correria.",
+                "Ei, $userName! Que bom te ver por aqui nessa manhã.",
+                "$userName, antes de o dia engatar de vez, queria te lembrar de uma coisa simples: vá com calma com você hoje.",
+                "Oi, $userName! Respira fundo aí por dois segundinhos antes de olhar qualquer lista de tarefas.",
+                "Bom dia, $userName! Sabe aquele café quentinho que abraça a gente por dentro? Que essa mensagem faça o mesmo papel agora."
+            )
+            DayShift.AFTERNOON -> listOf(
+                "Oi, $userName! Como estão as coisas por aí nessa metade do dia?",
+                "Ei, $userName 🌤️ Faz uma pausinha rápida aí, solta os ombros e destrava o maxilar.",
+                "$userName, passando pra conversar um pouquinho com você no meio dessa tarde.",
+                "Oi, $userName! Sei que a tarde às vezes passa voando, mas que bom que você tirou esse minutinho pra você.",
+                "Ei, $userName! Se o dia estiver puxado até aqui, deixa eu te lembrar que você não precisa carregar tudo de uma vez.",
+                "Boa tarde, $userName! Vamos desacelerar o passo só um pouquinho agora?"
+            )
+            DayShift.NIGHT -> listOf(
+                "Oi, $userName 🌙 O dia finalmente tá baixando a poeira por aí.",
+                "Ei, $userName! Que gostoso que você veio fechar o seu dia aqui comigo.",
+                "Boa noite, $userName. Já pode ir tirando a armadura do dia, viu?",
+                "$userName, a melhor parte da noite é saber que a gente não precisa mais dar conta de nada até amanhã.",
+                "Oi, $userName ✨ Como você tá chegando ao fim desse dia?",
+                "Ei, $userName! Antes de dormir, queria te deixar uma palavra bem sincera e carinhosa."
+            )
         }
+        val opening = openingsByShift[variation % openingsByShift.size]
 
-        val symptomParagraph = if (allSymptoms.isNotEmpty()) {
-            val hasPainOrFatigue = allSymptoms.any {
-                it.contains("dor", ignoreCase = true) ||
-                    it.contains("fadiga", ignoreCase = true) ||
-                    it.contains("tensão", ignoreCase = true) ||
-                    it.contains("ansiedade", ignoreCase = true) ||
-                    it.contains("enjoo", ignoreCase = true) ||
-                    it.contains("cansa", ignoreCase = true)
+        val moodAndNoteBlock = when {
+            latestMood != null && latestNote != null -> {
+                val noteReflections = listOf(
+                    "Fiquei pensando no que você escreveu agora há pouco (\"$latestNote\") e naquele sentimento de estar ${latestMood.label.lowercase()} ${latestMood.emoji}. É muito bonito quando a gente consegue ser sincero com o que tá sentindo de verdade, sem fingir que tá tudo igual todo dia.",
+                    "Li seu desabafo das ${latest.timeFormatted} — \"$latestNote\" — junto com o humor ${latestMood.label} ${latestMood.emoji}. Quero muito que você saiba que faz todo sentido você se sentir assim. Não se julgue por isso, tá?",
+                    "Você anotou às ${latest.timeFormatted} que estava se sentindo ${latestMood.label.lowercase()} ${latestMood.emoji} e contou: \"$latestNote\". Guardar isso aqui é quase como dividir o peso da mochila com alguém de confiança.",
+                    "Quando vi seu registro das ${latest.timeFormatted} (${latestMood.emoji} ${latestMood.label}) dizendo \"$latestNote\", deu vontade de te dar um abraço bem demorado. Cada detalhe do que você vive importa de verdade.",
+                    "Sabe o que você escreveu ali — \"$latestNote\"? Junto com o seu momento ${latestMood.label.lowercase()} ${latestMood.emoji}, isso mostra o quanto você tá vivendo o dia com verdade, sem ligar o piloto automático.",
+                    "Anotar \"$latestNote\" num momento em que você se sente ${latestMood.label.lowercase()} ${latestMood.emoji} já tira metade da pressão do peito. Fico feliz que você tenha confiado esse pensamento ao seu diário."
+                )
+                noteReflections[variation % noteReflections.size]
             }
-            if (hasPainOrFatigue) {
-                "Vi também que você sinalizou sensações como ${allSymptoms.joinToString(", ")}. Quando o corpo dá sinais de desconforto ou cansaço, ele não está falhando com você — ele está apenas pedindo gentileza, pausa e um ritmo mais macio. Não se cobre produtividade máxima hoje; focar apenas no que é essencial já é uma grande vitória."
-            } else {
-                "Notar registros como ${allSymptoms.joinToString(", ")} mostra o quanto você está atento(a) ao seu bem-estar. Aproveite essa sintonia com o seu corpo para preservar a sua energia com carinho, sem sobrecarregar sua rotina."
+            latestMood != null -> {
+                val moodReflections = listOf(
+                    "Vi que mais cedo, lá pelas ${latest.timeFormatted}, a vibe estava mais ${latestMood.label.lowercase()} ${latestMood.emoji}. Tem dias que têm exatamente essa cor, e acolher isso sem brigar consigo mesmo(a) faz toda a diferença.",
+                    "Percebi que você marcou ${latestMood.emoji} ${latestMood.label} às ${latest.timeFormatted}. Independentemente de o dia estar mais leve ou mais denso, fico muito feliz por você estar se escutando de pertinho.",
+                    "Seu check-in das ${latest.timeFormatted} como ${latestMood.label} ${latestMood.emoji} diz bastante sobre o ritmo de hoje. Respeita esse compasso do seu coração, sem tentar forçar outra velocidade.",
+                    "Estar ${latestMood.empathyDescriptor} (${latestMood.label} ${latestMood.emoji}) faz parte de quem sente a vida de verdade. Que bom que você parou às ${latest.timeFormatted} pra registrar como estava por dentro.",
+                    "Às ${latest.timeFormatted} você sinalizou ${latestMood.emoji} ${latestMood.label}. Às vezes uma simples palavra já ajuda a gente a entender o que o nosso corpo e a nossa cabeça estão precisando.",
+                    "Olhei seu registro de humor (${latestMood.label} ${latestMood.emoji}) e só pensei numa coisa: trate você hoje com o mesmo carinho que você daria pra pessoa que você mais ama no mundo."
+                )
+                moodReflections[variation % moodReflections.size]
             }
-        } else {
-            "Independentemente de como a lista de tarefas esteja hoje, lembre-se de que o seu valor nunca é medido pela quantidade de coisas que você risca da agenda."
+            else -> {
+                val emptyReflections = listOf(
+                    "Mesmo quando a gente ainda não escreveu nada longo no diário, só o fato de abrir esse espaço já mostra uma vontade bonita de cuidar de si.",
+                    "Cada dia tem a sua própria história — uns são cheios de energia, outros pedem silêncio e cobertor. E todos eles têm espaço garantido aqui.",
+                    "Você não precisa ter tudo resolvido nem organizado pra merecer um momento de paz hoje, viu?",
+                    "Às vezes a rotina corre tanto que a gente esquece de perguntar pra nós mesmos: 'como eu tô agora?'. Que bom que você veio fazer essa pausa.",
+                    "Seja qual for o tamanho da sua lista de tarefas hoje, lembre que você vem sempre antes de qualquer check na agenda.",
+                    "Esse cantinho é 100% seu — sem cobrança, sem meta batida, só um lugar seguro pra você ser quem você é."
+                )
+                emptyReflections[variation % emptyReflections.size]
+            }
         }
 
-        val closingShiftAdvice = when (shift) {
-            DayShift.MORNING -> "Para o restante desta manhã, escolha apenas um passo de cada vez, beba um copo de água fresca e permita-se caminhar sem pressa."
-            DayShift.AFTERNOON -> "Para as próximas horas da tarde, solte o peso dos ombros, faça três respirações lentas e trate a si mesmo(a) com a mesma paciência que teria com alguém que você ama."
-            DayShift.NIGHT -> "Agora que a noite chegou, desacelere aos poucos. Tudo o que pôde ser feito hoje já foi entregue; permita que o seu descanso seja leve e reparador."
+        val symptomBlock = when {
+            allSymptoms.isNotEmpty() && hasHardSymptom -> {
+                val symList = allSymptoms.joinToString(", ")
+                val hardAdvice = listOf(
+                    "Também reparei que o corpo deu sinal de $symList. Olha, quando o físico aperta ou o cansaço bate, a regra número um é diminuir a exigência. Se precisar deixar metade das coisas pra depois, deixe sem culpa nenhuma.",
+                    "Lidar com $symList cansa demais, física e mentalmente. Não tenta bancar o(a) super-herói/heroína hoje não, tá? Faz só o básico que for inegociável e dá um desconto bem generoso pra você.",
+                    "Com $symList aparecendo por aí, seu corpo tá basicamente pedindo um pouco de mimo e silêncio. Bebe uma água fresca, estica as costas devagarinho e lembra que descansar também é produtivo.",
+                    "Sentir $symList muda completamente a nossa energia do dia. Se hoje o seu 100% for apenas respirar fundo e fazer o essencial, já foi um baita dia vitorioso.",
+                    "Vi que $symList deram as caras hoje. Vai mais devagar nas próximas horas — ninguém merece se cobrar performance alta quando o corpo tá pedindo colo.",
+                    "Quando sinais como $symList aparecem, é o momento perfeito pra ativar a gentileza máxima com você. Uma coisa de cada vez, no seu tempo."
+                )
+                hardAdvice[variation % hardAdvice.size]
+            }
+            allSymptoms.isNotEmpty() -> {
+                val symList = allSymptoms.joinToString(", ")
+                val lightAdvice = listOf(
+                    "Ah, e ver que você anotou $symList é ótimo pra ir acompanhando como seu corpo reage ao longo da semana. Continue mantendo esse olhar carinhoso pra você!",
+                    "Notar $symList nos seus registros mostra que você tá em sintonia fina consigo. Aproveita essa percepção pra manter as próximas horas leves e gostosas.",
+                    "Vi também as tags de $symList por aqui. Muito legal ver você construindo esse mapa do seu bem-estar dia após dia."
+                )
+                lightAdvice[variation % lightAdvice.size]
+            }
+            else -> {
+                val generalWarmth = listOf(
+                    "Se alguma coisa não sair como planejado hoje, tudo bem também. Amanhã a gente recomeça com folha limpa.",
+                    "Lembra de beber um copo d'água agora e fazer pelo menos uma coisa pequena que te dê gosto de verdade hoje.",
+                    "Você tem feito um esforço bonito pra equilibrar rotina, casa, saúde e finanças — orgulhe-se do caminho que você tá trilhando."
+                )
+                generalWarmth[variation % generalWarmth.size]
+            }
         }
 
-        return "$greeting\n\n$moodParagraph\n\n$symptomParagraph\n\n$closingShiftAdvice\n\nCom carinho,\nSeu Espaço de Acolhimento Aura 🌿"
+        val closings = listOf(
+            "Tô sempre por aqui quando quiser conversar.\nUm abraço bem quentinho,\nSeu cantinho no Omni 🌿",
+            "Cuide bem de você nas próximas horas, combinado?\nCom todo carinho,\nOmni ✨",
+            "Vai no seu ritmo que já tá lindo demais.\nUm beijo no coração,\nEspaço de Acolhimento Omni 💛",
+            "Conte comigo pro que der e vier hoje.\nCom afeto,\nSeu parceiro de jornada Omni 🌱",
+            "Respira fundo e segue leve.\nUm abraço apertado,\nOmni 🤍",
+            "Estarei aqui no próximo turno torcendo por você.\nCom carinho sincero,\nOmni 🍃"
+        )
+        val closing = closings[variation % closings.size]
+
+        return "$opening\n\n$moodAndNoteBlock\n\n$symptomBlock\n\n$closing"
     }
 
     private fun syncEntryToFirestore(entry: PrivateDiaryEntry) {
@@ -881,9 +1076,10 @@ class PrivateDiaryRepository(
 // =========================================================================
 
 enum class VoiceIntentType(val label: String, val emoji: String) {
-    EXPENSE("Despesa / Financeiro", "💸"),
-    TASK("Tarefa / Agenda", "📅"),
-    DIARY("Entrada no Diário", "📔")
+    EXPENSE("Despesa", "💸"),
+    INCOME("Receita", "💰"),
+    TASK("Tarefa", "📅"),
+    DIARY("Diário", "📔")
 }
 
 data class ParsedVoiceCommand(
@@ -893,6 +1089,13 @@ data class ParsedVoiceCommand(
     val expenseTitle: String,
     val expenseAmountBrl: Double,
     val expenseCategory: String,
+    // Income fields
+    val incomeTitle: String = "",
+    val incomeAmountBrl: Double = 0.0,
+    val incomeCategory: String = "Salário",
+    val incomeIsRecurring: Boolean = false,
+    // Bank hint (if spoken e.g. "no Nubank", "no Itaú")
+    val detectedBankHint: String = "",
     // Task fields
     val taskTitle: String,
     val taskEpochDay: Long,
@@ -917,11 +1120,19 @@ object VoiceCommandInterpreter {
         val clean = transcript.trim()
         val lower = clean.lowercase(Locale.forLanguageTag("pt-BR"))
 
-        // 1. Classify primary intent
-        val hasExpenseKeyword = listOf(
-            "gastei", "paguei", "comprei", "custou", "reais", "r$", "despesa",
-            "pix", "boleto", "mercado", "farmácia", "farmacia", "conta de", "almoço custou"
+        // 1. Classify primary intent (including INCOME vs EXPENSE vs TASK vs DIARY)
+        val hasIncomeKeyword = listOf(
+            "recebi", "ganhei", "entrou", "salário", "salario", "vendi", "venda de",
+            "pix recebido", "reembolso", "freela", "freelance", "bônus", "bonus",
+            "renda", "lucro", "pagamento recebido", "depositaram", "me pagaram",
+            "comissão", "comissao", "rendimento", "dividendos", "adiantamento", "receita"
         ).any { lower.contains(it) }
+
+        val hasExpenseKeyword = listOf(
+            "gastei", "paguei", "comprei", "custou", "despesa",
+            "boleto", "mercado", "farmácia", "farmacia", "conta de", "almoço custou"
+        ).any { lower.contains(it) } ||
+            (!hasIncomeKeyword && listOf("reais", "r$", "pix").any { lower.contains(it) })
 
         val hasDiaryKeyword = listOf(
             "acordei", "estou me sentindo", "me sentindo", "sinto", "humor",
@@ -939,6 +1150,8 @@ object VoiceCommandInterpreter {
         val extractedAmount = extractCurrencyAmount(lower)
 
         val detectedIntent = when {
+            hasIncomeKeyword ->
+                VoiceIntentType.INCOME
             hasExpenseKeyword || (extractedAmount != null && !hasTaskKeyword && !hasDiaryKeyword) ->
                 VoiceIntentType.EXPENSE
             hasDiaryKeyword && !hasTaskKeyword && !hasExpenseKeyword ->
@@ -951,10 +1164,15 @@ object VoiceCommandInterpreter {
                 VoiceIntentType.TASK
         }
 
-        // 2. Extract Expense Details
+        // 2. Extract Expense & Income Details
         val amountBrl = extractedAmount ?: 0.0
         val expenseCategory = inferExpenseCategory(lower)
         val expenseTitle = cleanExpenseDescription(clean, expenseCategory)
+
+        val incomeCategory = inferIncomeCategory(lower)
+        val incomeTitle = cleanIncomeDescription(clean, incomeCategory)
+        val incomeIsRecurring = listOf("salário", "salario", "mensal", "fixo", "fixa", "todo mês").any { lower.contains(it) }
+        val bankHint = detectBankHint(lower)
 
         // 3. Extract Task Details
         val dayOffset = when {
@@ -986,6 +1204,11 @@ object VoiceCommandInterpreter {
             expenseTitle = expenseTitle.ifBlank { clean.ifBlank { "Despesa por Voz" } },
             expenseAmountBrl = amountBrl,
             expenseCategory = expenseCategory,
+            incomeTitle = incomeTitle.ifBlank { clean.ifBlank { "Receita por Voz" } },
+            incomeAmountBrl = amountBrl,
+            incomeCategory = incomeCategory,
+            incomeIsRecurring = incomeIsRecurring,
+            detectedBankHint = bankHint,
             taskTitle = taskTitle.ifBlank { clean.ifBlank { "Lembrete por Voz" } },
             taskEpochDay = targetEpochDay,
             taskHour = taskHour,
@@ -1000,13 +1223,13 @@ object VoiceCommandInterpreter {
     }
 
     private fun extractCurrencyAmount(lower: String): Double? {
-        // Matches e.g. "45", "45,90", "45.90", "R$ 120,50", "45 reais e 50 centavos"
-        val regex = Regex("""(?:r\$\s*)?(\d{1,6})(?:[.,](\d{1,2}))?\s*(?:reais|real)?""")
-        val matches = regex.findAll(lower).toList()
+        // Matches e.g. "45", "45,90", "45.90", "R$ 120,50", "1.500", "45 reais e 50 centavos"
+        val normalized = lower.replace(Regex("""(\d)\.(\d{3})\b"""), "$1$2")
+        val regex = Regex("""(?:r\$\s*)?(\d{1,7})(?:[.,](\d{1,2}))?\s*(?:reais|real)?""")
+        val matches = regex.findAll(normalized).toList()
         for (match in matches) {
-            // Avoid matching hours like "10h" or "14 horas" as currency
             val endIndex = match.range.last + 1
-            val trailing = lower.substring(endIndex).trimStart()
+            val trailing = normalized.substring(endIndex).trimStart()
             if (trailing.startsWith("h") || trailing.startsWith("hora")) {
                 continue
             }
@@ -1020,6 +1243,46 @@ object VoiceCommandInterpreter {
             return whole + cents
         }
         return null
+    }
+
+    private fun inferIncomeCategory(lower: String): String {
+        return when {
+            listOf("salário", "salario", "adiantamento", "holerite", "pagamento").any { lower.contains(it) } -> "Salário"
+            listOf("vendi", "venda", "cliente", "encomenda", "comissão", "comissao").any { lower.contains(it) } -> "Vendas"
+            listOf("reembolso", "estorno", "devolução", "devolucao").any { lower.contains(it) } -> "Reembolso"
+            listOf("freela", "freelance", "extra", "bônus", "bonus", "bico", "pix recebido").any { lower.contains(it) } -> "Extra"
+            else -> "Outros"
+        }
+    }
+
+    private fun cleanIncomeDescription(raw: String, category: String): String {
+        val cleaned = raw
+            .replace(Regex("""(?i)^(recebi|ganhei|entrou|lançar receita|receita de|vendi)\s+"""), "")
+            .replace(Regex("""(?i)\b\d{1,7}([.,]\d{1,2})?\s*(reais|real)\b"""), "")
+            .replace(Regex("""(?i)\br\$\s*\d{1,7}([.,]\d{1,2})?\b"""), "")
+            .replace(Regex("""(?i)^(de|do|da|pelo|pela|no|na|em|por)\s+"""), "")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.forLanguageTag("pt-BR")) else it.toString() }
+
+        return if (cleaned.length >= 2) cleaned else category
+    }
+
+    private fun detectBankHint(lower: String): String {
+        return when {
+            lower.contains("nubank") || lower.contains("nu ") -> "Nubank"
+            lower.contains("itaú") || lower.contains("itau") -> "Itaú"
+            lower.contains("inter") -> "Inter"
+            lower.contains("bradesco") -> "Bradesco"
+            lower.contains("santander") -> "Santander"
+            lower.contains("caixa") -> "Caixa"
+            lower.contains("banco do brasil") || lower.contains("bb") -> "Banco do Brasil"
+            lower.contains("c6") -> "C6 Bank"
+            lower.contains("picpay") -> "PicPay"
+            lower.contains("mercado pago") -> "Mercado Pago"
+            lower.contains("carteira") || lower.contains("dinheiro") -> "Carteira"
+            else -> ""
+        }
     }
 
     private fun inferExpenseCategory(lower: String): String {
@@ -1039,7 +1302,7 @@ object VoiceCommandInterpreter {
     private fun cleanExpenseDescription(raw: String, category: String): String {
         val cleaned = raw
             .replace(Regex("""(?i)^(gastei|paguei|comprei|lançar despesa|despesa de)\s+"""), "")
-            .replace(Regex("""(?i)\b\d{1,6}([.,]\d{1,2})?\s*(reais|real)\b"""), "")
+            .replace(Regex("""(?i)\b\d{1,7}([.,]\d{1,2})?\s*(reais|real)\b"""), "")
             .replace(Regex("""(?i)^(na|no|em|com|de|por)\s+"""), "")
             .replace(Regex("""\s+"""), " ")
             .trim()
@@ -1049,7 +1312,6 @@ object VoiceCommandInterpreter {
     }
 
     private fun extractTimeFromSpeech(lower: String): Pair<Int, Int> {
-        // E.g. "às 10h30", "as 10:30", "às 14 horas", "às 9h"
         val timeRegex = Regex("""(?:às|as|para as|para às)?\s*(\d{1,2})\s*(?:h|hora|horas|:)\s*(\d{1,2})?""")
         val match = timeRegex.find(lower)
         if (match != null) {

@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FamilyRestroom
@@ -107,6 +108,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.alarm.AlarmScheduler
 import com.example.alarm.TaskRingtoneCatalog
 import com.example.alarm.TaskTonePreviewPlayer
@@ -196,8 +198,10 @@ fun TasksCalendarScreen(
     selectedEpochDay: Long,
     tasks: List<TaskItem>,
     subscriptions: List<SubscriptionBill>,
+    transactions: List<com.example.data.FinanceTransaction> = emptyList(),
     customizationConfig: AppCustomizationConfig,
     customizationRepo: CustomizationRepository,
+    household: com.example.data.Household = com.example.data.Household(),
     onShiftMonth: (Int) -> Unit,
     onSelectEpochDay: (Long) -> Unit,
     onToggleTask: (TaskItem) -> Unit,
@@ -205,13 +209,16 @@ fun TasksCalendarScreen(
     onToggleSubtask: (TaskItem, String) -> Unit = { _, _ -> },
     onScheduleInboxTask: (TaskItem, Long, Int, Int, Int) -> Unit = { _, _, _, _, _ -> },
     onPostSubscriptionNow: (SubscriptionBill) -> Unit = {},
+    onPayCreditInvoiceNow: (accountId: String, accountName: String) -> Unit = { _, _ -> },
     onUpdateSubscriptionRingtone: (SubscriptionBill, String) -> Unit = { _, _ -> },
+    onEditTask: (TaskItem) -> Unit = {},
     onDeleteTask: (TaskItem) -> Unit,
     onOpenNewTaskDialog: () -> Unit,
     onOpenNewTaskWithPreset: (startHour: Int, startMinute: Int, suggestedDuration: Int, isInbox: Boolean, defaultScope: String) -> Unit = { _, _, _, _, _ -> }
 ) {
     val context = LocalContext.current
     val cardRadius = LocalOrganicCardRadius.current
+    val hideFinanceValues = com.example.ui.theme.LocalFinancePrivacyHideValues.current
 
     // Modos de visualização da Agenda (Passo 2 + Design Structured):
     // "TIMELINE" = Linha do Tempo Diária Estilo Structured (Completo / Simplificado / Mínimo)
@@ -226,23 +233,37 @@ fun TasksCalendarScreen(
     var selectedTaskForBottomSheet by remember { mutableStateOf<TaskItem?>(null) }
 
     var scopeFilter by remember { mutableStateOf("ALL") } // "ALL", PrivacyScope.PERSONAL, PrivacyScope.FAMILY
+    // Filtro sincronizado com a lista oficial de membros da família no Firestore (ex.: Marcus, Nathalia)
+    var selectedMemberFilter by remember { mutableStateOf("ALL") }
+    val officialFamilyMembers = remember(
+        household.members,
+        customizationConfig.profileName,
+        customizationConfig.profileColorHex
+    ) {
+        household.membersWithAssignedColors(
+            fallbackProfileName = customizationConfig.profileName,
+            fallbackProfileColorHex = customizationConfig.profileColorHex
+        )
+    }
     // Filtro para separar Contas de Tarefas: "ALL" (Tudo), "TASKS_ONLY" (Só Tarefas), "BILLS_ONLY" (Só Contas)
     var itemTypeFilter by remember { mutableStateOf("ALL") }
     // Filtro por Categoria: "ALL" (Todas) ou nome da categoria ("Finanças", "Casa", "Trabalho", "Família", "Saúde")
     var categoryFilter by remember { mutableStateOf("ALL") }
     var taskToScheduleFromInbox by remember { mutableStateOf<TaskItem?>(null) }
     var billForRingtoneDialog by remember { mutableStateOf<SubscriptionBill?>(null) }
+    var taskPendingDelete by remember { mutableStateOf<TaskItem?>(null) }
 
     val accentColor = remember(customizationConfig.agendaColorHex, customizationConfig.profileColorHex) {
         Color(customizationConfig.agendaColorHex)
     }
     val layoutMode = customizationConfig.agendaLayoutMode
 
-    val availableCategories = remember(tasks, subscriptions) {
+    val availableCategories = remember(tasks, subscriptions, household.customCategories) {
         val defaults = listOf("Finanças", "Casa", "Trabalho", "Família", "Saúde")
         val fromTasks = tasks.map { it.category.trim() }.filter { it.isNotBlank() }
         val fromSubs = subscriptions.map { it.category.trim() }.filter { it.isNotBlank() }
-        (defaults + fromTasks + fromSubs).distinct()
+        val fromHousehold = household.customCategories.map { it.trim() }.filter { it.isNotBlank() }
+        (defaults + fromHousehold + fromTasks + fromSubs).distinct()
     }
 
     val calendarCells = remember(selectedYearMonth) {
@@ -268,13 +289,24 @@ fun TasksCalendarScreen(
             task.linkedTransactionId.isNotBlank()
     }
 
-    // 1. Filtro de Escopo ("Tudo", "Individual", "Familiar") + Categoria + Tipo (Tarefas vs Contas)
-    val scopeFilteredTasks = remember(tasks, scopeFilter, categoryFilter, itemTypeFilter) {
+    // 1. Filtro de Escopo ("Tudo", "Individual", "Familiar") + Membro da Família + Categoria + Tipo (Tarefas vs Contas)
+    val scopeFilteredTasks = remember(tasks, scopeFilter, selectedMemberFilter, officialFamilyMembers, categoryFilter, itemTypeFilter) {
+        val selectedMemberBadge = officialFamilyMembers.firstOrNull {
+            it.userId == selectedMemberFilter || it.displayName.equals(selectedMemberFilter, ignoreCase = true)
+        }
         tasks.filter { task ->
             val matchesScope = when (scopeFilter) {
                 PrivacyScope.FAMILY -> task.privacyScope != PrivacyScope.PERSONAL
                 PrivacyScope.PERSONAL -> task.privacyScope == PrivacyScope.PERSONAL
                 else -> true
+            }
+            val matchesMember = if (selectedMemberFilter == "ALL" || selectedMemberBadge == null) {
+                true
+            } else {
+                task.assignedMemberName.equals(selectedMemberBadge.displayName, ignoreCase = true) ||
+                    task.taskColorHex == selectedMemberBadge.colorHex ||
+                    task.assignedMemberColorHex == selectedMemberBadge.colorHex ||
+                    (task.assignedMemberName.isBlank() && selectedMemberBadge.displayName.equals(customizationConfig.profileName, ignoreCase = true))
             }
             val matchesCategory = categoryFilter == "ALL" ||
                 task.category.equals(categoryFilter, ignoreCase = true) ||
@@ -285,12 +317,13 @@ fun TasksCalendarScreen(
                 "BILLS_ONLY" -> isBill
                 else -> true
             }
-            matchesScope && matchesCategory && matchesType
+            matchesScope && matchesMember && matchesCategory && matchesType
         }
     }
 
-    val activeFiltersCount = remember(scopeFilter, itemTypeFilter, categoryFilter) {
+    val activeFiltersCount = remember(scopeFilter, selectedMemberFilter, itemTypeFilter, categoryFilter) {
         (if (scopeFilter != "ALL") 1 else 0) +
+            (if (selectedMemberFilter != "ALL") 1 else 0) +
             (if (itemTypeFilter != "ALL") 1 else 0) +
             (if (categoryFilter != "ALL") 1 else 0)
     }
@@ -319,10 +352,11 @@ fun TasksCalendarScreen(
         }
     }
 
-    // Tarefas agendadas para o dia selecionado (não estão na Inbox)
+    // Tarefas agendadas para o dia selecionado (não estão na Inbox), incluindo tarefas recorrentes e por período de datas
     val baseDayScheduledTasks = remember(scopeFilteredTasks, selectedEpochDay) {
         scopeFilteredTasks
-            .filter { !it.isInbox && it.dateEpochDay == selectedEpochDay }
+            .filter { !it.isInbox && it.occursOnEpochDay(selectedEpochDay) }
+            .map { it.withCompletedForDate(selectedEpochDay) }
             .sortedWith(compareBy<TaskItem> { it.alarmHour }.thenBy { it.alarmMinute })
     }
 
@@ -344,6 +378,26 @@ fun TasksCalendarScreen(
                     sub.dueDayOfMonth.toInt() == selectedDayOfMonth &&
                     matchesScope &&
                     matchesCategory
+            }
+        }
+    }
+
+    // Faturas de Cartão de Crédito que vencem na data selecionada
+    val dueDayCreditCardInvoices = remember(household.bankAccounts, transactions, selectedYearMonth, selectedDayOfMonth, itemTypeFilter) {
+        if (itemTypeFilter == "TASKS_ONLY") {
+            emptyList()
+        } else {
+            household.bankAccounts.mapNotNull { account ->
+                if (account.dueDay == selectedDayOfMonth) {
+                    val openInv = com.example.data.BankAccountCatalog.openInvoiceForMonthBrl(
+                        accountId = account.id,
+                        yearMonth = selectedYearMonth,
+                        transactions = transactions
+                    )
+                    if (openInv > 0.009) account to openInv else null
+                } else {
+                    null
+                }
             }
         }
     }
@@ -434,7 +488,7 @@ fun TasksCalendarScreen(
 
         for (task in sortedTasks) {
             val taskStart = (task.alarmHour.toInt().coerceIn(0, 23) * 60) + task.alarmMinute.toInt().coerceIn(0, 59)
-            val duration = task.durationMinutes.coerceIn(10, 480)
+            val duration = task.durationMinutes.coerceIn(5, 720)
             val taskEnd = (taskStart + duration).coerceAtMost(23 * 60 + 59)
 
             if (taskStart - cursorMinutes >= 10) {
@@ -486,8 +540,24 @@ fun TasksCalendarScreen(
         timelineNodes.filterIsInstance<TimelineNode.FreeGapBlock>().sumOf { it.gapMinutes }
     }
 
-    val tasksByDay = remember(scopeFilteredTasks) {
-        scopeFilteredTasks.filter { !it.isInbox }.groupBy { it.dateEpochDay }
+    val tasksByDay = remember(scopeFilteredTasks, calendarCells, selectedEpochDay) {
+        val candidateDays = (calendarCells.filterNotNull() + (-14L..14L).map { selectedEpochDay + it }).distinct()
+        val nonInboxTasks = scopeFilteredTasks.filter { !it.isInbox }
+        candidateDays.associateWith { dayEpoch ->
+            nonInboxTasks
+                .filter { it.occursOnEpochDay(dayEpoch) }
+                .map { it.withCompletedForDate(dayEpoch) }
+        }
+    }
+
+    val monthEpochDays = remember(calendarCells) { calendarCells.filterNotNull() }
+    val monthTasks = remember(scopeFilteredTasks, selectedYearMonth, monthEpochDays, selectedEpochDay) {
+        scopeFilteredTasks
+            .filter { task ->
+                !task.isInbox &&
+                    (task.yearMonth == selectedYearMonth || monthEpochDays.any { task.occursOnEpochDay(it) })
+            }
+            .map { it.withCompletedForDate(selectedEpochDay) }
     }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -622,7 +692,12 @@ fun TasksCalendarScreen(
                             color = if (selected) accentColor.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                             modifier = Modifier
                                 .clip(RoundedCornerShape(50))
-                                .clickable { scopeFilter = key }
+                                .clickable {
+                                    scopeFilter = key
+                                    if (key == PrivacyScope.PERSONAL) {
+                                        selectedMemberFilter = "ALL"
+                                    }
+                                }
                                 .testTag(tag)
                         ) {
                             Text(
@@ -632,6 +707,45 @@ fun TasksCalendarScreen(
                                 color = if (selected) accentColor else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
                             )
+                        }
+                    }
+
+                    // Chips sincronizados com a lista oficial de membros da família (ex.: Marcus, Nathalia)
+                    officialFamilyMembers.forEach { member ->
+                        val isMemberSelected = selectedMemberFilter.equals(member.displayName, ignoreCase = true)
+                        val memberColor = Color(member.colorHex.toInt())
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (isMemberSelected) {
+                                memberColor.copy(alpha = 0.24f)
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                            },
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .clickable {
+                                    selectedMemberFilter = if (isMemberSelected) "ALL" else member.displayName
+                                }
+                                .testTag("agenda_member_filter_${member.displayName}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(memberColor)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = member.displayName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = if (isMemberSelected) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isMemberSelected) memberColor else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
 
@@ -855,7 +969,7 @@ fun TasksCalendarScreen(
 
             if (agendaViewMode == "TIMELINE") {
                 // 5. MENU EXPANSÍVEL DE CONTAS & PAGAMENTOS DO DIA (Separado das Tarefas de Rotina)
-                val totalBillsDueToday = dueDaySubscriptions.size + dayFinancialTasks.size
+                val totalBillsDueToday = dueDaySubscriptions.size + dayFinancialTasks.size + dueDayCreditCardInvoices.size
                 if (itemTypeFilter != "TASKS_ONLY" && totalBillsDueToday > 0) {
                     item {
                         Card(
@@ -899,7 +1013,7 @@ fun TasksCalendarScreen(
                                         }
                                         Spacer(modifier = Modifier.width(10.dp))
                                         Text(
-                                            text = "Contas & Vencimentos de Hoje ($totalBillsDueToday)",
+                                            text = "Contas & Faturas de Hoje ($totalBillsDueToday)",
                                             style = MaterialTheme.typography.titleSmall,
                                             fontWeight = FontWeight.Bold
                                         )
@@ -925,6 +1039,55 @@ fun TasksCalendarScreen(
                                         modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp),
                                         verticalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
+                                        dueDayCreditCardInvoices.forEach { (account, openInvoiceBrl) ->
+                                            Surface(
+                                                shape = RoundedCornerShape(16.dp),
+                                                color = Color(account.colorHex.toInt()).copy(alpha = 0.14f),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .border(
+                                                        1.dp,
+                                                        Color(account.colorHex.toInt()).copy(alpha = 0.35f),
+                                                        RoundedCornerShape(16.dp)
+                                                    )
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            text = "💳 Fatura ${account.name} (Vence dia ${account.dueDay})",
+                                                            style = MaterialTheme.typography.labelLarge,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                        Text(
+                                                            text = "Em aberto: ${formatCurrencyBrl(openInvoiceBrl, hideFinanceValues)} • Fecha dia ${account.closingDay}",
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = ExpenseCoral,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                    }
+                                                    FilledTonalButton(
+                                                        onClick = { onPayCreditInvoiceNow(account.id, account.name) },
+                                                        shape = RoundedCornerShape(50),
+                                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                                        modifier = Modifier.testTag("agenda_pay_invoice_${account.id}")
+                                                    ) {
+                                                        Text(
+                                                            text = "Pagar Fatura",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.Bold,
+                                                            maxLines = 1,
+                                                            softWrap = false
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
                                         dueDaySubscriptions.forEach { bill ->
                                             val isPaidThisMonth = bill.lastPostedYearMonth == selectedYearMonth
                                             AgendaFinancialBillCard(
@@ -943,7 +1106,8 @@ fun TasksCalendarScreen(
                                                 onToggleCheck = { onToggleTask(billTask) },
                                                 onToggleEssential = { onToggleTaskEssential(billTask) },
                                                 onToggleSubtask = { subtaskId -> onToggleSubtask(billTask, subtaskId) },
-                                                onDelete = { onDeleteTask(billTask) }
+                                                onEdit = { onEditTask(billTask) },
+                                                onDelete = { taskPendingDelete = billTask }
                                             )
                                         }
                                     }
@@ -1096,6 +1260,12 @@ fun TasksCalendarScreen(
                                                     },
                                                     onToggleTask = { toggledTask ->
                                                         onToggleTask(toggledTask)
+                                                    },
+                                                    onSwipeEditOrReschedule = { swipedTask ->
+                                                        onEditTask(swipedTask)
+                                                    },
+                                                    onSwipeDelete = { swipedTask ->
+                                                        taskPendingDelete = swipedTask
                                                     }
                                                 )
                                             }
@@ -1197,7 +1367,8 @@ fun TasksCalendarScreen(
                             onScheduleClick = { taskToScheduleFromInbox = inboxTask },
                             onToggleCheck = { onToggleTask(inboxTask) },
                             onToggleSubtask = { subtaskId -> onToggleSubtask(inboxTask, subtaskId) },
-                            onDelete = { onDeleteTask(inboxTask) }
+                            onEdit = { onEditTask(inboxTask) },
+                            onDelete = { taskPendingDelete = inboxTask }
                         )
                     }
                 }
@@ -1217,6 +1388,8 @@ fun TasksCalendarScreen(
                                 calendarCells = calendarCells,
                                 tasksByDay = tasksByDay,
                                 subscriptions = subscriptions,
+                                bankAccounts = household.bankAccounts,
+                                transactions = transactions,
                                 scopeFilter = scopeFilter,
                                 onShiftMonth = onShiftMonth,
                                 onSelectEpochDay = {
@@ -1273,7 +1446,6 @@ fun TasksCalendarScreen(
                     }
                 }
 
-                val monthTasks = scopeFilteredTasks.filter { it.yearMonth == selectedYearMonth && !it.isInbox }
                 if (monthTasks.isEmpty()) {
                     item {
                         Text(
@@ -1292,42 +1464,21 @@ fun TasksCalendarScreen(
                             onToggleCheck = { onToggleTask(task) },
                             onToggleEssential = { onToggleTaskEssential(task) },
                             onToggleSubtask = { subtaskId -> onToggleSubtask(task, subtaskId) },
-                            onDelete = { onDeleteTask(task) }
+                            onEdit = { onEditTask(task) },
+                            onDelete = { taskPendingDelete = task }
                         )
                     }
                 }
             }
         }
-
-        // Botão Circular "+" Flutuante Estilo Structured no canto inferior direito (empilhado abaixo do Microfone)
-        FloatingActionButton(
-            onClick = {
-                val defaultScope = if (scopeFilter == PrivacyScope.PERSONAL) PrivacyScope.PERSONAL else PrivacyScope.FAMILY
-                val isInboxDefault = (agendaViewMode == "INBOX")
-                onOpenNewTaskWithPreset(9, 0, 30, isInboxDefault, defaultScope)
-            },
-            shape = CircleShape,
-            containerColor = accentColor,
-            contentColor = Color(0xFF18191C),
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 16.dp, bottom = 16.dp)
-                .size(56.dp)
-                .testTag("add_task_header_btn")
-        ) {
-            Icon(
-                imageVector = Icons.Default.Add,
-                contentDescription = "Nova Tarefa",
-                modifier = Modifier.size(28.dp)
-            )
-        }
     }
 
-    // Modal Structured "Selecionar data" (Screenshot 5)
+    // Modal Structured "Selecionar data" com indicadores de compromissos por membro/tarefa
     if (showStructuredDatePickerModal) {
         StructuredDatePickerDialog(
             selectedEpochDay = selectedEpochDay,
             accentColor = accentColor,
+            tasks = tasks,
             onDismiss = { showStructuredDatePickerModal = false },
             onConfirmEpochDay = { pickedEpochDay ->
                 onSelectEpochDay(pickedEpochDay)
@@ -1337,8 +1488,9 @@ fun TasksCalendarScreen(
 
     // Bottom Sheet Structured de Detalhes da Tarefa (Screenshot 3)
     selectedTaskForBottomSheet?.let { activeTask ->
-        // Sincroniza estado atualizado da tarefa na lista principal
-        val liveTask = tasks.firstOrNull { it.id == activeTask.id } ?: activeTask
+        // Sincroniza estado atualizado da tarefa na lista principal para a data selecionada
+        val liveTask = (tasks.firstOrNull { it.id == activeTask.id } ?: activeTask)
+            .withCompletedForDate(selectedEpochDay)
         StructuredTaskDetailBottomSheet(
             task = liveTask,
             accentColor = accentColor,
@@ -1346,7 +1498,21 @@ fun TasksCalendarScreen(
             onToggleTask = { onToggleTask(it) },
             onToggleSubtask = { taskObj, subId -> onToggleSubtask(taskObj, subId) },
             onToggleEssential = { onToggleTaskEssential(it) },
-            onDeleteTask = { onDeleteTask(it) }
+            onEditTask = { onEditTask(it) },
+            onDeleteTask = { taskPendingDelete = it }
+        )
+    }
+
+    // Modal de confirmação de exclusão de tarefa
+    taskPendingDelete?.let { pendingTask ->
+        OmniConfirmDeleteDialog(
+            title = "Excluir tarefa?",
+            message = "Deseja excluir '${pendingTask.title}' da sua agenda? Esta ação não pode ser desfeita.",
+            onConfirm = {
+                onDeleteTask(pendingTask)
+                taskPendingDelete = null
+            },
+            onDismiss = { taskPendingDelete = null }
         )
     }
 
@@ -1692,8 +1858,10 @@ private fun TimeBlockingTaskCard(
     onToggleCheck: () -> Unit,
     onToggleEssential: () -> Unit,
     onToggleSubtask: (String) -> Unit,
+    onEdit: () -> Unit = {},
     onDelete: () -> Unit
 ) {
+    val context = LocalContext.current
     val cardRadius = LocalOrganicCardRadius.current
     val isPersonal = task.privacyScope == PrivacyScope.PERSONAL
     val hasFinanceCost = task.estimatedCostBrl > 0.0 || task.linkedSubscriptionId.isNotBlank() || task.linkedTransactionId.isNotBlank()
@@ -1813,6 +1981,30 @@ private fun TimeBlockingTaskCard(
                         )
                     }
 
+                    if (task.location.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "📍 ${task.location} (Abrir no Maps)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = blockColor,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { openLocationInGoogleMaps(context, task.location) }
+                                .padding(vertical = 2.dp)
+                                .testTag("task_card_open_maps_${task.id}")
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "${formatMinutesToHHmm(startMinutes)} - ${formatMinutesToHHmm(endMinutes)} • ${formatDurationPt(task.durationMinutes)} (${task.durationMinutes} min)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
                     if (task.notes.isNotBlank()) {
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
@@ -1833,6 +2025,17 @@ private fun TimeBlockingTaskCard(
                         contentDescription = if (task.completed) "Concluída" else "Concluir tarefa",
                         tint = if (task.completed) IncomeEmerald else blockColor,
                         modifier = Modifier.size(28.dp)
+                    )
+                }
+
+                IconButton(
+                    onClick = onEdit,
+                    modifier = Modifier.testTag("edit_task_btn_${task.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Editar tarefa",
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
 
@@ -2110,6 +2313,7 @@ private fun InboxTaskCard(
     onScheduleClick: () -> Unit,
     onToggleCheck: () -> Unit,
     onToggleSubtask: (String) -> Unit,
+    onEdit: () -> Unit = {},
     onDelete: () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
@@ -2159,6 +2363,28 @@ private fun InboxTaskCard(
                             fontWeight = FontWeight.Bold,
                             textDecoration = if (task.completed) TextDecoration.LineThrough else TextDecoration.None
                         )
+                        if (task.location.isNotBlank()) {
+                            val localCtx = LocalContext.current
+                            Text(
+                                text = "📍 ${task.location} (Abrir no Maps)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { openLocationInGoogleMaps(localCtx, task.location) }
+                                    .padding(vertical = 2.dp)
+                                    .testTag("inbox_task_open_maps_${task.id}")
+                            )
+                        }
+                        if (task.hasDateRange) {
+                            Text(
+                                text = "🗓️ ${DateCalendarUtils.formatEpochDayPt(task.dateEpochDay)} até ${DateCalendarUtils.formatEpochDayPt(task.endDateEpochDay)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = blockColor,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         if (task.notes.isNotBlank()) {
                             Text(
                                 text = task.notes,
@@ -2248,6 +2474,18 @@ private fun InboxTaskCard(
                 }
 
                 IconButton(
+                    onClick = onEdit,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Editar",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                IconButton(
                     onClick = onDelete,
                     modifier = Modifier.size(28.dp)
                 ) {
@@ -2271,6 +2509,8 @@ private fun MonthlyCalendarGridContent(
     calendarCells: List<Long?>,
     tasksByDay: Map<Long, List<TaskItem>>,
     subscriptions: List<SubscriptionBill>,
+    bankAccounts: List<com.example.data.BankAccount> = emptyList(),
+    transactions: List<com.example.data.FinanceTransaction> = emptyList(),
     scopeFilter: String,
     onShiftMonth: (Int) -> Unit,
     onSelectEpochDay: (Long) -> Unit
@@ -2353,7 +2593,15 @@ private fun MonthlyCalendarGridContent(
                             val pendingMemberColorHex = dayTasks.firstOrNull { !it.completed }?.taskColorHex
                                 ?: dayTasks.firstOrNull()?.assignedMemberColorHex
                             val hasCompletedTask = dayTasks.isNotEmpty() && dayTasks.all { it.completed }
-                            val hasBillDue = dayTasks.any {
+                            val hasCreditInvoiceDue = bankAccounts.any { acc ->
+                                acc.dueDay == dayNumber &&
+                                    com.example.data.BankAccountCatalog.openInvoiceForMonthBrl(
+                                        accountId = acc.id,
+                                        yearMonth = selectedYearMonth,
+                                        transactions = transactions
+                                    ) > 0.009
+                            }
+                            val hasBillDue = hasCreditInvoiceDue || dayTasks.any {
                                 !it.completed && (it.estimatedCostBrl > 0.0 || it.linkedSubscriptionId.isNotBlank() || it.linkedTransactionId.isNotBlank())
                             } || subscriptions.any {
                                 it.active && it.dueDayOfMonth.toInt() == dayNumber &&
@@ -2603,16 +2851,43 @@ private fun BillRingtonePickerDialog(
     onDismiss: () -> Unit,
     onSaveRingtone: (String) -> Unit
 ) {
+    val context = LocalContext.current
     var selectedRingtone by remember { mutableStateOf(bill.ringtoneCategory.ifBlank { "CONTAS" }) }
+    val activePreviewId by TaskTonePreviewPlayer.activePreviewIdFlow.collectAsStateWithLifecycle()
+
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            TaskTonePreviewPlayer.stopPreview(context)
+        }
+    }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            TaskTonePreviewPlayer.stopPreview(context)
+            onDismiss()
+        },
         title = {
-            Text(
-                text = "Som do Lembrete da Conta",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Som do Lembrete da Conta",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                if (activePreviewId != null) {
+                    FilledTonalButton(
+                        onClick = { TaskTonePreviewPlayer.stopPreview(context) },
+                        shape = RoundedCornerShape(50),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text("⏹️ Parar", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2623,6 +2898,7 @@ private fun BillRingtonePickerDialog(
                 )
                 TaskRingtoneCatalog.allOptions.forEach { option ->
                     val isSelected = selectedRingtone == option.id
+                    val isThisPreviewPlaying = activePreviewId == option.id
                     Surface(
                         shape = RoundedCornerShape(14.dp),
                         color = if (isSelected) {
@@ -2635,7 +2911,11 @@ private fun BillRingtonePickerDialog(
                             .clip(RoundedCornerShape(14.dp))
                             .clickable {
                                 selectedRingtone = option.id
-                                TaskTonePreviewPlayer.playPreview(option.id)
+                                if (isThisPreviewPlaying) {
+                                    TaskTonePreviewPlayer.stopPreview(context)
+                                } else {
+                                    TaskTonePreviewPlayer.playPreview(option.id)
+                                }
                             }
                     ) {
                         Row(
@@ -2660,18 +2940,25 @@ private fun BillRingtonePickerDialog(
                             OutlinedButton(
                                 onClick = {
                                     selectedRingtone = option.id
-                                    TaskTonePreviewPlayer.playPreview(option.id)
+                                    if (isThisPreviewPlaying) {
+                                        TaskTonePreviewPlayer.stopPreview(context)
+                                    } else {
+                                        TaskTonePreviewPlayer.playPreview(option.id)
+                                    }
                                 },
                                 shape = RoundedCornerShape(50),
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = "Preview",
+                                    imageVector = if (isThisPreviewPlaying) Icons.Default.Close else Icons.Default.PlayArrow,
+                                    contentDescription = if (isThisPreviewPlaying) "Parar" else "Preview",
                                     modifier = Modifier.size(15.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Preview", style = MaterialTheme.typography.labelSmall)
+                                Text(
+                                    text = if (isThisPreviewPlaying) "Parar" else "Preview",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
                             }
                         }
                     }
@@ -2679,12 +2966,22 @@ private fun BillRingtonePickerDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onSaveRingtone(selectedRingtone) }) {
+            Button(
+                onClick = {
+                    TaskTonePreviewPlayer.stopPreview(context)
+                    onSaveRingtone(selectedRingtone)
+                }
+            ) {
                 Text("Salvar Ringtone")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(
+                onClick = {
+                    TaskTonePreviewPlayer.stopPreview(context)
+                    onDismiss()
+                }
+            ) {
                 Text("Cancelar")
             }
         }
@@ -2705,6 +3002,10 @@ fun AddTaskDialog(
     initialDurationMinutes: Int = 30,
     initialIsInbox: Boolean = false,
     initialPrivacyScope: String = PrivacyScope.FAMILY,
+    initialTask: TaskItem? = null,
+    customizationRepo: CustomizationRepository? = null,
+    customCategories: List<String> = emptyList(),
+    onAddCustomCategory: (String) -> Unit = {},
     onDismiss: () -> Unit,
     onSaveTask: (
         title: String,
@@ -2725,37 +3026,65 @@ fun AddTaskDialog(
         taskColorHex: Long,
         recurrence: String,
         subtasks: List<SubtaskItem>,
-        ringtoneCategory: String
+        ringtoneCategory: String,
+        location: String,
+        endDateEpochDay: Long,
+        recurrenceWeekdays: List<Int>
     ) -> Unit
 ) {
     val context = LocalContext.current
-    val (initYear, initMonth, initDay) = remember(initialEpochDay) {
-        DateCalendarUtils.fromEpochDay(initialEpochDay)
-    }
-    val maxDaysInMonth = remember(initYear, initMonth) {
-        DateCalendarUtils.daysInMonth(initYear, initMonth)
+    val triggerFeedback = rememberOmniFeedback()
+    val effectiveEpochDay = initialTask?.dateEpochDay ?: initialEpochDay
+
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            TaskTonePreviewPlayer.stopPreview(context)
+        }
     }
 
-    var title by remember { mutableStateOf("") }
-    var notes by remember { mutableStateOf("") }
-    var category by remember { mutableStateOf("Finanças") }
-    var priority by remember { mutableStateOf("MEDIUM") }
-    var privacyScope by remember { mutableStateOf(initialPrivacyScope) }
-    var isEssential by remember { mutableStateOf(false) }
+    var title by remember { mutableStateOf(initialTask?.title ?: "") }
+    var location by remember { mutableStateOf(initialTask?.location ?: "") }
+    var notes by remember { mutableStateOf(initialTask?.notes ?: "") }
+    var category by remember { mutableStateOf(initialTask?.category?.ifBlank { "Rotina" } ?: "Rotina") }
+    var priority by remember { mutableStateOf(initialTask?.priority?.ifBlank { "MEDIUM" } ?: "MEDIUM") }
+    var privacyScope by remember { mutableStateOf(initialTask?.privacyScope ?: initialPrivacyScope) }
+    var isEssential by remember { mutableStateOf(initialTask?.isEssential ?: false) }
 
     // Ícone e Cor da Tarefa
-    val iconOptions = remember { listOf("📋", "📊", "💳", "🛒", "🏋️", "🩺", "🏡", "📚", "🧘", "💼", "🍎", "🚗") }
-    var selectedIconEmoji by remember { mutableStateOf("📋") }
-    var selectedColorHex by remember { mutableLongStateOf(defaultProfileColorHex) }
+    var selectedIconEmoji by remember { mutableStateOf(initialTask?.iconEmoji?.ifBlank { "📋" } ?: "📋") }
+    var selectedColorHex by remember {
+        mutableLongStateOf(
+            initialTask?.taskColorHex?.takeIf { it != 0L } ?: defaultProfileColorHex
+        )
+    }
 
-    // Data / Hora (se sem horário definido -> vai para Inbox)
-    var sendToInbox by remember { mutableStateOf(initialIsInbox) }
-    var dueDayText by remember { mutableStateOf(initDay.toString()) }
-    var alarmHourText by remember { mutableStateOf(initialStartHour.toString().padStart(2, '0')) }
-    var alarmMinuteText by remember { mutableStateOf(initialStartMinute.toString().padStart(2, '0')) }
-    var alarmEnabled by remember { mutableStateOf(true) }
+    // Data / Hora (se sem horário definido -> vai para Inbox) + Intervalo de Datas (Período)
+    var sendToInbox by remember { mutableStateOf(initialTask?.isInbox ?: initialIsInbox) }
+    var dateDigits by remember {
+        mutableStateOf(OmniDateMaskUtils.epochDayToDigits(effectiveEpochDay))
+    }
+    var hasDatePeriod by remember {
+        mutableStateOf(
+            initialTask != null &&
+                initialTask.endDateEpochDay > initialTask.dateEpochDay &&
+                initialTask.dateEpochDay > 0L
+        )
+    }
+    var endDateDigits by remember {
+        val initialEnd = initialTask?.endDateEpochDay?.takeIf { it > effectiveEpochDay }
+            ?: (effectiveEpochDay + 1L)
+        mutableStateOf(OmniDateMaskUtils.epochDayToDigits(initialEnd))
+    }
 
-    // Duração (chips rápidos: 15m, 30m, 45m, 1h, 1h30, custom)
+    var alarmHourText by remember {
+        mutableStateOf((initialTask?.alarmHour?.toInt() ?: initialStartHour).toString().padStart(2, '0'))
+    }
+    var alarmMinuteText by remember {
+        mutableStateOf((initialTask?.alarmMinute?.toInt() ?: initialStartMinute).toString().padStart(2, '0'))
+    }
+    var alarmEnabled by remember { mutableStateOf(initialTask?.alarmEnabled ?: true) }
+
+    // Duração (chips rápidos: 15m, 30m, 45m, 1h, 1h30, custom em Horas + Minutos)
     val durationPresets = remember {
         listOf(
             15 to "15m",
@@ -2765,36 +3094,83 @@ fun AddTaskDialog(
             90 to "1h30"
         )
     }
-    var selectedDurationMinutes by remember { mutableIntStateOf(initialDurationMinutes) }
-    var isCustomDuration by remember { mutableStateOf(initialDurationMinutes !in listOf(15, 30, 45, 60, 90)) }
-    var customDurationText by remember { mutableStateOf(initialDurationMinutes.toString()) }
+    val startDuration = initialTask?.durationMinutes ?: initialDurationMinutes
+    val initialIsCustomDuration = startDuration !in listOf(15, 30, 45, 60, 90)
+    var selectedDurationMinutes by remember { mutableIntStateOf(startDuration) }
+    var isCustomDuration by remember { mutableStateOf(initialIsCustomDuration) }
+    var customDurationHoursText by remember {
+        mutableStateOf(if (initialIsCustomDuration) (startDuration / 60).toString() else "")
+    }
+    var customDurationMinutesText by remember {
+        mutableStateOf(if (initialIsCustomDuration) (startDuration % 60).toString() else "0")
+    }
 
-    // Recorrência (única, diária, semanal, quinzenal, mensal)
-    var selectedRecurrence by remember { mutableStateOf(TaskRecurrence.ONCE) }
+    // Recorrência (única, diária, seg a sex, dias específicos da semana, semanal, quinzenal, mensal)
+    var selectedRecurrence by remember { mutableStateOf(initialTask?.recurrence ?: TaskRecurrence.ONCE) }
+    val selectedWeekdays = remember {
+        mutableStateListOf<Int>().apply {
+            val initialDays = initialTask?.recurrenceWeekdays.orEmpty()
+            if (initialDays.isNotEmpty()) {
+                addAll(initialDays)
+            } else {
+                add(java.time.LocalDate.ofEpochDay(effectiveEpochDay).dayOfWeek.value)
+            }
+        }
+    }
 
     // Subtarefas (checklist)
-    val subtasksList = remember { mutableStateListOf<SubtaskItem>() }
+    val subtasksList = remember {
+        mutableStateListOf<SubtaskItem>().apply {
+            addAll(initialTask?.subtasks.orEmpty())
+        }
+    }
     var newSubtaskTitle by remember { mutableStateOf("") }
 
-    // Seletor de Ringtone (Som do Alerta) por tarefa com Preview em tempo real
-    var selectedRingtoneCategory by remember { mutableStateOf("SUAVE") }
+    // Seletor de Som Individual por Tarefa ("APP_DEFAULT" = Usar padrão do app selecionado por padrão)
+    var selectedRingtoneCategory by remember {
+        mutableStateOf(initialTask?.ringtoneCategory?.ifBlank { "APP_DEFAULT" } ?: "APP_DEFAULT")
+    }
+    var customAudioFileName by remember { mutableStateOf("") }
 
     // Integração Financeira
-    var hasFinancialCost by remember { mutableStateOf(false) }
-    var costAmountText by remember { mutableStateOf("") }
-    var autoCreateExpense by remember { mutableStateOf(true) }
+    var hasFinancialCost by remember { mutableStateOf((initialTask?.estimatedCostBrl ?: 0.0) > 0.0) }
+    var costAmountText by remember {
+        mutableStateOf(
+            if ((initialTask?.estimatedCostBrl ?: 0.0) > 0.0) initialTask?.estimatedCostBrl.toString() else ""
+        )
+    }
+    var autoCreateExpense by remember { mutableStateOf(initialTask?.autoCreateExpenseOnComplete ?: true) }
 
-    val categories = listOf("Finanças", "Casa", "Trabalho", "Família", "Saúde")
+    val defaultCategories = listOf(
+        "Rotina", "Casa", "Trabalho", "Saúde", "Finanças", "Família",
+        "Compras", "Estudos", "Lazer", "Transporte", "Alimentação", "Pets"
+    )
+    var localAddedCategories by remember { mutableStateOf(listOf<String>()) }
+    val categories = remember(customCategories, localAddedCategories) {
+        (defaultCategories + customCategories + localAddedCategories)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+    var newCustomCategoryText by remember { mutableStateOf("") }
+    var showNewCategoryInput by remember { mutableStateOf(false) }
     val timePresets = listOf(8 to 0, 9 to 0, 11 to 30, 14 to 0, 16 to 30, 19 to 0)
 
-    val chosenDay = (dueDayText.toIntOrNull() ?: initDay).coerceIn(1, maxDaysInMonth)
-    val resolvedEpochDay = DateCalendarUtils.toEpochDay(initYear, initMonth, chosenDay)
+    val resolvedEpochDay = OmniDateMaskUtils.digitsToEpochDayOrNull(dateDigits) ?: effectiveEpochDay
+    val resolvedEndEpochDay = if (hasDatePeriod && !sendToInbox) {
+        val parsedEnd = OmniDateMaskUtils.digitsToEpochDayOrNull(endDateDigits) ?: resolvedEpochDay
+        maxOf(parsedEnd, resolvedEpochDay)
+    } else {
+        0L
+    }
     val resolvedHour = (alarmHourText.toIntOrNull() ?: initialStartHour).coerceIn(0, 23)
     val resolvedMinute = (alarmMinuteText.toIntOrNull() ?: initialStartMinute).coerceIn(0, 59)
     val resolvedDuration = if (isCustomDuration) {
-        (customDurationText.toIntOrNull() ?: 30).coerceIn(5, 480)
+        val h = (customDurationHoursText.toIntOrNull() ?: 0).coerceIn(0, 12)
+        val m = (customDurationMinutesText.toIntOrNull() ?: 0).coerceIn(0, 59)
+        ((h * 60) + m).coerceIn(5, 720)
     } else {
-        selectedDurationMinutes.coerceIn(5, 480)
+        selectedDurationMinutes.coerceIn(5, 720)
     }
 
     val parsedCostBrl = if (hasFinancialCost) {
@@ -2808,10 +3184,17 @@ fun AddTaskDialog(
     ) { _ -> }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            TaskTonePreviewPlayer.stopPreview(context)
+            onDismiss()
+        },
         title = {
             Text(
-                text = if (sendToInbox) "Nova Tarefa na Inbox 📥" else "Nova Tarefa na Linha do Tempo ⏱️",
+                text = when {
+                    initialTask != null -> "Editar Tarefa"
+                    sendToInbox -> "Nova Tarefa na Inbox"
+                    else -> "Nova Tarefa na Linha do Tempo"
+                },
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
@@ -2827,13 +3210,39 @@ fun AddTaskDialog(
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("Título da Tarefa ou Conta") },
-                    placeholder = { Text("Ex: Revisão financeira / Academia / Pagar luz") },
+                    label = { Text("Título da Tarefa ou Evento") },
+                    placeholder = { Text("Ex: Consulta médica / Academia / Reunião / Pagar luz") },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("task_title_input")
                 )
+
+                // 1.b Campo Opcional de Local + Botão Abrir/Verificar no Google Maps
+                OutlinedTextField(
+                    value = location,
+                    onValueChange = { location = it },
+                    label = { Text("📍 Local (opcional)") },
+                    placeholder = { Text("Ex.: Clínica Centro, Escritório, Supermercado, Online...") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("task_location_input")
+                )
+                if (location.trim().isNotBlank()) {
+                    FilledTonalButton(
+                        onClick = { openLocationInGoogleMaps(context, location) },
+                        shape = RoundedCornerShape(50),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("task_verify_location_maps_btn")
+                    ) {
+                        Text(
+                            text = "🗺️ Abrir / Verificar no Google Maps",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
 
                 // 2. Escopo ("Individual - só meu" ou "Familiar - compartilhado")
                 Text(
@@ -2877,41 +3286,17 @@ fun AddTaskDialog(
                     )
                 }
 
-                // 3. Ícone e Cor da Tarefa
-                Text(
-                    text = "Ícone Visual",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    iconOptions.forEach { emoji ->
-                        val selected = selectedIconEmoji == emoji
-                        Surface(
-                            shape = CircleShape,
-                            color = if (selected) {
-                                MaterialTheme.colorScheme.primaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                            },
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .then(
-                                    if (selected) {
-                                        Modifier.border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
-                                    } else Modifier
-                                )
-                                .clickable { selectedIconEmoji = emoji }
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Text(text = emoji, style = MaterialTheme.typography.titleMedium)
-                            }
+                // 3. Biblioteca Ampla de Ícones por Categoria (estilo Structured)
+                StructuredCategorizedIconPicker(
+                    selectedEmoji = selectedIconEmoji,
+                    accentColor = Color(selectedColorHex.toInt()),
+                    onSelectIcon = { entry ->
+                        selectedIconEmoji = entry.emoji
+                        if (category == "Rotina" || category.isBlank()) {
+                            category = entry.category
                         }
                     }
-                }
+                )
 
                 Text(
                     text = "Cor do Bloco na Linha do Tempo",
@@ -2922,7 +3307,7 @@ fun AddTaskDialog(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    CustomizationCatalog.memberAgendaColors.forEach { (colorName, hex) ->
+                    CustomizationCatalog.memberAgendaColors.forEach { (_, hex) ->
                         val isSelected = selectedColorHex == hex
                         Box(
                             modifier = Modifier
@@ -2946,7 +3331,7 @@ fun AddTaskDialog(
                     }
                 }
 
-                // 4. Data/Hora (opcional; se vazio/Inbox, vai para Inbox)
+                // 4. Data/Hora + Intervalo de Datas (Período: Data de Início até Data Final)
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
@@ -2986,20 +3371,56 @@ fun AddTaskDialog(
 
                         AnimatedVisibility(visible = !sendToInbox) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                MaskedDateTextField(
+                                    digitsValue = dateDigits,
+                                    onDigitsChange = { dateDigits = it },
+                                    label = if (hasDatePeriod) "Data de Início (DD/MM/AAAA)" else "Data da Tarefa (DD/MM/AAAA)",
+                                    testTag = "task_due_day_input"
+                                )
+
+                                // Toggle de Intervalo de Datas (Período)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "🗓️ Definir Período (Data Inicial até Data Final)",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Faz a tarefa aparecer continuamente na agenda durante todos os dias do intervalo",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = hasDatePeriod,
+                                        onCheckedChange = { enabled ->
+                                            hasDatePeriod = enabled
+                                            if (enabled && (OmniDateMaskUtils.digitsToEpochDayOrNull(endDateDigits) ?: 0L) <= resolvedEpochDay) {
+                                                endDateDigits = OmniDateMaskUtils.epochDayToDigits(resolvedEpochDay + 1L)
+                                            }
+                                        },
+                                        modifier = Modifier.testTag("task_date_period_switch")
+                                    )
+                                }
+
+                                AnimatedVisibility(visible = hasDatePeriod) {
+                                    MaskedDateTextField(
+                                        digitsValue = endDateDigits,
+                                        onDigitsChange = { endDateDigits = it },
+                                        label = "Até a Data Final (DD/MM/AAAA)",
+                                        testTag = "task_end_date_input"
+                                    )
+                                }
+
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    OutlinedTextField(
-                                        value = dueDayText,
-                                        onValueChange = { dueDayText = it.filter { ch -> ch.isDigit() }.take(2) },
-                                        label = { Text("Dia (1-$maxDaysInMonth)") },
-                                        singleLine = true,
-                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("task_due_day_input")
-                                    )
                                     OutlinedTextField(
                                         value = alarmHourText,
                                         onValueChange = { alarmHourText = it.filter { ch -> ch.isDigit() }.take(2) },
@@ -3044,43 +3465,74 @@ fun AddTaskDialog(
                     }
                 }
 
-                // 5. Duração (chips rápidos: 15m, 30m, 45m, 1h, 1h30, custom)
-                Text(
-                    text = "Duração do Bloco (${formatDurationPt(resolvedDuration)})",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    durationPresets.forEach { (mins, label) ->
-                        FilterChip(
-                            selected = !isCustomDuration && selectedDurationMinutes == mins,
-                            onClick = {
-                                isCustomDuration = false
-                                selectedDurationMinutes = mins
-                            },
-                            label = { Text(label) },
-                            modifier = Modifier.testTag("duration_chip_$mins")
+                // 5. Duração (chips rápidos: 15m, 30m, 45m, 1h, 1h30, custom) — oculta quando Inbox está ativada
+                AnimatedVisibility(visible = !sendToInbox) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val endPreviewMinutes = ((resolvedHour * 60) + resolvedMinute + resolvedDuration).coerceAtMost(23 * 60 + 59)
+                        Text(
+                            text = "Duração do Bloco (${DateCalendarUtils.formatTime(resolvedHour, resolvedMinute)} - ${formatMinutesToHHmm(endPreviewMinutes)} • ${formatDurationPt(resolvedDuration)} / $resolvedDuration min)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
                         )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            durationPresets.forEach { (mins, label) ->
+                                FilterChip(
+                                    selected = !isCustomDuration && selectedDurationMinutes == mins,
+                                    onClick = {
+                                        isCustomDuration = false
+                                        selectedDurationMinutes = mins
+                                    },
+                                    label = { Text(label) },
+                                    modifier = Modifier.testTag("duration_chip_$mins")
+                                )
+                            }
+                            FilterChip(
+                                selected = isCustomDuration,
+                                onClick = {
+                                    if (!isCustomDuration) {
+                                        // Limpa o valor padrão anterior de 30 minutos para que digitar 8h calcule 480 min (8h) e não 510 min
+                                        customDurationHoursText = ""
+                                        customDurationMinutesText = "0"
+                                    }
+                                    isCustomDuration = true
+                                },
+                                label = { Text("Personalizada") },
+                                modifier = Modifier.testTag("duration_chip_custom")
+                            )
+                        }
+                        AnimatedVisibility(visible = isCustomDuration) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = customDurationHoursText,
+                                    onValueChange = { customDurationHoursText = it.filter { ch -> ch.isDigit() }.take(2) },
+                                    label = { Text("Horas") },
+                                    placeholder = { Text("0") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("task_custom_duration_hours_input")
+                                )
+                                OutlinedTextField(
+                                    value = customDurationMinutesText,
+                                    onValueChange = { customDurationMinutesText = it.filter { ch -> ch.isDigit() }.take(2) },
+                                    label = { Text("Minutos") },
+                                    placeholder = { Text("0") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("task_custom_duration_minutes_input")
+                                )
+                            }
+                        }
                     }
-                    FilterChip(
-                        selected = isCustomDuration,
-                        onClick = { isCustomDuration = true },
-                        label = { Text("Custom") },
-                        modifier = Modifier.testTag("duration_chip_custom")
-                    )
-                }
-                AnimatedVisibility(visible = isCustomDuration) {
-                    OutlinedTextField(
-                        value = customDurationText,
-                        onValueChange = { customDurationText = it.filter { ch -> ch.isDigit() }.take(3) },
-                        label = { Text("Duração personalizada (minutos)") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth()
-                    )
                 }
 
-                // 6. Recorrência (única, diária, semanal, quinzenal, mensal)
+                // 6. Recorrência (única, diária, seg a sex, dias da semana, semanal, quinzenal, mensal)
                 Text(
                     text = "Recorrência",
                     style = MaterialTheme.typography.labelMedium,
@@ -3090,9 +3542,55 @@ fun AddTaskDialog(
                     TaskRecurrence.allOptions.forEach { (code, label) ->
                         FilterChip(
                             selected = selectedRecurrence == code,
-                            onClick = { selectedRecurrence = code },
+                            onClick = {
+                                selectedRecurrence = code
+                                if ((code == TaskRecurrence.CUSTOM_DAYS || code == TaskRecurrence.WEEKLY) && selectedWeekdays.isEmpty()) {
+                                    selectedWeekdays.add(java.time.LocalDate.ofEpochDay(resolvedEpochDay).dayOfWeek.value)
+                                }
+                            },
                             label = { Text(label) }
                         )
+                    }
+                }
+
+                AnimatedVisibility(
+                    visible = selectedRecurrence == TaskRecurrence.CUSTOM_DAYS ||
+                        selectedRecurrence == TaskRecurrence.WEEKLY
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "Dias da semana em que se repete:",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(
+                                1 to "Seg",
+                                2 to "Ter",
+                                3 to "Qua",
+                                4 to "Qui",
+                                5 to "Sex",
+                                6 to "Sáb",
+                                7 to "Dom"
+                            ).forEach { (dayCode, dayLabel) ->
+                                val isDaySelected = dayCode in selectedWeekdays
+                                FilterChip(
+                                    selected = isDaySelected,
+                                    onClick = {
+                                        if (isDaySelected) {
+                                            if (selectedWeekdays.size > 1) {
+                                                selectedWeekdays.remove(dayCode)
+                                            }
+                                        } else {
+                                            selectedWeekdays.add(dayCode)
+                                        }
+                                    },
+                                    label = { Text(dayLabel) },
+                                    modifier = Modifier.testTag("recurrence_weekday_chip_$dayCode")
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -3208,112 +3706,33 @@ fun AddTaskDialog(
                     }
                 }
 
-                // 9. Seletor de Ringtone (Som do Alerta) por tarefa com botão de "Preview" (Síntese de Áudio em tempo real)
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.MusicNote,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Som do Alerta (Ringtone da Tarefa)",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                            Switch(
-                                checked = alarmEnabled,
-                                onCheckedChange = { enabled ->
-                                    alarmEnabled = enabled
-                                    if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                        if (ContextCompat.checkSelfPermission(
-                                                context,
-                                                Manifest.permission.POST_NOTIFICATIONS
-                                            ) != PackageManager.PERMISSION_GRANTED
-                                        ) {
-                                            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                        }
-                                    }
-                                },
-                                modifier = Modifier.testTag("task_alarm_switch")
-                            )
-                        }
-
-                        TaskRingtoneCatalog.allOptions.forEach { option ->
-                            val isSelected = selectedRingtoneCategory == option.id
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = if (isSelected) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surface
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .clickable {
-                                        selectedRingtoneCategory = option.id
-                                        TaskTonePreviewPlayer.playPreview(option.id)
-                                    }
-                                    .testTag("ringtone_option_${option.id}")
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = "${option.categoryLabel} • ${option.title}",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Text(
-                                            text = option.subtitle,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    FilledTonalButton(
-                                        onClick = {
-                                            selectedRingtoneCategory = option.id
-                                            TaskTonePreviewPlayer.playPreview(option.id)
-                                        },
-                                        shape = RoundedCornerShape(50),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                        modifier = Modifier.testTag("preview_ringtone_btn_${option.id}")
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.VolumeUp,
-                                            contentDescription = "Ouvir Preview",
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Preview", style = MaterialTheme.typography.labelSmall)
-                                    }
-                                }
-                            }
-                        }
-                    }
+                // 9. Som Individual da Tarefa (Reutilizando o componente único de seleção de som com "Usar padrão do app" por padrão)
+                if (alarmEnabled) {
+                    OmniPermissionsNoticeCard(compact = true)
                 }
+                OmniTaskIndividualSoundSelector(
+                    selectedRingtoneCategory = selectedRingtoneCategory,
+                    customAudioFileName = customAudioFileName,
+                    alarmEnabled = alarmEnabled,
+                    accentColor = Color(selectedColorHex.toInt()),
+                    onAlarmEnabledChange = { enabled ->
+                        alarmEnabled = enabled
+                        if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            if (ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.POST_NOTIFICATIONS
+                                ) != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                        }
+                    },
+                    onSelectRingtoneCategory = { selectedRingtoneCategory = it },
+                    onCustomAudioPicked = { uriStr, displayName ->
+                        selectedRingtoneCategory = uriStr
+                        customAudioFileName = displayName
+                    }
+                )
 
                 // 10. Integração Financeira & Notas
                 Surface(
@@ -3391,17 +3810,62 @@ fun AddTaskDialog(
                     }
                 }
 
-                Text(
-                    text = "Categoria",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Categoria (Sincronizada na Família)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    TextButton(
+                        onClick = { showNewCategoryInput = !showNewCategoryInput },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = if (showNewCategoryInput) "Fechar" else "+ Nova Categoria",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                AnimatedVisibility(visible = showNewCategoryInput) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = newCustomCategoryText,
+                            onValueChange = { newCustomCategoryText = it },
+                            label = { Text("Nome da categoria da família") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilledTonalButton(
+                            onClick = {
+                                val clean = newCustomCategoryText.trim()
+                                if (clean.isNotBlank()) {
+                                    localAddedCategories = localAddedCategories + clean
+                                    category = clean
+                                    onAddCustomCategory(clean)
+                                    newCustomCategoryText = ""
+                                    showNewCategoryInput = false
+                                }
+                            }
+                        ) {
+                            Text("Criar", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     categories.forEach { cat ->
                         FilterChip(
                             selected = category == cat,
                             onClick = { category = cat },
-                            label = { Text(cat) }
+                            label = { Text(cat, maxLines = 1, softWrap = false) }
                         )
                     }
                 }
@@ -3432,6 +3896,12 @@ fun AddTaskDialog(
                                 )
                             )
                         }
+                        TaskTonePreviewPlayer.stopPreview(context)
+                        val finalWeekdays = when (selectedRecurrence) {
+                            TaskRecurrence.CUSTOM_DAYS, TaskRecurrence.WEEKLY -> selectedWeekdays.distinct().sorted()
+                            TaskRecurrence.WEEKDAYS -> listOf(1, 2, 3, 4, 5)
+                            else -> emptyList()
+                        }
                         onSaveTask(
                             title,
                             notes,
@@ -3451,19 +3921,34 @@ fun AddTaskDialog(
                             selectedColorHex,
                             selectedRecurrence,
                             finalSubtasks,
-                            selectedRingtoneCategory
+                            selectedRingtoneCategory,
+                            location.trim(),
+                            resolvedEndEpochDay,
+                            finalWeekdays
                         )
+                        triggerFeedback(if (initialTask != null) "Tarefa atualizada com sucesso!" else "Tarefa salva com sucesso!")
                         onDismiss()
                     }
                 },
                 enabled = title.isNotBlank(),
                 modifier = Modifier.testTag("save_task_confirm_btn")
             ) {
-                Text(if (sendToInbox) "Salvar na Inbox" else "Salvar na Linha do Tempo")
+                Text(
+                    when {
+                        initialTask != null -> "Salvar Alterações"
+                        sendToInbox -> "Salvar na Inbox"
+                        else -> "Salvar na Linha do Tempo"
+                    }
+                )
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(
+                onClick = {
+                    TaskTonePreviewPlayer.stopPreview(context)
+                    onDismiss()
+                }
+            ) {
                 Text("Cancelar")
             }
         }

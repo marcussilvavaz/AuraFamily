@@ -85,13 +85,13 @@ data class ModuleColorSpec(
 data class AppCustomizationConfig(
     val presetId: String = "EMERALD_GOLD",
     val useCustomColors: Boolean = false,
-    val backgroundHex: Long = 0xFFF2F7F4,
+    val backgroundHex: Long = 0xFFF6F7FB,
     val cardHex: Long = 0xFFFFFFFF,
-    val textHex: Long = 0xFF10221A,
+    val textHex: Long = 0xFF0F172A,
     val primaryHex: Long = 0xFF0B6E4F,
     val accentHex: Long = 0xFFD4AF37,
     val fontFamilyId: String = "NUNITO",
-    val cardCornerRadiusDp: Int = 34,
+    val cardCornerRadiusDp: Int = 24,
     val organicVisualStyle: String = OrganicVisualStyle.ORGANICO_FLUIDO,
     // Cores Independentes para os 5 Módulos
     val hubColorHex: Long = 0xFF118D5F,
@@ -139,9 +139,16 @@ data class AppCustomizationConfig(
     val hourlyMoodEnabled: Boolean = true,
     val threeShiftQuotesEnabled: Boolean = true,
     val aiSupportLetterEnabled: Boolean = true,
+    val diaryBiometricLockEnabled: Boolean = false,
+    val diaryBackupPin: String = "1234",
     // 5. Sequência (Streak) e Estado Diário (daily_state por data YYYY-MM-DD)
     val currentStreakDays: Int = 5,
-    val dailyStatesByDate: Map<String, DailyState> = emptyMap()
+    val dailyStatesByDate: Map<String, DailyState> = emptyMap(),
+    // 6. Resumo Matinal Automático e Privacidade Financeira ("Olhinho")
+    val morningSummaryEnabled: Boolean = true,
+    val morningSummaryHour: Int = 7,
+    val morningSummaryMinute: Int = 30,
+    val financePrivacyHideValues: Boolean = false
 ) {
     fun dailyStateFor(dateIso: String): DailyState {
         return dailyStatesByDate[dateIso] ?: DailyState(dateIso = dateIso)
@@ -172,7 +179,7 @@ object CustomizationCatalog {
     // Paleta completa de cores orgânicas e vibrantes para personalizar cada módulo
     val structuredAppColors: List<Pair<String, Long>> = listOf(
         "Coral Structured" to 0xFFE88378,
-        "Esmeralda Aura" to 0xFF118D5F,
+        "Esmeralda Omni" to 0xFF118D5F,
         "Turquesa Saúde" to 0xFF00A896,
         "Lavanda Diário" to 0xFF8B5CF6,
         "Dourado Solar" to 0xFFE09F3E,
@@ -225,12 +232,12 @@ object CustomizationCatalog {
     val presets: List<ThemePresetInfo> = listOf(
         ThemePresetInfo(
             id = "EMERALD_GOLD",
-            name = "Aura Orgânica",
-            subtitle = "Esmeralda, coral suave e dourado acolhedor",
+            name = "Omni Clean",
+            subtitle = "Superfície clara limpa (#F6F7FB) com alto contraste (#0F172A)",
             isDark = false,
-            backgroundHex = 0xFFF2F7F4,
+            backgroundHex = 0xFFF6F7FB,
             cardHex = 0xFFFFFFFF,
-            textHex = 0xFF10221A,
+            textHex = 0xFF0F172A,
             primaryHex = 0xFF0B6E4F,
             accentHex = 0xFFD4AF37,
             hubColorHex = 0xFF118D5F,
@@ -258,11 +265,11 @@ object CustomizationCatalog {
         ThemePresetInfo(
             id = "WARM_TERRACOTTA",
             name = "Terracota & Sol",
-            subtitle = "Tons quentes de argila, âmbar e sálvia",
+            subtitle = "Superfície clara limpa com destaque terracota e âmbar",
             isDark = false,
-            backgroundHex = 0xFFFDF6F0,
+            backgroundHex = 0xFFF6F7FB,
             cardHex = 0xFFFFFFFF,
-            textHex = 0xFF2D1A12,
+            textHex = 0xFF0F172A,
             primaryHex = 0xFFC85A32,
             accentHex = 0xFFE09F3E,
             hubColorHex = 0xFFC85A32,
@@ -274,11 +281,11 @@ object CustomizationCatalog {
         ThemePresetInfo(
             id = "LAVENDER_CALM",
             name = "Lavanda & Sereno",
-            subtitle = "Suave, relaxante e poético",
+            subtitle = "Superfície clara limpa com destaque lavanda",
             isDark = false,
-            backgroundHex = 0xFFF6F4FB,
+            backgroundHex = 0xFFF6F7FB,
             cardHex = 0xFFFFFFFF,
-            textHex = 0xFF1F1833,
+            textHex = 0xFF0F172A,
             primaryHex = 0xFF6C4AB6,
             accentHex = 0xFFB983FF,
             hubColorHex = 0xFF6C4AB6,
@@ -290,11 +297,11 @@ object CustomizationCatalog {
         ThemePresetInfo(
             id = "OCEAN_BREEZE",
             name = "Brisa do Oceano",
-            subtitle = "Azul profundo, turquesa e coral marinho",
+            subtitle = "Superfície clara limpa com azul profundo e turquesa",
             isDark = false,
-            backgroundHex = 0xFFF0F7FA,
+            backgroundHex = 0xFFF6F7FB,
             cardHex = 0xFFFFFFFF,
-            textHex = 0xFF0E2431,
+            textHex = 0xFF0F172A,
             primaryHex = 0xFF0077B6,
             accentHex = 0xFF00B4D8,
             hubColorHex = 0xFF0077B6,
@@ -306,11 +313,11 @@ object CustomizationCatalog {
         ThemePresetInfo(
             id = "ROSE_PEACH",
             name = "Rosé & Pêssego",
-            subtitle = "Delicado, afetivo e luminoso",
+            subtitle = "Superfície clara limpa com destaque rosé",
             isDark = false,
-            backgroundHex = 0xFFFFF5F7,
+            backgroundHex = 0xFFF6F7FB,
             cardHex = 0xFFFFFFFF,
-            textHex = 0xFF33151E,
+            textHex = 0xFF0F172A,
             primaryHex = 0xFFD84B72,
             accentHex = 0xFFF4978E,
             hubColorHex = 0xFFD84B72,
@@ -493,18 +500,38 @@ class CustomizationRepository(context: Context) {
 
         val dailyStatesMap = deserializeDailyStates(prefs.getString(KEY_DAILY_STATES_JSON, null))
 
+        val savedStyle = prefs.getString(KEY_ORGANIC_VISUAL_STYLE, OrganicVisualStyle.ORGANICO_FLUIDO)
+            ?: OrganicVisualStyle.ORGANICO_FLUIDO
+        val defaultRadiusForStyle = when (savedStyle) {
+            OrganicVisualStyle.ORGANICO_FLUIDO -> 24
+            OrganicVisualStyle.TRANSLUCIDO_GLASS -> 20
+            OrganicVisualStyle.MINIMALISTA_ACOLHEDOR -> 10
+            else -> 24
+        }
+        val legacyBg = prefs.getLong(KEY_BG_HEX, preset.backgroundHex)
+        val cleanBg = if (!preset.isDark && legacyBg in listOf(0xFFF2F7F4L, 0xFFFDF6F0L, 0xFFF6F4FBL, 0xFFF0F7FAL, 0xFFFFF5F7L)) {
+            0xFFF6F7FBL
+        } else {
+            legacyBg
+        }
+        val legacyText = prefs.getLong(KEY_TEXT_HEX, preset.textHex)
+        val cleanText = if (!preset.isDark && legacyText in listOf(0xFF10221AL, 0xFF2D1A12L, 0xFF1F1833L, 0xFF0E2431L, 0xFF33151EL)) {
+            0xFF0F172AL
+        } else {
+            legacyText
+        }
+
         return AppCustomizationConfig(
             presetId = presetId,
             useCustomColors = prefs.getBoolean(KEY_USE_CUSTOM_COLORS, false),
-            backgroundHex = prefs.getLong(KEY_BG_HEX, preset.backgroundHex),
+            backgroundHex = cleanBg,
             cardHex = prefs.getLong(KEY_CARD_HEX, preset.cardHex),
-            textHex = prefs.getLong(KEY_TEXT_HEX, preset.textHex),
+            textHex = cleanText,
             primaryHex = prefs.getLong(KEY_PRIMARY_HEX, preset.primaryHex),
             accentHex = prefs.getLong(KEY_ACCENT_HEX, preset.accentHex),
             fontFamilyId = prefs.getString(KEY_FONT_ID, "NUNITO") ?: "NUNITO",
-            cardCornerRadiusDp = prefs.getInt(KEY_CORNER_RADIUS, 34),
-            organicVisualStyle = prefs.getString(KEY_ORGANIC_VISUAL_STYLE, OrganicVisualStyle.ORGANICO_FLUIDO)
-                ?: OrganicVisualStyle.ORGANICO_FLUIDO,
+            cardCornerRadiusDp = defaultRadiusForStyle,
+            organicVisualStyle = savedStyle,
             hubColorHex = prefs.getLong(KEY_HUB_COLOR_HEX, preset.hubColorHex),
             agendaColorHex = prefs.getLong(KEY_AGENDA_COLOR_HEX, prefs.getLong(KEY_PROFILE_COLOR_HEX, preset.agendaColorHex)),
             healthColorHex = prefs.getLong(KEY_HEALTH_COLOR_HEX, preset.healthColorHex),
@@ -544,8 +571,17 @@ class CustomizationRepository(context: Context) {
             hourlyMoodEnabled = prefs.getBoolean(KEY_HOURLY_MOOD_ENABLED, true),
             threeShiftQuotesEnabled = prefs.getBoolean(KEY_THREE_SHIFT_QUOTES_ENABLED, true),
             aiSupportLetterEnabled = prefs.getBoolean(KEY_AI_SUPPORT_LETTER_ENABLED, true),
+            diaryBiometricLockEnabled = prefs.getBoolean(KEY_DIARY_BIOMETRIC_LOCK_ENABLED, false),
+            diaryBackupPin = prefs.getString(KEY_DIARY_BACKUP_PIN, "1234") ?: "1234",
             currentStreakDays = prefs.getInt(KEY_CURRENT_STREAK_DAYS, 5),
-            dailyStatesByDate = dailyStatesMap
+            dailyStatesByDate = dailyStatesMap,
+            morningSummaryEnabled = prefs.getBoolean(KEY_MORNING_SUMMARY_ENABLED, true),
+            morningSummaryHour = prefs.getInt(KEY_MORNING_SUMMARY_HOUR, 7),
+            morningSummaryMinute = prefs.getInt(KEY_MORNING_SUMMARY_MINUTE, 30),
+            financePrivacyHideValues = prefs.getBoolean(
+                KEY_FINANCE_PRIVACY_HIDE_VALUES,
+                OmniBackupAndMigrationManager.isWidgetFinanceBalanceHidden(appContext)
+            )
         )
     }
 
@@ -636,10 +672,54 @@ class CustomizationRepository(context: Context) {
             .putBoolean(KEY_HOURLY_MOOD_ENABLED, updated.hourlyMoodEnabled)
             .putBoolean(KEY_THREE_SHIFT_QUOTES_ENABLED, updated.threeShiftQuotesEnabled)
             .putBoolean(KEY_AI_SUPPORT_LETTER_ENABLED, updated.aiSupportLetterEnabled)
+            .putBoolean(KEY_DIARY_BIOMETRIC_LOCK_ENABLED, updated.diaryBiometricLockEnabled)
+            .putString(KEY_DIARY_BACKUP_PIN, updated.diaryBackupPin)
             .putInt(KEY_CURRENT_STREAK_DAYS, updated.currentStreakDays)
             .putString(KEY_DAILY_STATES_JSON, serializeDailyStates(updated.dailyStatesByDate))
+            .putBoolean(KEY_MORNING_SUMMARY_ENABLED, updated.morningSummaryEnabled)
+            .putInt(KEY_MORNING_SUMMARY_HOUR, updated.morningSummaryHour)
+            .putInt(KEY_MORNING_SUMMARY_MINUTE, updated.morningSummaryMinute)
+            .putBoolean(KEY_FINANCE_PRIVACY_HIDE_VALUES, updated.financePrivacyHideValues)
             .apply()
+        OmniBackupAndMigrationManager.setWidgetFinanceBalanceHidden(appContext, updated.financePrivacyHideValues)
         _configFlow.value = updated
+        com.example.widget.OmniHomeWidgetProvider.requestUpdate(appContext)
+    }
+
+    fun toggleFinancePrivacyHideValues(): Boolean {
+        val current = _configFlow.value
+        val next = !current.financePrivacyHideValues
+        saveAndEmit(current.copy(financePrivacyHideValues = next))
+        return next
+    }
+
+    fun updateMorningSummaryConfig(
+        enabled: Boolean,
+        hour: Int = _configFlow.value.morningSummaryHour,
+        minute: Int = _configFlow.value.morningSummaryMinute
+    ) {
+        val current = _configFlow.value
+        saveAndEmit(
+            current.copy(
+                morningSummaryEnabled = enabled,
+                morningSummaryHour = hour.coerceIn(0, 23),
+                morningSummaryMinute = minute.coerceIn(0, 59)
+            )
+        )
+    }
+
+    fun updateDiaryBiometricLock(
+        enabled: Boolean,
+        backupPin: String = _configFlow.value.diaryBackupPin
+    ) {
+        val cleanPin = backupPin.filter { it.isDigit() }.take(6).ifBlank { "1234" }
+        val current = _configFlow.value
+        saveAndEmit(
+            current.copy(
+                diaryBiometricLockEnabled = enabled,
+                diaryBackupPin = cleanPin
+            )
+        )
     }
 
     fun updateAgendaLayoutMode(layoutMode: String) {
@@ -661,10 +741,10 @@ class CustomizationRepository(context: Context) {
             else -> OrganicVisualStyle.ORGANICO_FLUIDO
         }
         val radius = when (valid) {
-            OrganicVisualStyle.ORGANICO_FLUIDO -> 34
-            OrganicVisualStyle.TRANSLUCIDO_GLASS -> 30
-            OrganicVisualStyle.MINIMALISTA_ACOLHEDOR -> 28
-            else -> 34
+            OrganicVisualStyle.ORGANICO_FLUIDO -> 24
+            OrganicVisualStyle.TRANSLUCIDO_GLASS -> 20
+            OrganicVisualStyle.MINIMALISTA_ACOLHEDOR -> 10
+            else -> 24
         }
         val current = _configFlow.value
         saveAndEmit(
@@ -1010,6 +1090,17 @@ class CustomizationRepository(context: Context) {
         saveAndEmit(current.copy(taskVibrateEnabled = enabled))
     }
 
+    fun updateTaskAlarmSound(uriString: String, title: String, vibrate: Boolean) {
+        val current = _configFlow.value
+        saveAndEmit(
+            current.copy(
+                taskAlarmSoundUri = uriString,
+                taskAlarmSoundTitle = title,
+                taskVibrateEnabled = vibrate
+            )
+        )
+    }
+
     fun updateBillSound(uriString: String, title: String) {
         val current = _configFlow.value
         saveAndEmit(current.copy(billReminderSoundUri = uriString, billReminderSoundTitle = title))
@@ -1018,6 +1109,80 @@ class CustomizationRepository(context: Context) {
     fun updateBillVibrate(enabled: Boolean) {
         val current = _configFlow.value
         saveAndEmit(current.copy(billVibrateEnabled = enabled))
+    }
+
+    fun updateBillReminderSound(uriString: String, title: String, vibrate: Boolean) {
+        val current = _configFlow.value
+        saveAndEmit(
+            current.copy(
+                billReminderSoundUri = uriString,
+                billReminderSoundTitle = title,
+                billVibrateEnabled = vibrate
+            )
+        )
+    }
+
+    /**
+     * Imports a user-selected audio file from device storage (Downloads, Music, Audio)
+     * using OpenDocument, takes persistable URI permission, copies a local backup into
+     * internal storage so it persists across device restarts, and saves it as the active
+     * Task Alarm or Bill/Notification sound.
+     */
+    fun importCustomSoundFromUri(sourceUri: Uri, isForBillReminder: Boolean): Pair<String, String>? {
+        return try {
+            runCatching {
+                appContext.contentResolver.takePersistableUriPermission(
+                    sourceUri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            val displayName = resolveAudioFileDisplayName(sourceUri)
+            val soundsDir = File(appContext.filesDir, "custom_sounds").apply { mkdirs() }
+            val ext = displayName.substringAfterLast('.', "mp3").take(6).ifBlank { "mp3" }
+            val prefix = if (isForBillReminder) "custom_notif" else "custom_alarm"
+            val destFile = File(soundsDir, "${prefix}_${System.currentTimeMillis()}.$ext")
+
+            var copiedOk = false
+            appContext.contentResolver.openInputStream(sourceUri)?.use { input ->
+                FileOutputStream(destFile).use { output ->
+                    input.copyTo(output)
+                    copiedOk = true
+                }
+            }
+
+            val savedUriStr = if (copiedOk && destFile.exists() && destFile.length() > 0L) {
+                Uri.fromFile(destFile).toString()
+            } else {
+                sourceUri.toString()
+            }
+            val cleanTitle = "🎵 $displayName"
+            if (isForBillReminder) {
+                updateBillSound(savedUriStr, cleanTitle)
+            } else {
+                updateTaskSound(savedUriStr, cleanTitle)
+            }
+            savedUriStr to cleanTitle
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun resolveAudioFileDisplayName(uri: Uri): String {
+        try {
+            appContext.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (nameIndex >= 0 && cursor.moveToFirst()) {
+                    val name = cursor.getString(nameIndex)
+                    if (!name.isNullOrBlank()) return name
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return uri.lastPathSegment
+            ?.substringAfterLast('/')
+            ?.substringAfterLast(':')
+            ?.takeIf { it.isNotBlank() }
+            ?: resolveRingtoneTitle(uri)
     }
 
     fun resolveRingtoneTitle(uri: Uri?): String {
@@ -1070,6 +1235,8 @@ class CustomizationRepository(context: Context) {
         private const val KEY_HOURLY_MOOD_ENABLED = "hourly_mood_enabled"
         private const val KEY_THREE_SHIFT_QUOTES_ENABLED = "three_shift_quotes_enabled"
         private const val KEY_AI_SUPPORT_LETTER_ENABLED = "ai_support_letter_enabled"
+        private const val KEY_DIARY_BIOMETRIC_LOCK_ENABLED = "diary_biometric_lock_enabled"
+        private const val KEY_DIARY_BACKUP_PIN = "diary_backup_pin"
         private const val KEY_CURRENT_STREAK_DAYS = "current_streak_days"
         private const val KEY_DAILY_STATES_JSON = "daily_states_json"
         private const val KEY_AGENDA_LAYOUT_MODE = "agenda_layout_mode"
@@ -1079,5 +1246,9 @@ class CustomizationRepository(context: Context) {
         private const val KEY_HEALTH_COLOR_HEX = "health_color_hex"
         private const val KEY_DIARY_COLOR_HEX = "diary_color_hex"
         private const val KEY_FINANCE_COLOR_HEX = "finance_color_hex"
+        private const val KEY_MORNING_SUMMARY_ENABLED = "morning_summary_enabled"
+        private const val KEY_MORNING_SUMMARY_HOUR = "morning_summary_hour"
+        private const val KEY_MORNING_SUMMARY_MINUTE = "morning_summary_minute"
+        private const val KEY_FINANCE_PRIVACY_HIDE_VALUES = "finance_privacy_hide_values"
     }
 }

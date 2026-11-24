@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Aura Finanças"
+rootProject.name = "Omni"
 
 include(":app")

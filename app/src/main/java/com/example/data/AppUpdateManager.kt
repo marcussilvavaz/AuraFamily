@@ -44,7 +44,7 @@ data class AppReleaseMetadata(
     val releaseNotes: String = DEFAULT_RELEASE_NOTES,
     val downloadUrl: String = BuildConfig.DEFAULT_UPDATE_URL,
     val mandatory: Boolean = false,
-    val publishedBy: String = "Aura Studio Auto-Sync",
+    val publishedBy: String = "Omni Studio Auto-Sync",
     val updatedAtEpochMs: Long = System.currentTimeMillis(),
     val buildTimestampMs: Long = BuildConfig.BUILD_TIMESTAMP_MS
 ) {
@@ -56,12 +56,18 @@ data class AppReleaseMetadata(
     val latestSignature: String
         get() = signatureList.lastOrNull().orEmpty()
 
+    val forceUpdate: Boolean
+        get() = mandatory
+
     companion object {
         const val AI_STUDIO_PORTAL_URL = "https://aistudio.google.com/apps"
-        const val DEFAULT_RELEASE_NOTES =
-            "• Novas alterações e melhorias aplicadas no projeto Aura Finanças.\n" +
-            "• Download e exportação direta do arquivo instalador .APK integrados no app.\n" +
-            "• Sistema de Conquistas e Medalhas (Saúde, Financeiro e Calendário) e sincronização Firebase."
+        const val RELEASE_NOTES_SIMPLE =
+            "• Estilo Visual Orgânico global (Pílula & Fluido, Translúcido e Suave Minimal) e temas Claro de alto contraste + Preto Puro (AMOLED)\n" +
+            "• Barra inferior com 5 abas, Perfil no avatar do topo, Busca Global no Hub, Bento Grid 2 colunas e Botão Flutuante Único com toque longo para Voz\n" +
+            "• Mural da Família compartilhado sem senha na aba Diário (lista de compras interativa, notas fixadas e cor de cada membro)\n" +
+            "• Módulo Financeiro completo: limite de cartão com barra de uso, fechamento/vencimento automático, pagamento de fatura em 1 toque, botão Olhinho, teto de gastos por categoria e Resumo Matinal"
+
+        const val DEFAULT_RELEASE_NOTES = RELEASE_NOTES_SIMPLE
     }
 }
 
@@ -80,7 +86,13 @@ data class AppUpdateUiState(
     val lastCheckStatusMessage: String = "Sincronizado com o servidor de atualizações",
     val customDownloadUrl: String = BuildConfig.DEFAULT_UPDATE_URL,
     val justUpgradedBannerMessage: String? = null
-)
+) {
+    val showUpdateDialog: Boolean
+        get() = isUpdateAvailable && !isModalDismissedForSession
+
+    val isDownloading: Boolean
+        get() = isCheckingOrPublishing
+}
 
 class AppUpdateManager(
     context: Context
@@ -149,7 +161,7 @@ class AppUpdateManager(
                 .putInt(KEY_LAST_INSTALLED_VERSION_CODE, BuildConfig.VERSION_CODE)
                 .apply()
             _uiState.value = _uiState.value.copy(
-                justUpgradedBannerMessage = "✅ Aplicativo atualizado com sucesso para a v${BuildConfig.VERSION_NAME} (Build #$localSignature)!"
+                justUpgradedBannerMessage = "✅ Aplicativo atualizado com sucesso para a versão v${BuildConfig.VERSION_NAME}!"
             )
         } else if (previousRecordedSig == null) {
             prefs.edit()
@@ -343,7 +355,7 @@ class AppUpdateManager(
             "releaseNotes" to releaseNotes.take(1500),
             "downloadUrl" to cleanUrl.take(500),
             "mandatory" to mandatory,
-            "publishedBy" to "Aura Studio Build #$localSignature",
+            "publishedBy" to "Omni Studio Build #$localSignature",
             "updatedAtEpochMs" to nowMs,
             "buildTimestampMs" to localBuildTimestampMs
         )
@@ -527,7 +539,7 @@ class AppUpdateManager(
                 releaseNotes = cleanNotes,
                 downloadUrl = cleanUrl,
                 mandatory = mandatory,
-                publishedBy = "Painel AuraManager",
+                publishedBy = "Painel Omni",
                 updatedAtEpochMs = nowMs,
                 buildTimestampMs = nowMs
             )
@@ -550,7 +562,7 @@ class AppUpdateManager(
             "releaseNotes" to cleanNotes.take(1500),
             "downloadUrl" to cleanUrl.take(500),
             "mandatory" to mandatory,
-            "publishedBy" to "Painel AuraManager",
+            "publishedBy" to "Painel Omni",
             "updatedAtEpochMs" to nowMs,
             "buildTimestampMs" to nowMs
         )
@@ -602,7 +614,7 @@ class AppUpdateManager(
                 ?: AppReleaseMetadata.DEFAULT_RELEASE_NOTES,
             downloadUrl = cleanUrl,
             mandatory = mandatory,
-            publishedBy = "Aura Studio Live Sync",
+            publishedBy = "Omni Studio Live Sync",
             updatedAtEpochMs = nowMs,
             buildTimestampMs = nowMs + 10_000L
         )
@@ -686,7 +698,7 @@ class AppUpdateManager(
      */
     fun suggestedApkFileName(): String {
         val cleanVer = BuildConfig.VERSION_NAME.replace(" ", "_")
-        return "AuraFinancas-v$cleanVer-build-$localSignature.apk"
+        return "Omni-v$cleanVer-build-$localSignature.apk"
     }
 
     /**
@@ -745,11 +757,11 @@ class AppUpdateManager(
                 putExtra(Intent.EXTRA_STREAM, apkUri)
                 putExtra(
                     Intent.EXTRA_SUBJECT,
-                    "Instalador Aura Finanças v${BuildConfig.VERSION_NAME} (#$localSignature)"
+                    "Instalador Omni v${BuildConfig.VERSION_NAME} (#$localSignature)"
                 )
                 putExtra(
                     Intent.EXTRA_TEXT,
-                    "Instalador atualizado do Aura Finanças — v${BuildConfig.VERSION_NAME} (Compilação #$localSignature)."
+                    "Instalador atualizado do Omni — v${BuildConfig.VERSION_NAME} (Compilação #$localSignature)."
                 )
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
@@ -795,6 +807,28 @@ class AppUpdateManager(
         }.getOrDefault(false)
     }
 
+    fun dismissUpdateDialog() {
+        dismissModalForSession()
+    }
+
+    fun downloadAndInstallUpdate(context: Context, onMessage: (String) -> Unit) {
+        if (hasValidExternalDownloadUrl()) {
+            val opened = openUpdateDownloadLink(context)
+            if (opened) {
+                onMessage("Abrindo download da atualização v${_uiState.value.remoteRelease?.versionName ?: BuildConfig.VERSION_NAME}...")
+                return
+            }
+        }
+        val openedPortal = openUpdateDownloadLink(context)
+        if (openedPortal) {
+            onMessage("Abrindo página para baixar a nova versão do Omni...")
+        } else {
+            shareCurrentInstalledApk(context)
+                .onSuccess { msg -> onMessage(msg) }
+                .onFailure { err -> onMessage("Não foi possível iniciar o download: ${err.localizedMessage}") }
+        }
+    }
+
     fun openAiStudioPortal(context: Context): Boolean {
         return runCatching {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(AppReleaseMetadata.AI_STUDIO_PORTAL_URL)).apply {
@@ -806,10 +840,7 @@ class AppUpdateManager(
     }
 
     private fun buildAutoChangelogNote(revision: Long): String {
-        val dateStr = SimpleDateFormat("dd/MM/yyyy 'às' HH:mm", Locale.forLanguageTag("pt-BR")).format(Date())
-        return "• Nova compilação detectada automaticamente no Aura Studio (Revisão #$revision em $dateStr).\n" +
-            "• Versão v${BuildConfig.VERSION_NAME} (Código ${BuildConfig.VERSION_CODE} • Assinatura #$localSignature).\n" +
-            "• Baixe o instalador .APK diretamente pelo botão abaixo ou sincronize as novidades no seu aparelho."
+        return AppReleaseMetadata.RELEASE_NOTES_SIMPLE
     }
 
     private fun ensureUpdateNotificationChannel() {
@@ -856,10 +887,10 @@ class AppUpdateManager(
             val notification = NotificationCompat.Builder(appContext, UPDATE_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
                 .setContentTitle("🚀 Nova atualização disponível (Rev #${remote.buildRevision})")
-                .setContentText("O Aura Finanças recebeu novas alterações (v${remote.versionName}). Toque para baixar ou atualizar.")
+                .setContentText("O Omni recebeu novas alterações (v${remote.versionName}). Toque para baixar ou atualizar.")
                 .setStyle(
                     NotificationCompat.BigTextStyle()
-                        .bigText("O Aura Finanças recebeu novas alterações (v${remote.versionName} • Revisão #${remote.buildRevision}).\n\n${remote.releaseNotes}")
+                        .bigText("O Omni recebeu novas alterações (v${remote.versionName} • Revisão #${remote.buildRevision}).\n\n${remote.releaseNotes}")
                 )
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
@@ -882,7 +913,7 @@ class AppUpdateManager(
         val notes = getString("releaseNotes") ?: AppReleaseMetadata.DEFAULT_RELEASE_NOTES
         val rawUrl = getString("downloadUrl").orEmpty()
         val mandatory = getBoolean("mandatory") ?: false
-        val pubBy = getString("publishedBy") ?: "Aura Studio"
+        val pubBy = getString("publishedBy") ?: "Omni Studio"
         val updatedMs = getLong("updatedAtEpochMs") ?: System.currentTimeMillis()
         val buildTs = getLong("buildTimestampMs") ?: 0L
         return AppReleaseMetadata(

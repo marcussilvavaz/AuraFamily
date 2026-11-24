@@ -22,7 +22,7 @@ enum class AchievementModule(
     HEALTH("HEALTH", "Saúde & Inegociáveis", "Saúde", "🩺"),
     FINANCE("FINANCE", "Financeiro & Economia", "Financeiro", "💰"),
     CALENDAR("CALENDAR", "Calendário & Agenda", "Calendário", "📅"),
-    TRINITY("TRINITY", "Tríade Aura 360°", "Tríade 360°", "🏆");
+    TRINITY("TRINITY", "Tríade Omni 360°", "Tríade 360°", "🏆");
 
     companion object {
         fun fromId(id: String): AchievementModule {
@@ -142,7 +142,7 @@ data class AchievementsEvaluationSummary(
     val totalCount: Int = 0,
     val totalXp: Int = 0,
     val currentLevel: Int = 1,
-    val levelTitle: String = "Iniciante Aura",
+    val levelTitle: String = "Iniciante Omni",
     val currentLevelProgressRatio: Float = 0f,
     val xpIntoCurrentLevel: Int = 0,
     val xpRequiredForNextLevel: Int = 250,
@@ -744,7 +744,7 @@ class AchievementsRepository(context: Context) {
             ),
             buildAutomaticGoal(
                 id = "trinity_aura_360_diamond",
-                title = "Sinergia Tríade Aura 360°",
+                title = "Sinergia Tríade Omni 360°",
                 description = "Conquiste pelo menos 1 medalha em Saúde, 1 no Financeiro e 1 no Calendário.",
                 module = AchievementModule.TRINITY,
                 medalTier = MedalTier.SILVER,
@@ -766,7 +766,7 @@ class AchievementsRepository(context: Context) {
             ),
             buildAutomaticGoal(
                 id = "trinity_perfect_day_gold",
-                title = "Dia Perfeito Aura 360°",
+                title = "Dia Perfeito Omni 360°",
                 description = "No mesmo dia, conclua 100% dos inegociáveis de Saúde, tenha tarefa concluída na Agenda e saldo financeiro positivo.",
                 module = AchievementModule.TRINITY,
                 medalTier = MedalTier.GOLD,
@@ -799,8 +799,8 @@ class AchievementsRepository(context: Context) {
             ),
             buildAutomaticGoal(
                 id = "trinity_legend_diamond",
-                title = "Lenda Suprema Aura",
-                description = "Alcance o patamar máximo conquistando 20 medalhas automáticas no ecossistema Aura.",
+                title = "Lenda Suprema Omni",
+                description = "Alcance o patamar máximo conquistando 20 medalhas automáticas no ecossistema Omni.",
                 module = AchievementModule.TRINITY,
                 medalTier = MedalTier.DIAMOND,
                 iconEmoji = "🏆",
@@ -841,7 +841,7 @@ class AchievementsRepository(context: Context) {
             5 -> "Mestre das Finanças & Saúde"
             6 -> "Embaixador da Disciplina"
             7 -> "Arquiteto da Prosperidade"
-            else -> "Lenda Aura Nível $currentLevel"
+            else -> "Lenda Omni Nível $currentLevel"
         }
 
         val healthGoals = allGoals.filter { it.module == AchievementModule.HEALTH }

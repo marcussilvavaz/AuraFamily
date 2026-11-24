@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Adaptive Widget Colors (Dark Mode) -->
+    <color name="widget_bg_surface">#FF12141C</color>
+    <color name="widget_bg_stroke">#FF2E3548</color>
+    <color name="widget_card_surface">#FF1C202B</color>
+    <color name="widget_card_stroke">#FF31394F</color>
+    <color name="widget_pill_surface">#FF283148</color>
+    <color name="widget_pill_stroke">#FF5B7CFA</color>
+    <color name="widget_text_primary">#FFF4F7FF</color>
+    <color name="widget_text_secondary">#FF9BA5BE</color>
+    <color name="widget_accent_blue">#FF8CA4FF</color>
+    <color name="widget_accent_emerald">#FF2ED573</color>
+    <color name="widget_accent_coral">#FFFF6B81</color>
+</resources>

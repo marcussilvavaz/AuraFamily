@@ -1,6 +1,6 @@
 {
-  "name": "Aura Finanças",
-  "description": "Controle de finanças familiares, tarefas diárias com calendário e alarme, múltiplas moedas e plano de economia 50/30/20 sincronizado na nuvem.",
+  "name": "Omni",
+  "description": "Omni: tarefas, rotina, finanças familiares e individuais, contas bancárias, crédito parcelado, saúde, glicemia e diário privado sincronizados na nuvem.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

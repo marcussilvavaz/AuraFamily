@@ -79,6 +79,7 @@ fun ModularProfileOnboardingScreen(
     onFinishOnboarding: () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
+    val triggerFeedback = rememberOmniFeedback()
 
     LazyColumn(
         modifier = Modifier
@@ -146,7 +147,7 @@ fun ModularProfileOnboardingScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "Configure agora para moldar o aplicativo ao seu ritmo real. Você pode alterar qualquer opção depois no menu do seu Perfil.",
+                            text = "Configure agora para moldar o Omni ao seu ritmo real. Você pode alterar qualquer opção depois no menu do seu Perfil.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.padding(12.dp)
@@ -169,6 +170,7 @@ fun ModularProfileOnboardingScreen(
             Button(
                 onClick = {
                     customizationRepo.completeModularOnboarding()
+                    triggerFeedback("Perfil Modular salvo com sucesso!")
                     onFinishOnboarding()
                 },
                 shape = RoundedCornerShape(50),
@@ -393,36 +395,17 @@ fun ModularProfileEditorContent(
                     switchTestTag = "switch_pregnancy_module"
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = dppInput,
-                            onValueChange = {
-                                dppInput = it
-                                customizationRepo.updatePregnancyModule(enabled = true, dppDate = it)
+                        MaskedDateTextField(
+                            dateValue = dppInput,
+                            onDateValueChange = { formatted, _ ->
+                                dppInput = formatted
+                                customizationRepo.updatePregnancyModule(enabled = true, dppDate = formatted)
                             },
-                            label = { Text("Data Prevista do Parto - DPP (DD/MM/AAAA)") },
-                            placeholder = { Text("Ex: 15/05/2027") },
-                            singleLine = true,
-                            shape = RoundedCornerShape(16.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("pregnancy_dpp_input")
+                            label = "Data Prevista do Parto - DPP (DD/MM/AAAA)",
+                            placeholder = "Ex: 15/05/2027",
+                            modifier = Modifier.fillMaxWidth(),
+                            testTag = "pregnancy_dpp_input"
                         )
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            listOf("10/03/2027", "20/05/2027", "15/08/2027").forEach { presetDpp ->
-                                FilterChip(
-                                    selected = dppInput == presetDpp,
-                                    onClick = {
-                                        dppInput = presetDpp
-                                        customizationRepo.updatePregnancyModule(enabled = true, dppDate = presetDpp)
-                                    },
-                                    label = { Text("DPP: $presetDpp") },
-                                    shape = RoundedCornerShape(50)
-                                )
-                            }
-                        }
                     }
                 }
 
@@ -591,6 +574,57 @@ fun ModularProfileEditorContent(
                     },
                     testTag = "switch_ai_support_letter"
                 )
+                SimpleToggleRow(
+                    title = "Proteger Diário Privado com Biometria / PIN",
+                    subtitle = "Exige impressão digital, rosto ou PIN sempre que abrir a aba Diário (desativado por padrão)",
+                    checked = config.diaryBiometricLockEnabled,
+                    onCheckedChange = {
+                        customizationRepo.updateDiaryBiometricLock(enabled = it)
+                    },
+                    testTag = "switch_diary_biometric_lock"
+                )
+                AnimatedVisibility(visible = config.diaryBiometricLockEnabled) {
+                    var pinDraft by remember(config.diaryBackupPin) {
+                        mutableStateOf(config.diaryBackupPin.ifBlank { "1234" })
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "🔒 Biometria do aparelho (digital / facial / bloqueio de tela) ativa. Você também pode definir um PIN numérico rápido do Diário:",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            OutlinedTextField(
+                                value = pinDraft,
+                                onValueChange = { raw ->
+                                    val digits = raw.filter { it.isDigit() }.take(6)
+                                    pinDraft = digits
+                                    if (digits.length >= 4) {
+                                        customizationRepo.updateDiaryBiometricLock(
+                                            enabled = true,
+                                            backupPin = digits
+                                        )
+                                    }
+                                },
+                                label = { Text("PIN do Diário (4 a 6 dígitos)") },
+                                singleLine = true,
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("input_diary_backup_pin")
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -856,11 +890,16 @@ private fun SimpleToggleRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
+                .padding(horizontal = 14.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 Text(
                     text = title,
                     style = MaterialTheme.typography.bodyMedium,

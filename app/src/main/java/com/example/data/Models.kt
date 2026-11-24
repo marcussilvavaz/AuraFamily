@@ -66,7 +66,8 @@ data class FamilyMemberBadge(
     val displayName: String = "",
     val colorHex: Long = 0xFF0E7C5B,
     val avatarEmoji: String = "🌿",
-    val role: String = "ADMIN"
+    val role: String = "ADMIN",
+    val isCurrentUser: Boolean = false
 )
 
 /**
@@ -98,32 +99,72 @@ object EnergyLevel {
 }
 
 /**
- * Slots padrão de medição de Glicemia / Diabetes
+ * Slots padrão de medição de Monitoramento de Glicemia (10 períodos diários completos)
  */
 object DiabetesSlotCatalog {
     const val JEJUM = "Jejum"
-    const val POS_CAFE_1H = "1h pós-café"
-    const val PRE_ALMOCO = "Pré-almoço"
-    const val POS_ALMOCO_1H = "1h pós-almoço"
-    const val PRE_JANTAR_1H = "1h pré-jantar"
-    const val POS_JANTAR_1H = "1h pós-jantar"
-    const val ANTES_DORMIR = "Antes de dormir"
+    const val PRE_REFEICAO = "Pré-Refeição"
+    const val POS_CAFE_1H = "1h Pós-Café"
+    const val POS_CAFE_2H = "2h Pós-Café"
+    const val POS_ALMOCO_1H = "1h Pós-Almoço"
+    const val POS_ALMOCO_2H = "2h Pós-Almoço"
+    const val POS_LANCHE_1H = "1h Pós-Lanche"
+    const val POS_JANTAR_1H = "1h Pós-Jantar"
+    const val POS_JANTAR_2H = "2h Pós-Jantar"
+    const val AO_DEITAR = "Ao Deitar"
+
+    // Aliases legados para compatibilidade
+    const val PRE_ALMOCO = PRE_REFEICAO
+    const val PRE_JANTAR_1H = PRE_REFEICAO
+    const val ANTES_DORMIR = AO_DEITAR
 
     val allSlots: List<String> = listOf(
         JEJUM,
+        PRE_REFEICAO,
         POS_CAFE_1H,
-        PRE_ALMOCO,
+        POS_CAFE_2H,
         POS_ALMOCO_1H,
-        PRE_JANTAR_1H,
+        POS_ALMOCO_2H,
+        POS_LANCHE_1H,
         POS_JANTAR_1H,
-        ANTES_DORMIR
+        POS_JANTAR_2H,
+        AO_DEITAR
     )
 
-    val defaultSelectedSlots: Set<String> = setOf(
-        JEJUM,
-        POS_ALMOCO_1H,
-        POS_JANTAR_1H
-    )
+    val defaultSelectedSlots: Set<String> = allSlots.toSet()
+
+    fun normalizeSlot(rawSlot: String): String {
+        val clean = rawSlot.trim().lowercase(Locale.ROOT)
+        return when {
+            clean == "jejum" -> JEJUM
+            clean.contains("pré") || clean.contains("pre") -> PRE_REFEICAO
+            clean.contains("2h") && (clean.contains("café") || clean.contains("cafe")) -> POS_CAFE_2H
+            clean.contains("café") || clean.contains("cafe") -> POS_CAFE_1H
+            clean.contains("2h") && (clean.contains("almoço") || clean.contains("almoco")) -> POS_ALMOCO_2H
+            clean.contains("almoço") || clean.contains("almoco") -> POS_ALMOCO_1H
+            clean.contains("lanche") -> POS_LANCHE_1H
+            clean.contains("2h") && clean.contains("jantar") -> POS_JANTAR_2H
+            clean.contains("jantar") -> POS_JANTAR_1H
+            clean.contains("dormir") || clean.contains("deitar") || clean.contains("madrugada") -> AO_DEITAR
+            else -> rawSlot.ifBlank { JEJUM }
+        }
+    }
+
+    fun slotForPostMealTimer(mealLabel: String, durationSeconds: Int): String {
+        val isTwoHours = durationSeconds >= 5400 // >= 90 min maps to 2h slot if 2h exists
+        val cleanMeal = mealLabel.lowercase(Locale.ROOT)
+        return when {
+            cleanMeal.contains("café") || cleanMeal.contains("cafe") ->
+                if (isTwoHours) POS_CAFE_2H else POS_CAFE_1H
+            cleanMeal.contains("almoço") || cleanMeal.contains("almoco") ->
+                if (isTwoHours) POS_ALMOCO_2H else POS_ALMOCO_1H
+            cleanMeal.contains("lanche") ->
+                POS_LANCHE_1H
+            cleanMeal.contains("jantar") ->
+                if (isTwoHours) POS_JANTAR_2H else POS_JANTAR_1H
+            else -> POS_ALMOCO_1H
+        }
+    }
 }
 
 /**
@@ -157,14 +198,187 @@ data class UserProfile(
     val defaultSplitPercentage: Double = 50.0,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    val uid: String
+        get() = userId.ifBlank { id }
+}
+
+/**
+ * Conta Bancária / Carteira cadastrada pelo usuário (Individual ou Familiar).
+ */
+@Keep
+@IgnoreExtraProperties
+data class BankAccount(
+    val id: String = "acc_nubank",
+    val name: String = "Nubank",
+    val institution: String = name,
+    val institutionColorHex: Long = 0xFF820AD1,
+    val colorHex: Long = institutionColorHex,
+    val iconEmoji: String = "🟣",
+    val emoji: String = iconEmoji,
+    val initialBalanceBrl: Double = 0.0,
+    val currentBalanceBrl: Double = initialBalanceBrl,
+    val creditLimitBrl: Double = 5000.0,
+    val closingDay: Int = 25,
+    val dueDay: Int = 5,
+    val usedCreditLimitBrl: Double = 0.0,
+    val availableCreditLimitBrl: Double = creditLimitBrl,
+    val privacyScope: String = PrivacyScope.FAMILY
 )
+
+object BankAccountCatalog {
+    fun defaultAccounts(): List<BankAccount> = listOf(
+        BankAccount(
+            id = "acc_nubank",
+            name = "Nubank",
+            institutionColorHex = 0xFF820AD1,
+            iconEmoji = "🟣",
+            initialBalanceBrl = 2450.00,
+            creditLimitBrl = 6000.00,
+            closingDay = 25,
+            dueDay = 5,
+            privacyScope = PrivacyScope.FAMILY
+        ),
+        BankAccount(
+            id = "acc_itau",
+            name = "Itaú",
+            institutionColorHex = 0xFFEC7000,
+            iconEmoji = "🟠",
+            initialBalanceBrl = 3800.00,
+            creditLimitBrl = 8000.00,
+            closingDay = 20,
+            dueDay = 1,
+            privacyScope = PrivacyScope.FAMILY
+        ),
+        BankAccount(
+            id = "acc_picpay",
+            name = "PicPay",
+            institutionColorHex = 0xFF11C76F,
+            iconEmoji = "🟢",
+            initialBalanceBrl = 650.00,
+            creditLimitBrl = 2500.00,
+            closingDay = 28,
+            dueDay = 10,
+            privacyScope = PrivacyScope.PERSONAL
+        ),
+        BankAccount(
+            id = "acc_cash",
+            name = "Dinheiro / Carteira",
+            institutionColorHex = 0xFF0B6E4F,
+            iconEmoji = "💵",
+            initialBalanceBrl = 320.00,
+            creditLimitBrl = 0.0,
+            closingDay = 25,
+            dueDay = 5,
+            privacyScope = PrivacyScope.PERSONAL
+        )
+    )
+
+    val presetInstitutions: List<Triple<String, String, Long>> = listOf(
+        Triple("Nubank", "🟣", 0xFF820AD1),
+        Triple("Itaú", "🟠", 0xFFEC7000),
+        Triple("Bradesco", "🔴", 0xFFCC092F),
+        Triple("Santander", "🔴", 0xFFEC0000),
+        Triple("Banco do Brasil", "🟡", 0xFFF8D117),
+        Triple("Caixa", "🔵", 0xFF005CA9),
+        Triple("Inter", "🟠", 0xFFFF7A00),
+        Triple("PicPay", "🟢", 0xFF11C76F),
+        Triple("Mercado Pago", "🔵", 0xFF009EE3),
+        Triple("C6 Bank", "⚫", 0xFF242424),
+        Triple("Dinheiro / Carteira", "💵", 0xFF0B6E4F)
+    )
+
+    /**
+     * Calcula o saldo atual e o limite de crédito utilizado/disponível de cada conta bancária:
+     * - Saldo = initialBalanceBrl
+     *         + Soma(INCOME vinculados à conta)
+     *         - Soma(EXPENSE vinculados à conta onde !isCreditCard OU isPaid == true)
+     *         - Soma(TRANSFER onde accountId == conta)
+     *         + Soma(TRANSFER onde destinationAccountId == conta)
+     * - Limite Usado = Soma de todas as compras no crédito em aberto (!isPaid) vinculadas à conta (todas as parcelas futuras)
+     * - Limite Disponível = (creditLimitBrl - usedCreditLimitBrl).coerceAtLeast(0.0)
+     */
+    fun calculateCurrentBalances(
+        accounts: List<BankAccount>,
+        transactions: List<FinanceTransaction>
+    ): List<BankAccount> {
+        val effectiveAccounts = accounts.ifEmpty { defaultAccounts() }
+        return effectiveAccounts.map { acc ->
+            var balance = acc.initialBalanceBrl
+            var usedCredit = 0.0
+            for (tx in transactions) {
+                val txAccId = tx.accountId.ifBlank { effectiveAccounts.first().id }
+                when (tx.type) {
+                    "INCOME" -> {
+                        if (txAccId == acc.id && tx.isPaid) {
+                            balance += tx.amountBrl
+                        }
+                    }
+                    "EXPENSE" -> {
+                        // Despesas no Crédito só descontam do saldo da conta quando a fatura/parcela é marcada como Paga (isPaid == true)
+                        val deductFromAccount = !tx.isCreditCard || tx.isPaid
+                        if (txAccId == acc.id && deductFromAccount) {
+                            balance -= tx.amountBrl
+                        }
+                        // Enquanto não paga, toda parcela de crédito consome o Limite de Crédito disponível da conta
+                        if (txAccId == acc.id && tx.isCreditCard && !tx.isPaid) {
+                            usedCredit += tx.amountBrl
+                        }
+                    }
+                    "TRANSFER" -> {
+                        if (txAccId == acc.id) {
+                            balance -= tx.amountBrl
+                        }
+                        if (tx.destinationAccountId == acc.id) {
+                            balance += tx.amountBrl
+                        }
+                    }
+                }
+            }
+            val resolvedColor = if (acc.colorHex != 0L) acc.colorHex else acc.institutionColorHex
+            val resolvedEmoji = acc.emoji.ifBlank { acc.iconEmoji.ifBlank { "🏦" } }
+            val resolvedInst = acc.institution.ifBlank { acc.name }
+            val safeLimit = acc.creditLimitBrl.coerceAtLeast(0.0)
+            val availableLimit = (safeLimit - usedCredit).coerceAtLeast(0.0)
+            acc.copy(
+                institution = resolvedInst,
+                institutionColorHex = resolvedColor,
+                colorHex = resolvedColor,
+                iconEmoji = resolvedEmoji,
+                emoji = resolvedEmoji,
+                currentBalanceBrl = balance,
+                creditLimitBrl = safeLimit,
+                closingDay = acc.closingDay.coerceIn(1, 31),
+                dueDay = acc.dueDay.coerceIn(1, 31),
+                usedCreditLimitBrl = usedCredit,
+                availableCreditLimitBrl = availableLimit
+            )
+        }
+    }
+
+    fun openInvoiceForMonthBrl(
+        accountId: String,
+        yearMonth: String,
+        transactions: List<FinanceTransaction>
+    ): Double {
+        return transactions
+            .filter {
+                it.type == "EXPENSE" &&
+                    it.isCreditCard &&
+                    !it.isPaid &&
+                    it.yearMonth == yearMonth &&
+                    (accountId.isBlank() || it.accountId == accountId)
+            }
+            .sumOf { it.amountBrl }
+    }
+}
 
 @Keep
 @IgnoreExtraProperties
 data class Household(
     @DocumentId val id: String = "",
     val householdId: String = "",
-    val name: String = "Orçamento da Família",
+    val name: String = "Família Omni",
     val ownerId: String = "",
     val monthlyIncomeBrl: Double = 8500.0,
     val needsPercentage: Long = 50L,
@@ -172,22 +386,82 @@ data class Household(
     val savingsPercentage: Long = 20L,
     val defaultSplitMode: String = SplitMode.EQUAL,
     val members: List<FamilyMemberBadge> = emptyList(),
+    val bankAccounts: List<BankAccount> = emptyList(),
+    val categoryBudgetsBrl: Map<String, Double> = emptyMap(),
+    val customCategories: List<String> = emptyList(),
+    val muralItems: List<FamilyMuralItem> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
-)
+) {
+    /**
+     * Retorna a lista oficial de membros da família garantindo que cada membro tenha
+     * uma cor padrão distinta atribuída caso não tenha escolhido manualmente.
+     */
+    fun membersWithAssignedColors(
+        fallbackProfileName: String = "",
+        fallbackProfileColorHex: Long = 0xFF0E7C5B,
+        fallbackUserId: String = ""
+    ): List<FamilyMemberBadge> {
+        val defaultPalette = listOf(
+            0xFF0E7C5B, // Esmeralda
+            0xFF7B61FF, // Roxo
+            0xFF2E7D9B, // Azul Oceano
+            0xFFD84B72, // Rosa
+            0xFFE07A2E, // Âmbar
+            0xFF00897B, // Turquesa
+            0xFF5C6BC0, // Índigo
+            0xFFC62828  // Coral
+        )
+        val rawList = if (members.isNotEmpty()) {
+            members
+        } else if (fallbackProfileName.isNotBlank()) {
+            listOf(
+                FamilyMemberBadge(
+                    userId = fallbackUserId.ifBlank { ownerId.ifBlank { "member_admin" } },
+                    displayName = fallbackProfileName,
+                    colorHex = if (fallbackProfileColorHex != 0L) fallbackProfileColorHex else defaultPalette[0],
+                    avatarEmoji = "🌿",
+                    role = "ADMIN",
+                    isCurrentUser = true
+                )
+            )
+        } else {
+            emptyList()
+        }
+
+        val usedColors = mutableSetOf<Long>()
+        return rawList.mapIndexed { index, member ->
+            val cleanColor = if (member.colorHex != 0L && !usedColors.contains(member.colorHex)) {
+                member.colorHex
+            } else {
+                defaultPalette.firstOrNull { !usedColors.contains(it) }
+                    ?: defaultPalette[index % defaultPalette.size]
+            }
+            usedColors.add(cleanColor)
+            member.copy(
+                displayName = member.displayName.ifBlank { "Membro ${index + 1}" },
+                colorHex = cleanColor
+            )
+        }
+    }
+}
 
 /**
- * Recorrência de tarefas da Agenda (Passo 2)
+ * Recorrência de tarefas da Agenda (Passo 2 & Parte 3)
  */
 object TaskRecurrence {
-    const val ONCE = "ONCE"         // Única
-    const val DAILY = "DAILY"       // Diária
-    const val WEEKLY = "WEEKLY"     // Semanal
-    const val BIWEEKLY = "BIWEEKLY" // Quinzenal
-    const val MONTHLY = "MONTHLY"   // Mensal
+    const val ONCE = "ONCE"               // Única
+    const val DAILY = "DAILY"             // Diária
+    const val WEEKDAYS = "WEEKDAYS"       // Seg a Sex
+    const val CUSTOM_DAYS = "CUSTOM_DAYS" // Dias da Semana específicos
+    const val WEEKLY = "WEEKLY"           // Semanal
+    const val BIWEEKLY = "BIWEEKLY"       // Quinzenal
+    const val MONTHLY = "MONTHLY"         // Mensal
 
     fun labelPt(recurrence: String): String = when (recurrence) {
         DAILY -> "Diária"
+        WEEKDAYS -> "Seg a Sex"
+        CUSTOM_DAYS -> "Dias da Semana"
         WEEKLY -> "Semanal"
         BIWEEKLY -> "Quinzenal"
         MONTHLY -> "Mensal"
@@ -197,6 +471,8 @@ object TaskRecurrence {
     val allOptions: List<Pair<String, String>> = listOf(
         ONCE to "Única",
         DAILY to "Diária",
+        WEEKDAYS to "Seg a Sex",
+        CUSTOM_DAYS to "Dias da Semana",
         WEEKLY to "Semanal",
         BIWEEKLY to "Quinzenal",
         MONTHLY to "Mensal"
@@ -222,23 +498,27 @@ data class TaskItem(
     val householdId: String = "",
     val title: String = "",
     val notes: String = "",
+    val location: String = "", // Local opcional da tarefa/evento
     val category: String = "Finanças",
     val priority: String = "MEDIUM",
     val isEssential: Boolean = false, // Tarefa essencial / inegociável (mantida visível no Modo Dia Difícil)
     val dateEpochDay: Long = 0L,
+    val endDateEpochDay: Long = 0L,   // Data final opcional do período (se > dateEpochDay, tarefa abrange o intervalo)
     val yearMonth: String = "",
     val alarmHour: Long = 9L,
     val alarmMinute: Long = 0L,
     val alarmEnabled: Boolean = false,
     val completed: Boolean = false,
+    val completedDates: List<String> = emptyList(), // Datas concluídas no formato yyyy-MM-dd
+    val recurrenceWeekdays: List<Int> = emptyList(), // Dias da semana ISO (1=Seg .. 7=Dom)
     // Passo 2: Time Blocking, Inbox, Subtarefas, Recorrência e Ringtone Individual
     val isInbox: Boolean = false,           // true quando criada sem horário definido -> vai para a aba Inbox
-    val durationMinutes: Int = 30,          // Duração em minutos (15, 30, 45, 60, 90 ou custom)
+    val durationMinutes: Int = 30,          // Duração em minutos (15, 30, 45, 60, 90 ou custom em horas+minutos)
     val iconEmoji: String = "📋",           // Ícone visual da tarefa na Linha do Tempo
     val taskColorHex: Long = 0xFF0E7C5B,    // Cor escolhida para o bloco da tarefa
-    val recurrence: String = TaskRecurrence.ONCE, // ONCE, DAILY, WEEKLY, BIWEEKLY, MONTHLY
+    val recurrence: String = TaskRecurrence.ONCE, // ONCE, DAILY, WEEKDAYS, CUSTOM_DAYS, WEEKLY, BIWEEKLY, MONTHLY
     val subtasks: List<SubtaskItem> = emptyList(), // Checklist de subtarefas (ex: 1/3)
-    val ringtoneCategory: String = "SUAVE", // SUAVE, FOCO, URGENTE, CONTAS, DISCRETO
+    val ringtoneCategory: String = "APP_DEFAULT", // APP_DEFAULT, SUAVE, FOCO, URGENTE, CONTAS, DISCRETO ou URI customizado
     // Escopo de privacidade da tarefa
     val privacyScope: String = PrivacyScope.FAMILY, // FAMILY, PERSONAL, COUPLE, ASSIGNED_ONLY
     val visibleToMemberIds: List<String> = emptyList(),
@@ -260,7 +540,59 @@ data class TaskItem(
     val splitShares: List<ExpenseSplitShare> = emptyList(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
-)
+) {
+    val hasDateRange: Boolean
+        get() = endDateEpochDay > dateEpochDay && dateEpochDay > 0L
+
+    val isRecurringOrMultiDay: Boolean
+        get() = recurrence != TaskRecurrence.ONCE || hasDateRange || recurrenceWeekdays.isNotEmpty()
+
+    fun isCompletedOnDate(targetEpochDay: Long): Boolean {
+        val dateIso = DateCalendarUtils.formatIsoDate(targetEpochDay)
+        if (completedDates.contains(dateIso)) return true
+        return if (!isRecurringOrMultiDay) completed else false
+    }
+
+    fun withCompletedForDate(targetEpochDay: Long): TaskItem {
+        return copy(completed = isCompletedOnDate(targetEpochDay))
+    }
+
+    fun occursOnEpochDay(targetEpochDay: Long): Boolean {
+        if (isInbox) return false
+        if (targetEpochDay < dateEpochDay) return false
+        if (hasDateRange && targetEpochDay > endDateEpochDay) return false
+        if (targetEpochDay == dateEpochDay) return true
+
+        val targetDayOfWeek = java.time.LocalDate.ofEpochDay(targetEpochDay).dayOfWeek.value // 1=Seg .. 7=Dom
+        return when (recurrence) {
+            TaskRecurrence.ONCE -> hasDateRange && targetEpochDay in dateEpochDay..endDateEpochDay
+            TaskRecurrence.DAILY -> true
+            TaskRecurrence.WEEKDAYS -> targetDayOfWeek in 1..5
+            TaskRecurrence.CUSTOM_DAYS -> {
+                if (recurrenceWeekdays.isNotEmpty()) {
+                    targetDayOfWeek in recurrenceWeekdays
+                } else {
+                    val startDayOfWeek = java.time.LocalDate.ofEpochDay(dateEpochDay).dayOfWeek.value
+                    targetDayOfWeek == startDayOfWeek
+                }
+            }
+            TaskRecurrence.WEEKLY -> {
+                if (recurrenceWeekdays.isNotEmpty()) {
+                    targetDayOfWeek in recurrenceWeekdays
+                } else {
+                    ((targetEpochDay - dateEpochDay) % 7L) == 0L
+                }
+            }
+            TaskRecurrence.BIWEEKLY -> ((targetEpochDay - dateEpochDay) % 14L) == 0L
+            TaskRecurrence.MONTHLY -> {
+                val (_, _, startDay) = DateCalendarUtils.fromEpochDay(dateEpochDay)
+                val (_, _, targetDay) = DateCalendarUtils.fromEpochDay(targetEpochDay)
+                startDay == targetDay
+            }
+            else -> hasDateRange && targetEpochDay in dateEpochDay..endDateEpochDay
+        }
+    }
+}
 
 @Keep
 @IgnoreExtraProperties
@@ -273,12 +605,25 @@ data class FinanceTransaction(
     val currency: String = "BRL",
     val exchangeRateToBrl: Double = 1.0,
     val amountBrl: Double = 0.0,
-    val type: String = "EXPENSE", // EXPENSE or INCOME
-    val budgetBucket: String = "NEEDS", // NEEDS, WANTS, SAVINGS, INCOME
+    val type: String = "EXPENSE", // EXPENSE, INCOME, TRANSFER
+    val budgetBucket: String = "NEEDS", // NEEDS, WANTS, SAVINGS, INCOME, TRANSFER
     val category: String = "Alimentação",
     val dateEpochDay: Long = 0L,
     val yearMonth: String = "",
     val recurringSourceId: String = "",
+    // Conta Bancária vinculada (Origem ou Destino)
+    val accountId: String = "acc_nubank",
+    val accountName: String = "Nubank",
+    val destinationAccountId: String = "",
+    val destinationAccountName: String = "",
+    // Receita/Despesa Fixa ou Recorrente
+    val isRecurring: Boolean = false,
+    // Crédito Parcelado separado do Saldo Imediato
+    val isCreditCard: Boolean = false,
+    val installmentCount: Int = 1,
+    val installmentIndex: Int = 1,
+    val parentTransactionId: String = "",
+    val isPaid: Boolean = true, // Para crédito parcelado inicia false e só abate da conta quando marcada como Paga
     // Identificação visual de quem criou
     val createdByName: String = "",
     val createdByColorHex: Long = 0xFF0E7C5B,
@@ -394,16 +739,19 @@ sealed interface UiState<out T> {
     data class Error(val message: String) : UiState<Nothing>
 }
 
-fun formatCurrencyBrl(amount: Double): String {
+fun formatCurrencyBrl(amount: Double, hideValues: Boolean = false): String {
+    if (hideValues) return "R$ •••••"
     return String.format(Locale.forLanguageTag("pt-BR"), "R$ %,.2f", amount)
 }
 
-fun formatCurrencyOriginal(amount: Double, currency: String): String {
+fun formatCurrencyOriginal(amount: Double, currency: String, hideValues: Boolean = false): String {
     val symbol = when (currency.uppercase(Locale.ROOT)) {
         "USD" -> "US$"
         "EUR" -> "€"
         "GBP" -> "£"
         else -> "R$"
     }
+    if (hideValues) return "$symbol •••••"
     return String.format(Locale.forLanguageTag("pt-BR"), "%s %,.2f", symbol, amount)
 }
+

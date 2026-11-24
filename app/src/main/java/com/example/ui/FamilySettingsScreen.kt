@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FamilyRestroom
 import androidx.compose.material.icons.filled.GroupAdd
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RestartAlt
@@ -88,6 +89,7 @@ import com.example.data.Household
 import com.example.data.UserProfile
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.LocalOrganicCardRadius
+import kotlinx.coroutines.launch
 import java.io.File
 
 /**
@@ -193,6 +195,9 @@ fun FamilySettingsScreen(
     userEmail: String?,
     onUpdateProfileIdentity: (displayName: String, memberColorHex: Long) -> Unit,
     onJoinHousehold: (String, String) -> Unit,
+    onCreateNewFamily: (familyName: String, customInviteCode: String) -> Unit = { _, _ -> },
+    onSaveFamilyMember: (com.example.data.FamilyMemberBadge) -> Unit = {},
+    onRemoveFamilyMember: (memberUserId: String, memberName: String) -> Unit = { _, _ -> },
     onChangeThemeMode: (String) -> Unit,
     onOpenCustomizationStudio: () -> Unit,
     onOpenModularOnboardingScreen: () -> Unit = {},
@@ -200,12 +205,18 @@ fun FamilySettingsScreen(
     onOpenAchievementsScreen: () -> Unit = {},
     updateState: AppUpdateUiState? = null,
     updateManager: AppUpdateManager? = null,
+    onRecoverLegacyData: () -> Unit = {},
+    onBuildFullBackupJson: () -> String = { "{}" },
+    onRestoreBackupFromUri: (android.net.Uri) -> Unit = {},
     onBackToHub: () -> Unit,
     onShowMessage: (String) -> Unit,
     onSignOut: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
     val cardRadius = LocalOrganicCardRadius.current
     val clipboardManager = LocalClipboardManager.current
+    val triggerFeedback = rememberOmniFeedback()
 
     var nameInput by remember(customizationConfig.profileName, userProfile?.displayName) {
         mutableStateOf(
@@ -216,16 +227,62 @@ fun FamilySettingsScreen(
     }
     val selectedColorHex = customizationConfig.profileColorHex
 
-    // Expandable section states (all start collapsed by default so the screen stays compact and clean)
+    // Expandable section states
     var expandStructuredAppearance by remember { mutableStateOf(false) }
     var expandProfileIdentity by remember { mutableStateOf(false) }
     var expandModularProfile by remember { mutableStateOf(false) }
     var expandHubBuilder by remember { mutableStateOf(false) }
-    var expandFamilySync by remember { mutableStateOf(false) }
+    var expandSoundsSettings by remember { mutableStateOf(false) }
+    var expandFamilySync by remember { mutableStateOf(true) }
+    var expandBackupAndMural by remember { mutableStateOf(true) }
+
+    // Lista & Mural da Família state (sincronizado com o 4º Widget da tela inicial)
+    var familyMuralItems by remember {
+        mutableStateOf(com.example.data.OmniBackupAndMigrationManager.getFamilyMuralItems(context))
+    }
+    var newMuralItemText by remember { mutableStateOf("") }
+    var newMuralCategory by remember { mutableStateOf("Compras") }
+
+    // 1-Tap Backup Export (.json) & Restore (.json)
+    val createBackupDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { targetUri ->
+        if (targetUri != null) {
+            val jsonPayload = onBuildFullBackupJson()
+            coroutineScope.launch {
+                val res = com.example.data.OmniBackupAndMigrationManager.writeBackupToUri(
+                    context = context,
+                    targetUri = targetUri,
+                    jsonContent = jsonPayload
+                )
+                if (res.isSuccess) {
+                    triggerFeedback("Backup exportado com sucesso!")
+                    onShowMessage("Arquivo de backup (.json) salvo com sucesso!")
+                } else {
+                    onShowMessage("Erro ao exportar backup: ${res.exceptionOrNull()?.localizedMessage ?: "falha"}")
+                }
+            }
+        }
+    }
+
+    val openBackupDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { sourceUri ->
+        if (sourceUri != null) {
+            triggerFeedback("Restaurando e mesclando backup...")
+            onRestoreBackupFromUri(sourceUri)
+        }
+    }
 
     var targetCodeInput by remember { mutableStateOf("") }
-    var targetFamilyNameInput by remember { mutableStateOf(household.name) }
+    var targetFamilyNameInput by remember(household.name) { mutableStateOf(household.name) }
     var copiedFeedback by remember { mutableStateOf(false) }
+
+    // Create Family & Member Edit/Delete dialogs
+    var showCreateFamilyDialog by remember { mutableStateOf(false) }
+    var editingFamilyMember by remember { mutableStateOf<com.example.data.FamilyMemberBadge?>(null) }
+    var showMemberEditorDialog by remember { mutableStateOf(false) }
+    var deletingFamilyMember by remember { mutableStateOf<com.example.data.FamilyMemberBadge?>(null) }
 
     val activeTheme = userProfile?.themeMode ?: "SYSTEM"
     val selectedMemberColor = remember(selectedColorHex) {
@@ -474,6 +531,11 @@ fun FamilySettingsScreen(
             }
         }
 
+        // Discreet Permissions Notice Banner ("Ativar agora" opens Android Settings directly)
+        item {
+            OmniPermissionsNoticeCard(compact = false)
+        }
+
         // =========================================================================
         // CENTRAL DE ATUALIZAÇÕES EM TEMPO REAL (AUTO-UPDATE CHECKER)
         // =========================================================================
@@ -507,7 +569,7 @@ fun FamilySettingsScreen(
                         onOpenFullPalette = onOpenCustomizationStudio
                     )
 
-                    // Modo Base Claro / Escuro / Automático + Acesso às Fontes e Sons
+                    // Modo Base Claro / Escuro / Preto Puro (AMOLED) + Cor de Destaque + Fontes e Sons
                     Surface(
                         shape = RoundedCornerShape(24.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
@@ -526,24 +588,71 @@ fun FamilySettingsScreen(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "Modo Base (Claro / Escuro):",
+                                    text = "Modo Base (Claro / Escuro / AMOLED):",
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
 
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 listOf(
                                     "SYSTEM" to "Automático",
                                     "LIGHT" to "Claro",
-                                    "DARK" to "Escuro"
+                                    "DARK" to "Escuro",
+                                    "AMOLED" to "Preto Puro (AMOLED)"
                                 ).forEach { (mode, label) ->
                                     FilterChip(
                                         selected = activeTheme == mode,
-                                        onClick = { onChangeThemeMode(mode) },
-                                        label = { Text(label) },
+                                        onClick = {
+                                            onChangeThemeMode(mode)
+                                            triggerFeedback("Modo $label ativado!")
+                                        },
+                                        label = { Text(label, maxLines = 1, softWrap = false) },
                                         shape = RoundedCornerShape(50),
                                         modifier = Modifier.testTag("theme_chip_$mode")
+                                    )
+                                }
+                            }
+
+                            Text(
+                                text = "Cor de Destaque Principal (Botões e Ícones Ativos):",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                CustomizationCatalog.memberAgendaColors.take(6).forEach { (colorName, hex) ->
+                                    val c = Color(hex.toInt())
+                                    val isSelected = customizationConfig.primaryHex == hex
+                                    FilterChip(
+                                        selected = isSelected,
+                                        onClick = {
+                                            customizationRepo.updateStructuredAppColor(hex)
+                                            triggerFeedback("Cor principal '$colorName' aplicada!")
+                                        },
+                                        leadingIcon = {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(12.dp)
+                                                    .clip(CircleShape)
+                                                    .background(c)
+                                            )
+                                        },
+                                        label = {
+                                            Text(
+                                                text = colorName,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                maxLines = 1,
+                                                softWrap = false
+                                            )
+                                        },
+                                        shape = RoundedCornerShape(50)
                                     )
                                 }
                             }
@@ -561,7 +670,11 @@ fun FamilySettingsScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Personalizar 10 Fontes & Toques de Alarme")
+                                Text(
+                                    text = "Personalizar Fontes & Toques de Alarme",
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
                             }
                         }
                     }
@@ -671,6 +784,7 @@ fun FamilySettingsScreen(
                                 val clean = nameInput.trim().ifBlank { "Você" }
                                 customizationRepo.updateProfileIdentity(clean, selectedColorHex)
                                 onUpdateProfileIdentity(clean, selectedColorHex)
+                                triggerFeedback("Nome do perfil salvo com sucesso!")
                             },
                             shape = RoundedCornerShape(50),
                             modifier = Modifier
@@ -836,12 +950,141 @@ fun FamilySettingsScreen(
         }
 
         // =========================================================================
-        // EXPANDABLE SECTION 4: CÓDIGO DA FAMÍLIA, SINCRONIZAÇÃO & CONTA
+        // EXPANDABLE SECTION: CONFIGURAÇÕES -> SONS, NOTIFICAÇÕES & RESUMO MATINAL
         // =========================================================================
         item {
             ExpandableProfileSectionCard(
-                title = "4. Código da Família & Conta (${household.householdId})",
-                subtitle = "Compartilhe o orçamento familiar ou conecte outra conta",
+                title = "4. Sons, Notificações & Resumo Matinal",
+                subtitle = "Resumo Matinal (${String.format(java.util.Locale.getDefault(), "%02d:%02d", customizationConfig.morningSummaryHour, customizationConfig.morningSummaryMinute)}) • Alarmes (${customizationConfig.taskAlarmSoundTitle})",
+                icon = Icons.Default.Notifications,
+                accentColor = MaterialTheme.colorScheme.primary,
+                expanded = expandSoundsSettings,
+                onToggleExpand = { expandSoundsSettings = !expandSoundsSettings },
+                testTag = "section_sounds_and_notifications"
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    // Resumo Matinal Automático
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("morning_summary_config_card")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "☀️ Resumo Matinal Automático",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "Notificação diária com compromissos do dia, contas/faturas vencendo hoje e itens pendentes da Lista de Compras.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = customizationConfig.morningSummaryEnabled,
+                                    onCheckedChange = { enabled ->
+                                        customizationRepo.updateMorningSummaryConfig(
+                                            enabled = enabled,
+                                            hour = customizationConfig.morningSummaryHour,
+                                            minute = customizationConfig.morningSummaryMinute
+                                        )
+                                        triggerFeedback(
+                                            if (enabled) "Resumo Matinal ativado!" else "Resumo Matinal desativado."
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("morning_summary_toggle")
+                                )
+                            }
+
+                            if (customizationConfig.morningSummaryEnabled) {
+                                Text(
+                                    text = "Horário do Resumo Matinal:",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    listOf(
+                                        7 to 0,
+                                        7 to 30,
+                                        8 to 0,
+                                        8 to 30,
+                                        9 to 0
+                                    ).forEach { (h, m) ->
+                                        val timeLabel = String.format(java.util.Locale.getDefault(), "%02d:%02d", h, m)
+                                        val isSelected = customizationConfig.morningSummaryHour == h &&
+                                            customizationConfig.morningSummaryMinute == m
+                                        FilterChip(
+                                            selected = isSelected,
+                                            onClick = {
+                                                customizationRepo.updateMorningSummaryConfig(
+                                                    enabled = true,
+                                                    hour = h,
+                                                    minute = m
+                                                )
+                                                triggerFeedback("Resumo Matinal agendado para $timeLabel!")
+                                            },
+                                            label = {
+                                                Text(
+                                                    text = timeLabel,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    maxLines = 1,
+                                                    softWrap = false
+                                                )
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    OmniGlobalSoundSettingsSection(
+                        config = customizationConfig,
+                        customizationRepo = customizationRepo,
+                        onShowMessage = onShowMessage
+                    )
+                }
+            }
+        }
+
+        // =========================================================================
+        // EXPANDABLE SECTION 5: GESTÃO DE FAMÍLIA, MEMBROS & CÓDIGO DE CONVITE
+        // =========================================================================
+        item {
+            val effectiveMembers = remember(household.members, nameInput, selectedColorHex, userProfile) {
+                if (household.members.isNotEmpty()) {
+                    household.members
+                } else {
+                    listOf(
+                        com.example.data.FamilyMemberBadge(
+                            userId = userProfile?.uid?.ifBlank { "local_user" } ?: "local_user",
+                            displayName = nameInput.ifBlank { "Você" },
+                            colorHex = selectedColorHex,
+                            avatarEmoji = userProfile?.avatarEmoji ?: "🧑",
+                            role = "Admin"
+                        )
+                    )
+                }
+            }
+
+            ExpandableProfileSectionCard(
+                title = "4. Gestão de Família & Membros (${household.name})",
+                subtitle = "${effectiveMembers.size} integrante(s) • Código: ${household.householdId}",
                 icon = Icons.Default.FamilyRestroom,
                 accentColor = MaterialTheme.colorScheme.tertiary,
                 expanded = expandFamilySync,
@@ -849,48 +1092,221 @@ fun FamilySettingsScreen(
                 testTag = "section_family_sync"
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    // Current Family Card + Invite Code + Create New Family button
                     Surface(
                         shape = RoundedCornerShape(22.dp),
                         color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(14.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Column {
-                                Text(
-                                    text = "CÓDIGO DE CONVITE DA FAMÍLIA",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Text(
-                                    text = household.householdId,
-                                    style = MaterialTheme.typography.titleLarge,
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "FAMÍLIA ATUAL: ${household.name.uppercase()}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = "Código: ${household.householdId}",
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(household.householdId))
+                                        copiedFeedback = true
+                                        triggerFeedback("Código ${household.householdId} copiado!")
+                                    },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("copy_household_code_btn")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ContentCopy,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(if (copiedFeedback) "Copiado!" else "Copiar")
+                                }
                             }
 
-                            OutlinedButton(
-                                onClick = {
-                                    clipboardManager.setText(AnnotatedString(household.householdId))
-                                    copiedFeedback = true
-                                },
-                                shape = RoundedCornerShape(50),
-                                modifier = Modifier.testTag("copy_household_code_btn")
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.ContentCopy,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(if (copiedFeedback) "Copiado!" else "Copiar")
+                                Button(
+                                    onClick = { showCreateFamilyDialog = true },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("open_create_family_dialog_btn")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.FamilyRestroom,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Criar Nova Família")
+                                }
+
+                                FilledTonalButton(
+                                    onClick = {
+                                        editingFamilyMember = null
+                                        showMemberEditorDialog = true
+                                    },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("add_family_member_btn")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.GroupAdd,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("+ Membro")
+                                }
+                            }
+                        }
+                    }
+
+                    // QUEM FAZ PARTE DA FAMÍLIA (Members list)
+                    Surface(
+                        shape = RoundedCornerShape(22.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("family_members_list_card")
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text(
+                                        text = "👨‍👩‍👧‍👦 Quem faz parte da família",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "${effectiveMembers.size} integrante(s) vinculado(s) a ${household.name}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            effectiveMembers.forEach { member ->
+                                val memberColor = if (member.colorHex != 0L) {
+                                    Color(member.colorHex.toInt())
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = memberColor.copy(alpha = 0.12f),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .border(1.dp, memberColor.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+                                        .testTag("family_member_row_${member.userId}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(38.dp)
+                                                    .clip(CircleShape)
+                                                    .background(memberColor.copy(alpha = 0.2f))
+                                                    .border(2.dp, memberColor, CircleShape),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = member.avatarEmoji.ifBlank { "🧑" },
+                                                    style = MaterialTheme.typography.titleMedium
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Column {
+                                                Text(
+                                                    text = member.displayName,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    text = "${member.role.ifBlank { "Membro" }} • Cor na Agenda Familiar",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = memberColor,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            }
+                                        }
+
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    editingFamilyMember = member
+                                                    showMemberEditorDialog = true
+                                                },
+                                                shape = RoundedCornerShape(50),
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                modifier = Modifier.testTag("edit_family_member_${member.userId}")
+                                            ) {
+                                                Text("Editar", style = MaterialTheme.typography.labelSmall)
+                                            }
+                                            val isAdminMember = member.role.equals("ADMIN", ignoreCase = true) ||
+                                                member.userId == userProfile?.userId ||
+                                                member.userId == household.ownerId ||
+                                                member.isCurrentUser
+                                            if (effectiveMembers.size > 1 && !isAdminMember) {
+                                                IconButton(
+                                                    onClick = { deletingFamilyMember = member },
+                                                    modifier = Modifier
+                                                        .size(32.dp)
+                                                        .testTag("delete_family_member_${member.userId}")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.DeleteOutline,
+                                                        contentDescription = "Remover membro",
+                                                        tint = MaterialTheme.colorScheme.error,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -904,7 +1320,7 @@ fun FamilySettingsScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Entrar ou Alternar Espaço Familiar",
+                            text = "Entrar em Outra Família por Código de Convite",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -934,6 +1350,7 @@ fun FamilySettingsScreen(
                         onClick = {
                             if (targetCodeInput.isNotBlank()) {
                                 onJoinHousehold(targetCodeInput, targetFamilyNameInput)
+                                triggerFeedback("Conectado à família $targetFamilyNameInput!")
                                 targetCodeInput = ""
                             }
                         },
@@ -993,6 +1410,422 @@ fun FamilySettingsScreen(
                 }
             }
         }
+
+        // 7. BACKUP EM 1 TOQUE, RECUPERAÇÃO DE DADOS ANTIGOS & LISTA/MURAL DA FAMÍLIA (Itens 2, 8d e 9)
+        item {
+            ExpandableProfileSectionCard(
+                title = "Backup, Recuperação & Lista da Família",
+                subtitle = "Recuperar dados antigos • Exportar/Restaurar (.json) • Lista de Compras",
+                icon = Icons.Default.CloudDone,
+                accentColor = Color(0xFF0E7C5B),
+                expanded = expandBackupAndMural,
+                onToggleExpand = { expandBackupAndMural = !expandBackupAndMural },
+                testTag = "profile_section_backup_and_mural"
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Proteja ou recupere todos os seus registros (Tarefas, Finanças, Contas, Monitoramento de Glicemia/Saúde e Diário Privado) sem duplicar itens:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // Botão Recuperar Dados Antigos (Item 2)
+                    Button(
+                        onClick = {
+                            triggerFeedback("Varrendo e mesclando dados antigos...")
+                            onRecoverLegacyData()
+                            familyMuralItems = com.example.data.OmniBackupAndMigrationManager.getFamilyMuralItems(context)
+                        },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("recover_legacy_data_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.RestartAlt,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Recuperar Dados Antigos", fontWeight = FontWeight.Bold)
+                    }
+
+                    // Botões Exportar Backup & Restaurar Backup (Item 9)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilledTonalButton(
+                            onClick = {
+                                val todayStr = java.time.LocalDate.now().toString()
+                                createBackupDocumentLauncher.launch("omni_backup_$todayStr.json")
+                            },
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("export_backup_json_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowUpward,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Exportar Backup", fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                openBackupDocumentLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                            },
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("restore_backup_json_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowDownward,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Restaurar Backup", fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Lista de Compras & Mural da Família (sincronizado com o widget "Omni • Lista & Mural da Família")
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "🛒 Lista de Compras & Mural da Família",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Itens compartilhados sincronizados diretamente com o widget 'Omni • Lista & Mural da Família' na tela inicial do celular.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf("Compras", "Mural", "Casa").forEach { cat ->
+                                    FilterChip(
+                                        selected = newMuralCategory == cat,
+                                        onClick = { newMuralCategory = cat },
+                                        label = { Text(cat, style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedTextField(
+                                    value = newMuralItemText,
+                                    onValueChange = { newMuralItemText = it },
+                                    label = { Text("Novo item da lista / recado") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("family_mural_new_item_input")
+                                )
+                                Button(
+                                    onClick = {
+                                        val clean = newMuralItemText.trim()
+                                        if (clean.isNotEmpty()) {
+                                            com.example.data.OmniBackupAndMigrationManager.addFamilyMuralItem(
+                                                context = context,
+                                                title = clean,
+                                                category = newMuralCategory,
+                                                addedBy = nameInput
+                                            )
+                                            newMuralItemText = ""
+                                            familyMuralItems = com.example.data.OmniBackupAndMigrationManager.getFamilyMuralItems(context)
+                                            triggerFeedback("Item adicionado à Lista da Família!")
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("family_mural_add_btn")
+                                ) {
+                                    Text("+")
+                                }
+                            }
+
+                            familyMuralItems.forEach { item ->
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                com.example.data.OmniBackupAndMigrationManager.toggleFamilyMuralItem(context, item.id)
+                                                familyMuralItems = com.example.data.OmniBackupAndMigrationManager.getFamilyMuralItems(context)
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = if (item.completed) Icons.Default.CheckCircle else Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint = if (item.completed) Color(0xFF00B894) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column {
+                                                Text(
+                                                    text = item.title,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = if (item.completed) FontWeight.Normal else FontWeight.SemiBold,
+                                                    color = if (item.completed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Text(
+                                                    text = "${item.category} • ${item.addedBy}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                com.example.data.OmniBackupAndMigrationManager.deleteFamilyMuralItem(context, item.id)
+                                                familyMuralItems = com.example.data.OmniBackupAndMigrationManager.getFamilyMuralItems(context)
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.DeleteOutline,
+                                                contentDescription = "Remover item",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Create New Family Dialog
+    if (showCreateFamilyDialog) {
+        var newFamilyName by remember { mutableStateOf("Família ${nameInput.take(15)}") }
+        var customInviteCode by remember {
+            val suffix = (1000..9999).random()
+            mutableStateOf("FAM_OMNI$suffix")
+        }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showCreateFamilyDialog = false },
+            title = { Text("Criar Nova Família", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Defina o nome da sua família e o código de convite para compartilhar com os integrantes:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = newFamilyName,
+                        onValueChange = { newFamilyName = it },
+                        label = { Text("Nome da Família") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("create_family_name_input")
+                    )
+                    OutlinedTextField(
+                        value = customInviteCode,
+                        onValueChange = { customInviteCode = it.uppercase().filter { ch -> ch.isLetterOrDigit() || ch == '_' } },
+                        label = { Text("Código de Convite (Identificador)") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("create_family_code_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val cleanName = newFamilyName.trim().ifBlank { "Família Omni" }
+                        val cleanCode = customInviteCode.trim().ifBlank { "FAM_OMNI01" }
+                        onCreateNewFamily(cleanName, cleanCode)
+                        triggerFeedback("Família '$cleanName' criada com sucesso!")
+                        showCreateFamilyDialog = false
+                    },
+                    modifier = Modifier.testTag("confirm_create_family_btn")
+                ) {
+                    Text("Criar Família")
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showCreateFamilyDialog = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    // Add / Edit Family Member Dialog
+    if (showMemberEditorDialog) {
+        val initial = editingFamilyMember
+        var memberName by remember(initial) { mutableStateOf(initial?.displayName ?: "") }
+        var memberRole by remember(initial) { mutableStateOf(initial?.role ?: "Membro") }
+        var memberEmoji by remember(initial) { mutableStateOf(initial?.avatarEmoji ?: "🧑") }
+        var memberColorHex by remember(initial) {
+            mutableStateOf(
+                initial?.colorHex ?: CustomizationCatalog.memberAgendaColors.first().second
+            )
+        }
+
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = {
+                showMemberEditorDialog = false
+                editingFamilyMember = null
+            },
+            title = {
+                Text(
+                    text = if (initial == null) "Adicionar Membro da Família" else "Editar Membro da Família",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = memberName,
+                        onValueChange = { memberName = it },
+                        label = { Text("Nome do Integrante") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("family_member_name_input")
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("Membro", "Admin", "Cônjuge", "Filho(a)").forEach { roleOpt ->
+                            FilterChip(
+                                selected = memberRole == roleOpt,
+                                onClick = { memberRole = roleOpt },
+                                label = { Text(roleOpt, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                    Text(
+                        text = "Avatar / Emoji:",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf("🧑", "👩", "👨", "🧒", "👧", "👦", "👵", "👴", "🤰").forEach { emoji ->
+                            FilterChip(
+                                selected = memberEmoji == emoji,
+                                onClick = { memberEmoji = emoji },
+                                label = { Text(emoji) }
+                            )
+                        }
+                    }
+                    Text(
+                        text = "Cor do Integrante na Agenda:",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CustomizationCatalog.memberAgendaColors.take(8).forEach { (colorName, hex) ->
+                            val c = Color(hex.toInt())
+                            FilterChip(
+                                selected = memberColorHex == hex,
+                                onClick = { memberColorHex = hex },
+                                leadingIcon = {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(12.dp)
+                                            .clip(CircleShape)
+                                            .background(c)
+                                    )
+                                },
+                                label = { Text(colorName, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val cleanName = memberName.trim()
+                        if (cleanName.isNotBlank()) {
+                            val badge = com.example.data.FamilyMemberBadge(
+                                userId = initial?.userId ?: "mem_${java.util.UUID.randomUUID().toString().take(8)}",
+                                displayName = cleanName,
+                                colorHex = memberColorHex,
+                                avatarEmoji = memberEmoji,
+                                role = memberRole
+                            )
+                            onSaveFamilyMember(badge)
+                            triggerFeedback(
+                                if (initial == null) "$cleanName adicionado(a) à família!" else "$cleanName atualizado(a)!"
+                            )
+                            showMemberEditorDialog = false
+                            editingFamilyMember = null
+                        }
+                    },
+                    modifier = Modifier.testTag("save_family_member_btn")
+                ) {
+                    Text("Salvar")
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        showMemberEditorDialog = false
+                        editingFamilyMember = null
+                    }
+                ) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    // Delete Family Member Confirmation Dialog
+    val memberToDelete = deletingFamilyMember
+    if (memberToDelete != null) {
+        OmniConfirmDeleteDialog(
+            title = "Remover Membro da Família",
+            message = "Deseja remover '${memberToDelete.displayName}' da lista de integrantes da família?",
+            onConfirm = {
+                onRemoveFamilyMember(memberToDelete.userId, memberToDelete.displayName)
+                triggerFeedback("${memberToDelete.displayName} removido(a) da família")
+                deletingFamilyMember = null
+            },
+            onDismiss = { deletingFamilyMember = null }
+        )
     }
 }
 
@@ -1008,20 +1841,32 @@ private fun ExpandableProfileSectionCard(
     content: @Composable () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
+    val organicStyle = com.example.ui.theme.LocalOrganicVisualStyle.current
     val organicShape = RoundedCornerShape(cardRadius)
+    val borderWidth = when (organicStyle) {
+        com.example.data.OrganicVisualStyle.TRANSLUCIDO_GLASS -> 1.dp
+        com.example.data.OrganicVisualStyle.MINIMALISTA_ACOLHEDOR -> 1.dp
+        else -> 1.dp
+    }
+    val borderColor = when (organicStyle) {
+        com.example.data.OrganicVisualStyle.TRANSLUCIDO_GLASS -> MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+        com.example.data.OrganicVisualStyle.MINIMALISTA_ACOLHEDOR -> MaterialTheme.colorScheme.outlineVariant
+        else -> accentColor.copy(alpha = if (expanded) 0.32f else 0.14f)
+    }
+    val elevationDp = com.example.ui.theme.omniOrganicCardElevationDp(if (expanded) 4.dp else 1.dp)
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .border(
-                width = 1.dp,
-                color = accentColor.copy(alpha = if (expanded) 0.32f else 0.14f),
+                width = borderWidth,
+                color = borderColor,
                 shape = organicShape
             )
             .testTag(testTag),
         shape = organicShape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (expanded) 4.dp else 1.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = elevationDp)
     ) {
         Column(
             modifier = Modifier

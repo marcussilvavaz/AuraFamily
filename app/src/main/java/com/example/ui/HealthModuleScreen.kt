@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FamilyRestroom
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Lock
@@ -120,14 +121,48 @@ fun HealthModuleScreen(
     customizationRepo: CustomizationRepository,
     healthRepo: HealthRepository,
     onCreateHealthFinanceExpense: (title: String, amountBrl: Double, category: String, privacyScope: String) -> Unit,
-    onShowBannerMessage: (String) -> Unit
+    onShowBannerMessage: (String) -> Unit,
+    household: com.example.data.Household = com.example.data.Household(),
+    userProfile: com.example.data.UserProfile? = null
 ) {
     val context = LocalContext.current
     val cardRadius = LocalOrganicCardRadius.current
     val healthState by healthRepo.stateFlow.collectAsStateWithLifecycle()
+    val triggerFeedback = rememberOmniFeedback(onShowBannerMessage)
 
     val selectedDateIso = remember(selectedEpochDay) {
         DateCalendarUtils.formatIsoDate(selectedEpochDay)
+    }
+
+    // Lista oficial de membros da família (ex: Marcus e Nathalia) sincronizada com o Firestore
+    val familyMembers = remember(household.members, customizationConfig.profileName, customizationConfig.profileColorHex, userProfile?.userId) {
+        household.membersWithAssignedColors(
+            fallbackProfileName = customizationConfig.profileName,
+            fallbackProfileColorHex = customizationConfig.profileColorHex,
+            fallbackUserId = userProfile?.userId.orEmpty()
+        )
+    }
+
+    val defaultMember = remember(familyMembers, userProfile?.userId, customizationConfig.profileName) {
+        familyMembers.firstOrNull {
+            (userProfile?.userId?.isNotBlank() == true && it.userId == userProfile.userId) ||
+                it.isCurrentUser ||
+                it.displayName.equals(customizationConfig.profileName, ignoreCase = true)
+        } ?: familyMembers.firstOrNull()
+            ?: com.example.data.FamilyMemberBadge(
+                userId = userProfile?.userId.orEmpty().ifBlank { "member_primary" },
+                displayName = customizationConfig.profileName.ifBlank { "Meu Perfil" },
+                colorHex = customizationConfig.profileColorHex
+            )
+    }
+
+    var selectedMemberId by remember(defaultMember.userId) { mutableStateOf(defaultMember.userId) }
+    val activeMember = remember(familyMembers, selectedMemberId, defaultMember) {
+        familyMembers.firstOrNull { it.userId == selectedMemberId } ?: defaultMember
+    }
+    val isPrimaryDefaultMember = remember(activeMember, defaultMember) {
+        activeMember.userId == defaultMember.userId ||
+            activeMember.displayName.equals(defaultMember.displayName, ignoreCase = true)
     }
 
     // Filtro de Escopo na Saúde ("ALL", PrivacyScope.PERSONAL, PrivacyScope.FAMILY)
@@ -137,17 +172,29 @@ fun HealthModuleScreen(
     // Período selecionado para o Relatório Médico PDF (7, 30 ou 365 dias)
     var pdfPeriodDays by remember { mutableIntStateOf(30) }
 
-    // Modais
+    // Modais de criação/edição e exclusão com confirmação
     var showAddTrackerDialog by remember { mutableStateOf(false) }
+    var trackerToEdit by remember { mutableStateOf<DailyTrackerHabit?>(null) }
+    var trackerToDelete by remember { mutableStateOf<DailyTrackerHabit?>(null) }
+
     var showAddGlucoseDialog by remember { mutableStateOf(false) }
+    var glucoseToEdit by remember { mutableStateOf<GlucoseRecord?>(null) }
+    var glucoseToDelete by remember { mutableStateOf<GlucoseRecord?>(null) }
     var presetGlucoseSlot by remember { mutableStateOf(DiabetesSlotCatalog.JEJUM) }
+
     var showAddBpDialog by remember { mutableStateOf(false) }
+    var bpToEdit by remember { mutableStateOf<BloodPressureRecord?>(null) }
+    var bpToDelete by remember { mutableStateOf<BloodPressureRecord?>(null) }
+
     var showEditDppDialog by remember { mutableStateOf(false) }
     var financeSuggestionToConfirm by remember { mutableStateOf<HealthFinanceSuggestion?>(null) }
 
-    // Cronômetro de 1 Hora Pós-Refeição em tempo real
+    // Cronômetro Pós-Refeição em tempo real
     val timerState = healthState.postMealTimer
     var selectedMealForTimer by remember(timerState.mealLabel) { mutableStateOf(timerState.mealLabel) }
+    var selectedDurationSeconds by remember(timerState.totalDurationSeconds) {
+        mutableIntStateOf(timerState.totalDurationSeconds.coerceAtLeast(60))
+    }
     var liveRemainingSeconds by remember(timerState) {
         mutableIntStateOf(
             if (timerState.isRunning && !timerState.isPaused) {
@@ -169,8 +216,8 @@ fun HealthModuleScreen(
                     AlarmScheduler.showImmediateNotification(
                         context = context,
                         notificationId = 7744,
-                        title = "⏰ 1 Hora Pós-${timerState.mealLabel} Concluída!",
-                        message = "Momento ideal para registrar sua medição de Glicemia pós-refeição."
+                        title = "⏰ Pós-${timerState.mealLabel} Concluído!",
+                        message = "Momento ideal para registrar sua medição no Monitoramento de Glicemia."
                     )
                     break
                 } else {
@@ -183,28 +230,6 @@ fun HealthModuleScreen(
         }
     }
 
-    // Launcher para salvar PDF nativo em local escolhido pelo usuário (CreateDocument)
-    val createPdfDocumentLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/pdf")
-    ) { targetUri ->
-        if (targetUri != null) {
-            val result = MedicalReportPdfGenerator.exportToUserUri(
-                context = context,
-                targetUri = targetUri,
-                profileName = customizationConfig.profileName,
-                periodDays = pdfPeriodDays,
-                customizationConfig = customizationConfig,
-                healthState = healthState
-            )
-            if (result.success) {
-                healthRepo.recordGeneratedPdfInfo(result.filePath, result.summaryText)
-                onShowBannerMessage("📄 Relatório Médico em PDF salvo com sucesso! ${result.summaryText}")
-            } else {
-                onShowBannerMessage(result.summaryText)
-            }
-        }
-    }
-
     val filteredTrackers = remember(healthState.trackers, scopeFilter) {
         when (scopeFilter) {
             PrivacyScope.FAMILY -> healthState.trackers.filter { it.privacyScope != PrivacyScope.PERSONAL }
@@ -213,19 +238,57 @@ fun HealthModuleScreen(
         }
     }
 
-    val filteredGlucose = remember(healthState.glucoseRecords, scopeFilter) {
-        when (scopeFilter) {
-            PrivacyScope.FAMILY -> healthState.glucoseRecords.filter { it.privacyScope != PrivacyScope.PERSONAL }
-            PrivacyScope.PERSONAL -> healthState.glucoseRecords.filter { it.privacyScope == PrivacyScope.PERSONAL }
-            else -> healthState.glucoseRecords
+    // Filtra medições clínicas individualmente pelo membro selecionado (Marcus / Nathalia) sem misturar dados do casal
+    val filteredGlucose = remember(healthState.glucoseRecords, activeMember, isPrimaryDefaultMember) {
+        healthState.glucoseRecords.filter { rec ->
+            val matchesMember = if (rec.memberId.isBlank() && rec.memberName.isBlank()) {
+                isPrimaryDefaultMember
+            } else {
+                rec.memberId == activeMember.userId ||
+                    rec.memberName.equals(activeMember.displayName, ignoreCase = true)
+            }
+            matchesMember
         }
     }
 
-    val filteredBp = remember(healthState.bloodPressureRecords, scopeFilter) {
-        when (scopeFilter) {
-            PrivacyScope.FAMILY -> healthState.bloodPressureRecords.filter { it.privacyScope != PrivacyScope.PERSONAL }
-            PrivacyScope.PERSONAL -> healthState.bloodPressureRecords.filter { it.privacyScope == PrivacyScope.PERSONAL }
-            else -> healthState.bloodPressureRecords
+    val filteredBp = remember(healthState.bloodPressureRecords, activeMember, isPrimaryDefaultMember) {
+        healthState.bloodPressureRecords.filter { rec ->
+            val matchesMember = if (rec.memberId.isBlank() && rec.memberName.isBlank()) {
+                isPrimaryDefaultMember
+            } else {
+                rec.memberId == activeMember.userId ||
+                    rec.memberName.equals(activeMember.displayName, ignoreCase = true)
+            }
+            matchesMember
+        }
+    }
+
+    val memberFilteredHealthState = remember(healthState, filteredGlucose, filteredBp) {
+        healthState.copy(
+            glucoseRecords = filteredGlucose,
+            bloodPressureRecords = filteredBp
+        )
+    }
+
+    // Launcher para salvar PDF nativo em local escolhido pelo usuário (CreateDocument)
+    val createPdfDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/pdf")
+    ) { targetUri ->
+        if (targetUri != null) {
+            val result = MedicalReportPdfGenerator.exportToUserUri(
+                context = context,
+                targetUri = targetUri,
+                profileName = activeMember.displayName,
+                periodDays = pdfPeriodDays,
+                customizationConfig = customizationConfig,
+                healthState = memberFilteredHealthState
+            )
+            if (result.success) {
+                healthRepo.recordGeneratedPdfInfo(result.filePath, result.summaryText)
+                onShowBannerMessage("📄 Relatório Médico de ${activeMember.displayName} salvo! ${result.summaryText}")
+            } else {
+                onShowBannerMessage(result.summaryText)
+            }
         }
     }
 
@@ -271,7 +334,7 @@ fun HealthModuleScreen(
                             )
                             val activeSpecificModules = buildList {
                                 add("Trackers diários")
-                                if (customizationConfig.diabetesEnabled) add("Glicemia & Timer 1h")
+                                if (customizationConfig.diabetesEnabled) add("Monitoramento de Glicemia & Timer")
                                 if (customizationConfig.bloodPressureEnabled) add("Pressão Arterial")
                                 if (customizationConfig.pregnancyEnabled) add("Gestação Familiar")
                             }.joinToString(", ")
@@ -285,14 +348,14 @@ fun HealthModuleScreen(
                             onClick = {
                                 val localResult = MedicalReportPdfGenerator.exportToLocalAppFile(
                                     context = context,
-                                    profileName = customizationConfig.profileName,
+                                    profileName = activeMember.displayName,
                                     periodDays = pdfPeriodDays,
                                     customizationConfig = customizationConfig,
-                                    healthState = healthState
+                                    healthState = memberFilteredHealthState
                                 )
                                 if (localResult.success) {
                                     healthRepo.recordGeneratedPdfInfo(localResult.filePath, localResult.summaryText)
-                                    onShowBannerMessage("📄 PDF Médico gerado! ${localResult.summaryText}")
+                                    onShowBannerMessage("📄 PDF Médico de ${activeMember.displayName} gerado! ${localResult.summaryText}")
                                 }
                             },
                             shape = RoundedCornerShape(50),
@@ -305,6 +368,45 @@ fun HealthModuleScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Gerar PDF", fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    // Seletor Rápido de Membro da Família (ex.: Marcus / Nathalia) para separar histórico clínico
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "Paciente / Membro Selecionado:",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            familyMembers.forEach { member ->
+                                val isSelected = activeMember.userId == member.userId
+                                val memberColor = Color(member.colorHex.toInt())
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { selectedMemberId = member.userId },
+                                    leadingIcon = {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(12.dp)
+                                                .clip(CircleShape)
+                                                .background(memberColor)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = "${member.avatarEmoji} ${member.displayName}",
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("health_member_chip_${member.userId}")
+                                )
+                            }
                         }
                     }
 
@@ -414,9 +516,13 @@ fun HealthModuleScreen(
                             },
                             onCompleteAll = {
                                 healthRepo.completeTrackerForDay(selectedDateIso, habit.id)
+                                triggerFeedback("Meta de ${habit.title} concluída hoje!")
+                            },
+                            onEdit = {
+                                trackerToEdit = habit
                             },
                             onDelete = {
-                                healthRepo.deleteTracker(habit.id)
+                                trackerToDelete = habit
                             }
                         )
                     }
@@ -424,47 +530,69 @@ fun HealthModuleScreen(
             }
         }
 
-        // 3. CRONÔMETRO / TIMER DE 1 HORA PÓS-REFEIÇÃO (SOMENTE SE DIABETES / GLICEMIA ESTIVER MARCADO)
+        // 3. CRONÔMETRO / TIMER PÓS-REFEIÇÃO (SOMENTE SE DIABETES / GLICEMIA ESTIVER MARCADO)
         if (customizationConfig.diabetesEnabled) {
             item {
                 PostMealOneHourTimerCard(
                     timerState = timerState,
                     liveRemainingSeconds = liveRemainingSeconds,
                     selectedMeal = selectedMealForTimer,
+                    selectedDurationSeconds = selectedDurationSeconds,
                     onSelectMeal = { selectedMealForTimer = it },
+                    onSelectDuration = { secs -> selectedDurationSeconds = secs },
                     onStartTimer = {
-                        healthRepo.startPostMealTimer(selectedMealForTimer, 3600)
+                        val dur = selectedDurationSeconds.coerceAtLeast(60)
+                        healthRepo.startPostMealTimer(selectedMealForTimer, dur)
+                        val triggerAt = System.currentTimeMillis() + dur * 1000L
+                        AlarmScheduler.schedulePostMealGlucoseAlarm(
+                            context = context,
+                            triggerAtMillis = triggerAt,
+                            mealLabel = selectedMealForTimer
+                        )
+                        triggerFeedback("Cronômetro pós-$selectedMealForTimer iniciado com alarme!")
                     },
                     onPauseResumeTimer = {
                         healthRepo.pauseOrResumePostMealTimer()
+                        val updated = healthRepo.stateFlow.value.postMealTimer
+                        if (updated.isPaused) {
+                            AlarmScheduler.cancelPostMealGlucoseAlarm(context)
+                        } else if (updated.isRunning && updated.targetEndEpochMillis > System.currentTimeMillis()) {
+                            AlarmScheduler.schedulePostMealGlucoseAlarm(
+                                context = context,
+                                triggerAtMillis = updated.targetEndEpochMillis,
+                                mealLabel = updated.mealLabel
+                            )
+                        }
                     },
                     onResetTimer = {
                         healthRepo.resetPostMealTimer(selectedMealForTimer)
+                        AlarmScheduler.cancelPostMealGlucoseAlarm(context)
                     },
                     onTriggerAlertNow = {
-                        healthRepo.markPostMealTimerFinished()
-                        TaskTonePreviewPlayer.playPreview("SUAVE")
-                        AlarmScheduler.showImmediateNotification(
-                            context = context,
-                            notificationId = 7745,
-                            title = "⏰ Hora de Medir a Glicemia (1h Pós-$selectedMealForTimer)!",
-                            message = "Toque para registrar o valor da sua glicemia pós-refeição."
+                        // Abre o modal de registro de glicemia já com a refeição e o intervalo selecionados no timer
+                        healthRepo.dismissPostMealTimerAlert()
+                        AlarmScheduler.cancelPostMealGlucoseAlarm(context)
+                        presetGlucoseSlot = DiabetesSlotCatalog.slotForPostMealTimer(
+                            mealLabel = selectedMealForTimer,
+                            durationSeconds = selectedDurationSeconds
                         )
+                        glucoseToEdit = null
+                        showAddGlucoseDialog = true
                     },
                     onLogPostMealGlucoseNow = {
                         healthRepo.dismissPostMealTimerAlert()
-                        presetGlucoseSlot = when {
-                            selectedMealForTimer.contains("Café", ignoreCase = true) -> DiabetesSlotCatalog.POS_CAFE_1H
-                            selectedMealForTimer.contains("Jantar", ignoreCase = true) -> DiabetesSlotCatalog.POS_JANTAR_1H
-                            else -> DiabetesSlotCatalog.POS_ALMOCO_1H
-                        }
+                        presetGlucoseSlot = DiabetesSlotCatalog.slotForPostMealTimer(
+                            mealLabel = selectedMealForTimer,
+                            durationSeconds = selectedDurationSeconds
+                        )
+                        glucoseToEdit = null
                         showAddGlucoseDialog = true
                     }
                 )
             }
         }
 
-        // 4. MÓDULOS ESPECÍFICOS DE SAÚDE: GLICEMIA (mg/dL) E/OU PRESSÃO ARTERIAL (mmHg) — SOMENTE SE MARCADOS NO QUESTIONÁRIO
+        // 4. MÓDULOS ESPECÍFICOS DE SAÚDE: MONITORAMENTO DE GLICEMIA (mg/dL) E/OU PRESSÃO ARTERIAL (mmHg)
         if (customizationConfig.diabetesEnabled || customizationConfig.bloodPressureEnabled) {
             item {
                 val activeClinicalMode = when {
@@ -474,11 +602,11 @@ fun HealthModuleScreen(
                 }
                 val cardTitle = when {
                     customizationConfig.diabetesEnabled && customizationConfig.bloodPressureEnabled ->
-                        "🩺 Medições de Glicemia & Pressão Arterial"
+                        "🩺 Monitoramento de Glicemia & Pressão (${activeMember.displayName})"
                     customizationConfig.diabetesEnabled ->
-                        "🩸 Monitoramento de Glicemia Capilar (mg/dL)"
+                        "🩸 Monitoramento de Glicemia (mg/dL) • ${activeMember.displayName}"
                     else ->
-                        "❤️ Monitoramento de Pressão Arterial (mmHg)"
+                        "❤️ Monitoramento de Pressão Arterial (mmHg) • ${activeMember.displayName}"
                 }
 
                 Card(
@@ -507,7 +635,7 @@ fun HealthModuleScreen(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "Registre com data, hora, valor e observações para o Relatório PDF",
+                                    text = "Histórico individual de ${activeMember.displayName} • Toque em um período para registrar",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -566,11 +694,17 @@ fun HealthModuleScreen(
                         }
 
                         if (activeClinicalMode == "GLUCOSE") {
-                            // Resumo + Botão Registrar Glicemia
+                            // Resumo + Botão Registrar Glicemia + Grade Interativa dos 10 Slots Diários (sem texto cortado)
                             val avgGlucose = remember(filteredGlucose) {
                                 if (filteredGlucose.isNotEmpty()) {
                                     filteredGlucose.map { it.valueMgDl }.average().roundToInt()
                                 } else 0
+                            }
+                            val measuredSlotsToday = remember(filteredGlucose, selectedEpochDay) {
+                                filteredGlucose
+                                    .filter { it.dateEpochDay == selectedEpochDay }
+                                    .map { DiabetesSlotCatalog.normalizeSlot(it.slot) }
+                                    .toSet()
                             }
 
                             Surface(
@@ -578,49 +712,114 @@ fun HealthModuleScreen(
                                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Row(
+                                Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(14.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = if (avgGlucose > 0) "Média Recente: $avgGlucose mg/dL" else "Sem medições registradas",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontFamily = JetBrainsMonoFontFamily,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        Text(
-                                            text = "Slots ativos: ${customizationConfig.diabetesSlots.joinToString(", ")}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Button(
-                                        onClick = {
-                                            presetGlucoseSlot = DiabetesSlotCatalog.JEJUM
-                                            showAddGlucoseDialog = true
-                                        },
-                                        shape = RoundedCornerShape(50),
-                                        modifier = Modifier.testTag("open_add_glucose_btn")
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("+ Glicemia")
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = if (avgGlucose > 0) "Média (${activeMember.displayName}): $avgGlucose mg/dL" else "Sem medições de ${activeMember.displayName}",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontFamily = JetBrainsMonoFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            Text(
+                                                text = "${measuredSlotsToday.size} de ${DiabetesSlotCatalog.allSlots.size} períodos medidos na data selecionada",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Button(
+                                            onClick = {
+                                                presetGlucoseSlot = DiabetesSlotCatalog.JEJUM
+                                                glucoseToEdit = null
+                                                showAddGlucoseDialog = true
+                                            },
+                                            shape = RoundedCornerShape(50),
+                                            modifier = Modifier.testTag("open_add_glucose_btn")
+                                        ) {
+                                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Glicemia", fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+
+                                    Text(
+                                        text = "Períodos Diários (toque em um período para registrar):",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    FlowRow(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        DiabetesSlotCatalog.allSlots.forEach { slotName ->
+                                            val isDoneToday = measuredSlotsToday.contains(slotName)
+                                            Surface(
+                                                shape = RoundedCornerShape(50),
+                                                color = if (isDoneToday) {
+                                                    IncomeEmerald.copy(alpha = 0.20f)
+                                                } else {
+                                                    MaterialTheme.colorScheme.surface
+                                                },
+                                                modifier = Modifier
+                                                    .border(
+                                                        width = 1.dp,
+                                                        color = if (isDoneToday) IncomeEmerald else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+                                                        shape = RoundedCornerShape(50)
+                                                    )
+                                                    .clip(RoundedCornerShape(50))
+                                                    .clickable {
+                                                        presetGlucoseSlot = slotName
+                                                        glucoseToEdit = null
+                                                        showAddGlucoseDialog = true
+                                                    }
+                                                    .testTag("glucose_slot_chip_$slotName")
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    if (isDoneToday) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.CheckCircle,
+                                                            contentDescription = "Medido hoje",
+                                                            tint = IncomeEmerald,
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                    }
+                                                    Text(
+                                                        text = slotName,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = if (isDoneToday) FontWeight.Bold else FontWeight.Medium,
+                                                        color = if (isDoneToday) IncomeEmerald else MaterialTheme.colorScheme.onSurface
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
 
-                            filteredGlucose.take(8).forEach { record ->
+                            filteredGlucose.take(15).forEach { record ->
                                 GlucoseRecordRowCard(
                                     record = record,
-                                    onDelete = { healthRepo.deleteGlucoseRecord(record.id) }
+                                    fallbackMemberName = activeMember.displayName,
+                                    onEdit = { glucoseToEdit = record },
+                                    onDelete = { glucoseToDelete = record }
                                 )
                             }
                         } else {
@@ -646,7 +845,7 @@ fun HealthModuleScreen(
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = if (avgSys > 0) "Média Recente: $avgSys/$avgDia mmHg" else "Sem aferições registradas",
+                                            text = if (avgSys > 0) "Média (${activeMember.displayName}): $avgSys/$avgDia mmHg" else "Sem aferições de ${activeMember.displayName}",
                                             style = MaterialTheme.typography.titleSmall,
                                             fontFamily = JetBrainsMonoFontFamily,
                                             fontWeight = FontWeight.Bold
@@ -659,21 +858,26 @@ fun HealthModuleScreen(
                                     }
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Button(
-                                        onClick = { showAddBpDialog = true },
+                                        onClick = {
+                                            bpToEdit = null
+                                            showAddBpDialog = true
+                                        },
                                         shape = RoundedCornerShape(50),
                                         modifier = Modifier.testTag("open_add_bp_btn")
                                     ) {
                                         Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("+ Pressão")
+                                        Text("Pressão", fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }
 
-                            filteredBp.take(8).forEach { record ->
+                            filteredBp.take(15).forEach { record ->
                                 BloodPressureRecordRowCard(
                                     record = record,
-                                    onDelete = { healthRepo.deleteBloodPressureRecord(record.id) }
+                                    fallbackMemberName = activeMember.displayName,
+                                    onEdit = { bpToEdit = record },
+                                    onDelete = { bpToDelete = record }
                                 )
                             }
                         }
@@ -1030,42 +1234,156 @@ fun HealthModuleScreen(
     // MODAIS DE CRIAÇÃO E REGISTRO
     // =========================================================================
 
-    if (showAddTrackerDialog) {
+    if (showAddTrackerDialog || trackerToEdit != null) {
+        val editing = trackerToEdit
         AddCustomTrackerDialog(
+            initialTracker = editing,
             defaultScope = if (scopeFilter == PrivacyScope.FAMILY) PrivacyScope.FAMILY else PrivacyScope.PERSONAL,
-            onDismiss = { showAddTrackerDialog = false },
-            onSave = { title, emoji, unit, target, step, colorHex, scope ->
-                healthRepo.addCustomTracker(title, emoji, unit, target, step, colorHex, scope)
+            onDismiss = {
                 showAddTrackerDialog = false
+                trackerToEdit = null
+            },
+            onSave = { title, emoji, unit, target, step, colorHex, scope ->
+                if (editing != null) {
+                    healthRepo.updateCustomTracker(editing.id, title, emoji, unit, target, step, colorHex, scope)
+                    triggerFeedback("Tracker \"$title\" atualizado com sucesso!")
+                } else {
+                    healthRepo.addCustomTracker(title, emoji, unit, target, step, colorHex, scope)
+                    triggerFeedback("Tracker \"$title\" criado com sucesso!")
+                }
+                showAddTrackerDialog = false
+                trackerToEdit = null
             }
         )
     }
 
-    if (showAddGlucoseDialog) {
+    trackerToDelete?.let { habit ->
+        OmniConfirmDeleteDialog(
+            title = "Excluir Tracker Diário?",
+            message = "Deseja excluir o tracker \"${habit.title}\"? Esta ação não pode ser desfeita.",
+            onConfirm = {
+                healthRepo.deleteTracker(habit.id)
+                triggerFeedback("Tracker \"${habit.title}\" excluído.")
+                trackerToDelete = null
+            },
+            onDismiss = { trackerToDelete = null }
+        )
+    }
+
+    if (showAddGlucoseDialog || glucoseToEdit != null) {
+        val editing = glucoseToEdit
         AddGlucoseRecordDialog(
-            initialEpochDay = selectedEpochDay,
-            initialSlot = presetGlucoseSlot,
-            availableSlots = customizationConfig.diabetesSlots.toList().ifEmpty { DiabetesSlotCatalog.allSlots },
-            defaultScope = if (scopeFilter == PrivacyScope.FAMILY) PrivacyScope.FAMILY else PrivacyScope.PERSONAL,
-            onDismiss = { showAddGlucoseDialog = false },
-            onSave = { epochDay, timeHHmm, slot, valMgDl, notes, scope ->
-                healthRepo.addGlucoseRecord(epochDay, timeHHmm, slot, valMgDl, notes, scope)
+            initialRecord = editing,
+            initialEpochDay = editing?.dateEpochDay ?: selectedEpochDay,
+            initialSlot = editing?.slot ?: presetGlucoseSlot,
+            availableSlots = DiabetesSlotCatalog.allSlots,
+            defaultScope = editing?.privacyScope ?: (if (scopeFilter == PrivacyScope.FAMILY) PrivacyScope.FAMILY else PrivacyScope.PERSONAL),
+            memberName = activeMember.displayName,
+            onDismiss = {
                 showAddGlucoseDialog = false
-                onShowBannerMessage("🩸 Glicemia registrada: $valMgDl mg/dL ($slot)")
+                glucoseToEdit = null
+            },
+            onSave = { epochDay, timeHHmm, slot, valMgDl, notes, scope ->
+                if (editing != null) {
+                    healthRepo.updateGlucoseRecord(
+                        recordId = editing.id,
+                        dateEpochDay = epochDay,
+                        timeHHmm = timeHHmm,
+                        slot = slot,
+                        valueMgDl = valMgDl,
+                        notes = notes,
+                        privacyScope = scope,
+                        memberId = activeMember.userId,
+                        memberName = activeMember.displayName
+                    )
+                    triggerFeedback("🩸 Glicemia de ${activeMember.displayName} atualizada: $valMgDl mg/dL ($slot)")
+                } else {
+                    healthRepo.addGlucoseRecord(
+                        dateEpochDay = epochDay,
+                        timeHHmm = timeHHmm,
+                        slot = slot,
+                        valueMgDl = valMgDl,
+                        notes = notes,
+                        privacyScope = scope,
+                        memberId = activeMember.userId,
+                        memberName = activeMember.displayName
+                    )
+                    triggerFeedback("🩸 Glicemia de ${activeMember.displayName} registrada: $valMgDl mg/dL ($slot)")
+                }
+                showAddGlucoseDialog = false
+                glucoseToEdit = null
             }
         )
     }
 
-    if (showAddBpDialog) {
+    glucoseToDelete?.let { rec ->
+        OmniConfirmDeleteDialog(
+            title = "Excluir Registro de Glicemia?",
+            message = "Deseja remover a medição de ${rec.valueMgDl} mg/dL (${rec.slot} em ${rec.dateIso})?",
+            onConfirm = {
+                healthRepo.deleteGlucoseRecord(rec.id)
+                triggerFeedback("Medição de glicemia removida.")
+                glucoseToDelete = null
+            },
+            onDismiss = { glucoseToDelete = null }
+        )
+    }
+
+    if (showAddBpDialog || bpToEdit != null) {
+        val editing = bpToEdit
         AddBloodPressureRecordDialog(
-            initialEpochDay = selectedEpochDay,
-            defaultScope = if (scopeFilter == PrivacyScope.FAMILY) PrivacyScope.FAMILY else PrivacyScope.PERSONAL,
-            onDismiss = { showAddBpDialog = false },
-            onSave = { epochDay, timeHHmm, sys, dia, pulse, notes, scope ->
-                healthRepo.addBloodPressureRecord(epochDay, timeHHmm, sys, dia, pulse, notes, scope)
+            initialRecord = editing,
+            initialEpochDay = editing?.dateEpochDay ?: selectedEpochDay,
+            defaultScope = editing?.privacyScope ?: (if (scopeFilter == PrivacyScope.FAMILY) PrivacyScope.FAMILY else PrivacyScope.PERSONAL),
+            onDismiss = {
                 showAddBpDialog = false
-                onShowBannerMessage("❤️ Pressão Arterial registrada: $sys/$dia mmHg ($pulse bpm)")
+                bpToEdit = null
+            },
+            onSave = { epochDay, timeHHmm, sys, dia, pulse, notes, scope ->
+                if (editing != null) {
+                    healthRepo.updateBloodPressureRecord(
+                        recordId = editing.id,
+                        dateEpochDay = epochDay,
+                        timeHHmm = timeHHmm,
+                        systolic = sys,
+                        diastolic = dia,
+                        pulseBpm = pulse,
+                        notes = notes,
+                        privacyScope = scope,
+                        memberId = activeMember.userId,
+                        memberName = activeMember.displayName
+                    )
+                    triggerFeedback("❤️ Pressão de ${activeMember.displayName} atualizada: $sys/$dia mmHg ($pulse bpm)")
+                } else {
+                    healthRepo.addBloodPressureRecord(
+                        dateEpochDay = epochDay,
+                        timeHHmm = timeHHmm,
+                        systolic = sys,
+                        diastolic = dia,
+                        pulseBpm = pulse,
+                        notes = notes,
+                        privacyScope = scope,
+                        memberId = activeMember.userId,
+                        memberName = activeMember.displayName
+                    )
+                    triggerFeedback("❤️ Pressão de ${activeMember.displayName} registrada: $sys/$dia mmHg ($pulse bpm)")
+                }
+                showAddBpDialog = false
+                bpToEdit = null
             }
+        )
+    }
+
+    bpToDelete?.let { rec ->
+        OmniConfirmDeleteDialog(
+            title = "Excluir Registro de Pressão?",
+            message = "Deseja remover a aferição de ${rec.systolic}/${rec.diastolic} mmHg (${rec.dateIso})?",
+            onConfirm = {
+                healthRepo.deleteBloodPressureRecord(rec.id)
+                triggerFeedback("Registro de pressão arterial removido.")
+                bpToDelete = null
+            },
+            onDismiss = { bpToDelete = null }
         )
     }
 
@@ -1085,13 +1403,13 @@ fun HealthModuleScreen(
                         Text("Módulo de Gestação Ativo", fontWeight = FontWeight.SemiBold)
                         Switch(checked = pregEnabled, onCheckedChange = { pregEnabled = it })
                     }
-                    OutlinedTextField(
-                        value = dppInput,
-                        onValueChange = { dppInput = it },
-                        label = { Text("Data Prevista do Parto - DPP (DD/MM/AAAA)") },
-                        placeholder = { Text("Ex: 15/03/2027") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                    MaskedDateTextField(
+                        dateValue = dppInput,
+                        onDateValueChange = { formatted, _ -> dppInput = formatted },
+                        label = "Data Prevista do Parto - DPP (DD/MM/AAAA)",
+                        placeholder = "Ex: 15/03/2027",
+                        modifier = Modifier.fillMaxWidth(),
+                        testTag = "edit_dpp_masked_input"
                     )
                 }
             },
@@ -1099,6 +1417,7 @@ fun HealthModuleScreen(
                 Button(
                     onClick = {
                         customizationRepo.updatePregnancyModule(pregEnabled, dppInput.trim())
+                        triggerFeedback("DPP salva com sucesso!")
                         showEditDppDialog = false
                     }
                 ) {
@@ -1191,6 +1510,7 @@ private fun DailyTrackerItemCard(
     onDecrement: () -> Unit,
     onIncrement: () -> Unit,
     onCompleteAll: () -> Unit,
+    onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
     val accentColor = remember(habit.colorHex) { Color(habit.colorHex.toInt()) }
@@ -1257,12 +1577,12 @@ private fun DailyTrackerItemCard(
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     IconButton(
                         onClick = onDecrement,
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(32.dp)
                             .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.surface)
                             .testTag("tracker_dec_${habit.id}")
@@ -1277,7 +1597,7 @@ private fun DailyTrackerItemCard(
                     FilledTonalButton(
                         onClick = onIncrement,
                         shape = RoundedCornerShape(50),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                         modifier = Modifier.testTag("tracker_inc_${habit.id}")
                     ) {
                         Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(15.dp))
@@ -1288,7 +1608,7 @@ private fun DailyTrackerItemCard(
                     if (!isDone) {
                         IconButton(
                             onClick = onCompleteAll,
-                            modifier = Modifier.size(34.dp)
+                            modifier = Modifier.size(32.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.CheckCircle,
@@ -1299,8 +1619,24 @@ private fun DailyTrackerItemCard(
                     }
 
                     IconButton(
+                        onClick = onEdit,
+                        modifier = Modifier
+                            .size(32.dp)
+                            .testTag("tracker_edit_${habit.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "Editar tracker",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    IconButton(
                         onClick = onDelete,
-                        modifier = Modifier.size(32.dp)
+                        modifier = Modifier
+                            .size(32.dp)
+                            .testTag("tracker_delete_${habit.id}")
                     ) {
                         Icon(
                             imageVector = Icons.Default.DeleteOutline,
@@ -1331,7 +1667,9 @@ private fun PostMealOneHourTimerCard(
     timerState: com.example.data.PostMealTimerState,
     liveRemainingSeconds: Int,
     selectedMeal: String,
+    selectedDurationSeconds: Int,
     onSelectMeal: (String) -> Unit,
+    onSelectDuration: (Int) -> Unit,
     onStartTimer: () -> Unit,
     onPauseResumeTimer: () -> Unit,
     onResetTimer: () -> Unit,
@@ -1407,17 +1745,17 @@ private fun PostMealOneHourTimerCard(
 
                     Column {
                         Text(
-                            text = "⏱️ Cronômetro 1h Pós-Refeição",
+                            text = "⏱️ Cronômetro Pós-Refeição com Alarme",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
                             text = if (timerState.isRunning) {
-                                "Contando 1h pós-$selectedMeal (Iniciado às ${timerState.startedAtHHmm})"
+                                "Contagem pós-$selectedMeal (Iniciado às ${timerState.startedAtHHmm})"
                             } else if (timerState.completedAlertPending) {
-                                "🔔 1 hora concluída! Hora de medir sua glicemia pós-$selectedMeal"
+                                "🔔 Tempo concluído! Hora de medir sua glicemia pós-$selectedMeal"
                             } else {
-                                "Inicie ao terminar a refeição para lembrar o momento exato da medição"
+                                "Escolha o tempo e a refeição para despertar o alarme exato de medição"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1435,17 +1773,51 @@ private fun PostMealOneHourTimerCard(
                 )
             }
 
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                HealthCatalog.mealOptions.forEach { meal ->
+                listOf(
+                    3600 to "1h (60 min)",
+                    5400 to "1h30 (90 min)",
+                    7200 to "2h (120 min)"
+                ).forEach { (secs, label) ->
                     FilterChip(
-                        selected = selectedMeal == meal,
-                        onClick = { onSelectMeal(meal) },
-                        label = { Text(meal) },
+                        selected = selectedDurationSeconds == secs,
+                        onClick = { onSelectDuration(secs) },
+                        label = { Text(label, fontWeight = FontWeight.Bold) },
                         shape = RoundedCornerShape(50)
                     )
+                }
+            }
+
+            // Grade uniforme 2x2 para as 4 refeições (Café da Manhã, Almoço, Lanche da Tarde, Jantar)
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                HealthCatalog.mealOptions.chunked(2).forEach { rowMeals ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        rowMeals.forEach { meal ->
+                            FilterChip(
+                                selected = selectedMeal == meal,
+                                onClick = { onSelectMeal(meal) },
+                                label = {
+                                    Text(
+                                        text = meal,
+                                        fontWeight = if (selectedMeal == meal) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
                 }
             }
 
@@ -1463,7 +1835,13 @@ private fun PostMealOneHourTimerCard(
                     ) {
                         Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Iniciar 1h Pós-Refeição", fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "Iniciar Cronômetro",
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 } else {
                     FilledTonalButton(
@@ -1479,7 +1857,12 @@ private fun PostMealOneHourTimerCard(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(if (timerState.isPaused) "Retomar" else "Pausar", fontWeight = FontWeight.Bold)
+                        Text(
+                            text = if (timerState.isPaused) "Retomar" else "Pausar",
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
                     }
 
                     OutlinedButton(
@@ -1489,7 +1872,7 @@ private fun PostMealOneHourTimerCard(
                     ) {
                         Icon(imageVector = Icons.Default.Refresh, contentDescription = "Zerar", modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Zerar")
+                        Text("Zerar", maxLines = 1, softWrap = false)
                     }
                 }
 
@@ -1499,12 +1882,12 @@ private fun PostMealOneHourTimerCard(
                     modifier = Modifier.testTag("test_1h_timer_alert_btn")
                 ) {
                     Icon(
-                        imageVector = Icons.Default.NotificationsActive,
+                        imageVector = Icons.Default.WaterDrop,
                         contentDescription = null,
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Medir Agora")
+                    Text("Medir Agora", fontWeight = FontWeight.Bold)
                 }
             }
 
@@ -1518,7 +1901,7 @@ private fun PostMealOneHourTimerCard(
                         .testTag("log_post_meal_glucose_cta_btn")
                 ) {
                     Text(
-                        text = "🩸 Registrar Glicemia 1h Pós-$selectedMeal Agora",
+                        text = "🩸 Registrar Glicemia Pós-$selectedMeal Agora",
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -1530,10 +1913,13 @@ private fun PostMealOneHourTimerCard(
 @Composable
 private fun GlucoseRecordRowCard(
     record: GlucoseRecord,
+    fallbackMemberName: String = "",
+    onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
     val isAlert = record.isAlert()
     val statusColor = if (isAlert) ExpenseCoral else IncomeEmerald
+    val displayMember = record.memberName.ifBlank { fallbackMemberName }
 
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -1553,7 +1939,7 @@ private fun GlucoseRecordRowCard(
             Column(modifier = Modifier.weight(1f)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
                         text = "${record.valueMgDl} mg/dL",
@@ -1573,35 +1959,57 @@ private fun GlucoseRecordRowCard(
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                         )
                     }
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = statusColor.copy(alpha = 0.18f)
-                    ) {
-                        Text(
-                            text = record.statusLabel(),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = statusColor,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                        )
+                    if (displayMember.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = MaterialTheme.colorScheme.primaryContainer
+                        ) {
+                            Text(
+                                text = "👤 $displayMember",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
                     }
                 }
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "${record.dateIso} às ${record.timeHHmm}" +
+                    text = "${record.statusLabel()} • ${DateCalendarUtils.formatEpochDayPt(record.dateEpochDay)} às ${record.timeHHmm}" +
                         if (record.notes.isNotBlank()) " • ${record.notes}" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    imageVector = Icons.Default.DeleteOutline,
-                    contentDescription = "Excluir medição",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp)
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onEdit,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("edit_glucose_${record.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Editar medição",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("delete_glucose_${record.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = "Excluir medição",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
         }
     }
@@ -1610,10 +2018,13 @@ private fun GlucoseRecordRowCard(
 @Composable
 private fun BloodPressureRecordRowCard(
     record: BloodPressureRecord,
+    fallbackMemberName: String = "",
+    onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
     val isAlert = record.isAlert()
     val statusColor = if (isAlert) ExpenseCoral else IncomeEmerald
+    val displayMember = record.memberName.ifBlank { fallbackMemberName }
 
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -1633,7 +2044,7 @@ private fun BloodPressureRecordRowCard(
             Column(modifier = Modifier.weight(1f)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
                         text = "${record.systolic}/${record.diastolic} mmHg",
@@ -1654,35 +2065,57 @@ private fun BloodPressureRecordRowCard(
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                         )
                     }
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = statusColor.copy(alpha = 0.18f)
-                    ) {
-                        Text(
-                            text = record.statusLabel(),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = statusColor,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                        )
+                    if (displayMember.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = MaterialTheme.colorScheme.primaryContainer
+                        ) {
+                            Text(
+                                text = "👤 $displayMember",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
                     }
                 }
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "${record.dateIso} às ${record.timeHHmm}" +
+                    text = "${record.statusLabel()} • ${DateCalendarUtils.formatEpochDayPt(record.dateEpochDay)} às ${record.timeHHmm}" +
                         if (record.notes.isNotBlank()) " • ${record.notes}" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    imageVector = Icons.Default.DeleteOutline,
-                    contentDescription = "Excluir aferição",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp)
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onEdit,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("edit_bp_${record.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Editar aferição",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("delete_bp_${record.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = "Excluir aferição",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
         }
     }
@@ -1691,6 +2124,7 @@ private fun BloodPressureRecordRowCard(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AddCustomTrackerDialog(
+    initialTracker: DailyTrackerHabit? = null,
     defaultScope: String,
     onDismiss: () -> Unit,
     onSave: (
@@ -1703,13 +2137,13 @@ private fun AddCustomTrackerDialog(
         privacyScope: String
     ) -> Unit
 ) {
-    var title by remember { mutableStateOf("") }
-    var emoji by remember { mutableStateOf("💧") }
-    var unit by remember { mutableStateOf("copos") }
-    var targetText by remember { mutableStateOf("8") }
-    var stepText by remember { mutableStateOf("1") }
-    var selectedColorHex by remember { mutableLongStateOf(0xFF0077B6L) }
-    var privacyScope by remember { mutableStateOf(defaultScope) }
+    var title by remember(initialTracker) { mutableStateOf(initialTracker?.title ?: "") }
+    var emoji by remember(initialTracker) { mutableStateOf(initialTracker?.emoji ?: "💧") }
+    var unit by remember(initialTracker) { mutableStateOf(initialTracker?.unit ?: "copos") }
+    var targetText by remember(initialTracker) { mutableStateOf(initialTracker?.targetValue?.toString() ?: "8") }
+    var stepText by remember(initialTracker) { mutableStateOf(initialTracker?.stepValue?.toString() ?: "1") }
+    var selectedColorHex by remember(initialTracker) { mutableLongStateOf(initialTracker?.colorHex ?: 0xFF0077B6L) }
+    var privacyScope by remember(initialTracker) { mutableStateOf(initialTracker?.privacyScope ?: defaultScope) }
 
     val emojiChoices = listOf("💧", "💊", "🚶", "🧘", "🍎", "🏋️", "😴", "🍵", "🦷", "🩸")
 
@@ -1717,7 +2151,7 @@ private fun AddCustomTrackerDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "Novo Inegociável (Tracker Diário)",
+                text = if (initialTracker != null) "Editar Tracker Diário" else "Novo Inegociável (Tracker Diário)",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
@@ -1825,7 +2259,7 @@ private fun AddCustomTrackerDialog(
                 enabled = title.isNotBlank(),
                 modifier = Modifier.testTag("confirm_save_tracker_btn")
             ) {
-                Text("Criar Tracker")
+                Text(if (initialTracker != null) "Salvar Alterações" else "Criar Tracker")
             }
         },
         dismissButton = {
@@ -1839,10 +2273,12 @@ private fun AddCustomTrackerDialog(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AddGlucoseRecordDialog(
+    initialRecord: GlucoseRecord? = null,
     initialEpochDay: Long,
     initialSlot: String,
     availableSlots: List<String>,
     defaultScope: String,
+    memberName: String = "",
     onDismiss: () -> Unit,
     onSave: (
         dateEpochDay: Long,
@@ -1853,35 +2289,57 @@ private fun AddGlucoseRecordDialog(
         privacyScope: String
     ) -> Unit
 ) {
-    var valueText by remember { mutableStateOf("") }
-    var timeText by remember { mutableStateOf(DateCalendarUtils.currentTimeHHmm()) }
-    var selectedSlot by remember { mutableStateOf(initialSlot) }
-    var notes by remember { mutableStateOf("") }
-    var privacyScope by remember { mutableStateOf(defaultScope) }
+    var dateDigitsOrFormatted by remember(initialRecord, initialEpochDay) {
+        mutableStateOf(OmniDateMaskUtils.epochDayToBrDate(initialRecord?.dateEpochDay ?: initialEpochDay))
+    }
+    var selectedEpochDay by remember(initialRecord, initialEpochDay) {
+        mutableLongStateOf(initialRecord?.dateEpochDay ?: initialEpochDay)
+    }
+    var valueText by remember(initialRecord) { mutableStateOf(initialRecord?.valueMgDl?.toString() ?: "") }
+    var timeText by remember(initialRecord) { mutableStateOf(initialRecord?.timeHHmm ?: DateCalendarUtils.currentTimeHHmm()) }
+    var selectedSlot by remember(initialRecord, initialSlot) {
+        mutableStateOf(DiabetesSlotCatalog.normalizeSlot(initialRecord?.slot ?: initialSlot))
+    }
+    var notes by remember(initialRecord) { mutableStateOf(initialRecord?.notes ?: "") }
+    var privacyScope by remember(initialRecord, defaultScope) { mutableStateOf(initialRecord?.privacyScope ?: defaultScope) }
 
     val allSlots = remember(availableSlots) {
-        (availableSlots + DiabetesSlotCatalog.allSlots).distinct()
+        (DiabetesSlotCatalog.allSlots + availableSlots).map { DiabetesSlotCatalog.normalizeSlot(it) }.distinct()
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(
-                text = "🩸 Registrar Medição de Glicemia",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
+            Column {
+                Text(
+                    text = if (initialRecord != null) "🩸 Editar Medição de Glicemia" else "🩸 Registrar Medição de Glicemia",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                if (memberName.isNotBlank()) {
+                    Text(
+                        text = "Paciente: $memberName",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
         },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(
-                    text = "Data: ${DateCalendarUtils.formatEpochDayPt(initialEpochDay)}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold
+                MaskedDateTextField(
+                    dateValue = dateDigitsOrFormatted,
+                    onDateValueChange = { formatted, parsedEpoch ->
+                        dateDigitsOrFormatted = formatted
+                        if (parsedEpoch != null) selectedEpochDay = parsedEpoch
+                    },
+                    label = "Data da Medição (DD/MM/AAAA)",
+                    modifier = Modifier.fillMaxWidth(),
+                    testTag = "glucose_date_masked_input"
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1945,13 +2403,14 @@ private fun AddGlucoseRecordDialog(
             Button(
                 onClick = {
                     if (parsedVal > 0) {
-                        onSave(initialEpochDay, timeText, selectedSlot, parsedVal, notes, privacyScope)
+                        val finalEpoch = OmniDateMaskUtils.parseBrDateToEpochDay(dateDigitsOrFormatted) ?: selectedEpochDay
+                        onSave(finalEpoch, timeText, selectedSlot, parsedVal, notes, privacyScope)
                     }
                 },
                 enabled = parsedVal > 0,
                 modifier = Modifier.testTag("confirm_save_glucose_btn")
             ) {
-                Text("Salvar Glicemia")
+                Text(if (initialRecord != null) "Atualizar Glicemia" else "Salvar Glicemia")
             }
         },
         dismissButton = {
@@ -1964,6 +2423,7 @@ private fun AddGlucoseRecordDialog(
 
 @Composable
 private fun AddBloodPressureRecordDialog(
+    initialRecord: BloodPressureRecord? = null,
     initialEpochDay: Long,
     defaultScope: String,
     onDismiss: () -> Unit,
@@ -1977,18 +2437,24 @@ private fun AddBloodPressureRecordDialog(
         privacyScope: String
     ) -> Unit
 ) {
-    var sysText by remember { mutableStateOf("120") }
-    var diaText by remember { mutableStateOf("80") }
-    var pulseText by remember { mutableStateOf("72") }
-    var timeText by remember { mutableStateOf(DateCalendarUtils.currentTimeHHmm()) }
-    var notes by remember { mutableStateOf("") }
-    var privacyScope by remember { mutableStateOf(defaultScope) }
+    var dateDigitsOrFormatted by remember(initialRecord, initialEpochDay) {
+        mutableStateOf(OmniDateMaskUtils.epochDayToBrDate(initialRecord?.dateEpochDay ?: initialEpochDay))
+    }
+    var selectedEpochDay by remember(initialRecord, initialEpochDay) {
+        mutableLongStateOf(initialRecord?.dateEpochDay ?: initialEpochDay)
+    }
+    var sysText by remember(initialRecord) { mutableStateOf(initialRecord?.systolic?.toString() ?: "120") }
+    var diaText by remember(initialRecord) { mutableStateOf(initialRecord?.diastolic?.toString() ?: "80") }
+    var pulseText by remember(initialRecord) { mutableStateOf(initialRecord?.pulseBpm?.toString() ?: "72") }
+    var timeText by remember(initialRecord) { mutableStateOf(initialRecord?.timeHHmm ?: DateCalendarUtils.currentTimeHHmm()) }
+    var notes by remember(initialRecord) { mutableStateOf(initialRecord?.notes ?: "") }
+    var privacyScope by remember(initialRecord, defaultScope) { mutableStateOf(initialRecord?.privacyScope ?: defaultScope) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "❤️ Registrar Pressão Arterial",
+                text = if (initialRecord != null) "❤️ Editar Pressão Arterial" else "❤️ Registrar Pressão Arterial",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
@@ -1998,11 +2464,15 @@ private fun AddBloodPressureRecordDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(
-                    text = "Data: ${DateCalendarUtils.formatEpochDayPt(initialEpochDay)}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold
+                MaskedDateTextField(
+                    dateValue = dateDigitsOrFormatted,
+                    onDateValueChange = { formatted, parsedEpoch ->
+                        dateDigitsOrFormatted = formatted
+                        if (parsedEpoch != null) selectedEpochDay = parsedEpoch
+                    },
+                    label = "Data da Aferição (DD/MM/AAAA)",
+                    modifier = Modifier.fillMaxWidth(),
+                    testTag = "bp_date_masked_input"
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2079,13 +2549,14 @@ private fun AddBloodPressureRecordDialog(
             Button(
                 onClick = {
                     if (sys > 0 && dia > 0) {
-                        onSave(initialEpochDay, timeText, sys, dia, pulse, notes, privacyScope)
+                        val finalEpoch = OmniDateMaskUtils.parseBrDateToEpochDay(dateDigitsOrFormatted) ?: selectedEpochDay
+                        onSave(finalEpoch, timeText, sys, dia, pulse, notes, privacyScope)
                     }
                 },
                 enabled = sys > 0 && dia > 0,
                 modifier = Modifier.testTag("confirm_save_bp_btn")
             ) {
-                Text("Salvar Pressão")
+                Text(if (initialRecord != null) "Atualizar Pressão" else "Salvar Pressão")
             }
         },
         dismissButton = {

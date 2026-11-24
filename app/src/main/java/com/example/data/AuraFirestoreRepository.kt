@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 import java.util.Locale
+import java.util.UUID
 
 class AuraFirestoreRepository(
     private val db: FirebaseFirestore,
@@ -116,15 +117,51 @@ class AuraFirestoreRepository(
         }
     }
 
-    fun defaultHouseholdIdForUser(userId: String): String {
-        if (isLocalOfflineMode()) {
-            return localStore?.userProfileFlow?.value?.householdId ?: "FAM_AURA_LOCAL"
+    private fun bankAccountsToFirestoreList(accounts: List<BankAccount>): List<Map<String, Any>> {
+        return accounts.map { acc ->
+            mapOf(
+                "id" to acc.id.take(64).ifBlank { "acc_" + UUID.randomUUID().toString().take(8) },
+                "name" to acc.name.take(80),
+                "institution" to acc.institution.take(60),
+                "initialBalanceBrl" to acc.initialBalanceBrl,
+                "creditLimitBrl" to acc.creditLimitBrl.coerceAtLeast(0.0),
+                "closingDay" to acc.closingDay.coerceIn(1, 31),
+                "dueDay" to acc.dueDay.coerceIn(1, 31),
+                "colorHex" to acc.colorHex,
+                "iconEmoji" to acc.iconEmoji.take(16),
+                "privacyScope" to acc.privacyScope.take(24)
+            )
         }
-        val suffix = userId.replace(Regex("[^a-zA-Z0-9]"), "").take(8).uppercase(Locale.ROOT)
-        return "FAM_${suffix.ifBlank { "AURA01" }}"
     }
 
-    // 1. UserProfile Stream & Initialization (including Member Visual Identity)
+    private fun muralItemsToFirestoreList(items: List<FamilyMuralItem>): List<Map<String, Any>> {
+        return items.take(200).map { item ->
+            mapOf(
+                "id" to item.id.take(64).ifBlank { "mural_" + UUID.randomUUID().toString().take(8) },
+                "title" to item.title.take(240),
+                "notes" to item.notes.take(800),
+                "category" to item.category.take(40).ifBlank { "Compras" },
+                "addedBy" to item.addedBy.take(80).ifBlank { "Família" },
+                "addedByColorHex" to item.addedByColorHex,
+                "checkedBy" to item.checkedBy.take(80),
+                "checkedByColorHex" to item.checkedByColorHex,
+                "completed" to item.completed,
+                "pinned" to item.pinned,
+                "isNote" to item.isNote,
+                "createdAtEpochMs" to item.createdAtEpochMs
+            )
+        }
+    }
+
+    fun defaultHouseholdIdForUser(userId: String): String {
+        if (isLocalOfflineMode()) {
+            return localStore?.userProfileFlow?.value?.householdId ?: "FAM_OMNI_LOCAL"
+        }
+        val suffix = userId.replace(Regex("[^a-zA-Z0-9]"), "").take(8).uppercase(Locale.ROOT)
+        return "FAM_${suffix.ifBlank { "OMNI01" }}"
+    }
+
+    // 1. UserProfile Stream & Initialization
     fun observeUserProfile(userId: String): Flow<UserProfile?> = flow {
         if (isLocalOfflineMode()) {
             emitAll(localStore!!.userProfileFlow)
@@ -173,7 +210,7 @@ class AuraFirestoreRepository(
                 .mapNotNull { it.firstOrNull()?.uppercaseChar() }
                 .take(2)
                 .joinToString("")
-                .ifBlank { "FA" }
+                .ifBlank { "OM" }
 
             val profile = if (snapshot.exists()) {
                 val loaded = snapshot.toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
@@ -246,7 +283,7 @@ class AuraFirestoreRepository(
                 )
                 val housePayload = mapOf(
                     "householdId" to houseId,
-                    "name" to "Família ${displayName.split(" ").firstOrNull() ?: "Aura"}",
+                    "name" to "Família ${displayName.split(" ").firstOrNull() ?: "Omni"}",
                     "ownerId" to uid,
                     "monthlyIncomeBrl" to 8500.0,
                     "needsPercentage" to 50L,
@@ -254,10 +291,41 @@ class AuraFirestoreRepository(
                     "savingsPercentage" to 20L,
                     "defaultSplitMode" to SplitMode.EQUAL,
                     "members" to memberBadgesToFirestoreList(listOf(initialMember)),
+                    "bankAccounts" to bankAccountsToFirestoreList(BankAccountCatalog.defaultAccounts()),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
                 houseRef.set(housePayload).await()
+            } else {
+                // Ensure current user is in the household members list
+                val existingHouse = houseSnap.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                if (existingHouse != null) {
+                    val hasMember = existingHouse.members.any { it.userId == uid }
+                    val hasAccounts = existingHouse.bankAccounts.isNotEmpty()
+                    if (!hasMember || !hasAccounts) {
+                        val updatedMembers = if (hasMember) {
+                            existingHouse.members
+                        } else {
+                            existingHouse.members + FamilyMemberBadge(
+                                userId = uid,
+                                displayName = profile.displayName.ifBlank { displayName },
+                                colorHex = profile.memberColorHex,
+                                avatarEmoji = profile.avatarEmoji,
+                                role = profile.memberRole
+                            )
+                        }
+                        val updatedAccounts = if (hasAccounts) existingHouse.bankAccounts else BankAccountCatalog.defaultAccounts()
+                        runCatching {
+                            houseRef.update(
+                                mapOf(
+                                    "members" to memberBadgesToFirestoreList(updatedMembers),
+                                    "bankAccounts" to bankAccountsToFirestoreList(updatedAccounts),
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
+                        }
+                    }
+                }
             }
 
             Result.success(profile)
@@ -284,7 +352,7 @@ class AuraFirestoreRepository(
                 .mapNotNull { it.firstOrNull()?.uppercaseChar() }
                 .take(2)
                 .joinToString("")
-                .ifBlank { "FA" }
+                .ifBlank { "OM" }
         }
         val validRole = if (memberRole in listOf("ADMIN", "ADULT", "TEEN", "CHILD")) memberRole else "ADMIN"
         val safeSplitPct = defaultSplitPercentage.coerceIn(0.0, 100.0)
@@ -334,7 +402,7 @@ class AuraFirestoreRepository(
         var docPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}"
         return try {
             val uid = requireUserId()
-            val validTheme = if (themeMode in listOf("SYSTEM", "LIGHT", "DARK")) themeMode else "SYSTEM"
+            val validTheme = if (themeMode in listOf("SYSTEM", "LIGHT", "DARK", "AMOLED")) themeMode else "SYSTEM"
             val ref = db.collection("users").document(uid)
             docPath = ref.path
             ref.update(
@@ -362,16 +430,26 @@ class AuraFirestoreRepository(
         return try {
             val uid = requireUserId()
             val targetHouseholdId = sanitizeHouseholdCode(newHouseholdCodeRaw)
-            val familyName = familyNameRaw.trim().take(80).ifBlank { "Orçamento Familiar" }
+            val familyName = familyNameRaw.trim().take(80).ifBlank { "Família Omni" }
 
             val userRef = db.collection("users").document(uid)
             currentPath = userRef.path
+            val userSnap = userRef.get().await()
+            val userProf = userSnap.toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
             userRef.update(
                 mapOf(
                     "householdId" to targetHouseholdId,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+
+            val myMemberBadge = FamilyMemberBadge(
+                userId = uid,
+                displayName = userProf?.displayName?.ifBlank { "Você" } ?: "Você",
+                colorHex = userProf?.memberColorHex ?: 0xFF0E7C5B,
+                avatarEmoji = userProf?.avatarEmoji?.ifBlank { "🌿" } ?: "🌿",
+                role = userProf?.memberRole?.ifBlank { "ADMIN" } ?: "ADMIN"
+            )
 
             val houseRef = db.collection("households").document(targetHouseholdId)
             currentPath = houseRef.path
@@ -386,11 +464,25 @@ class AuraFirestoreRepository(
                     "wantsPercentage" to 30L,
                     "savingsPercentage" to 20L,
                     "defaultSplitMode" to SplitMode.EQUAL,
-                    "members" to emptyList<Map<String, Any>>(),
+                    "members" to memberBadgesToFirestoreList(listOf(myMemberBadge)),
+                    "bankAccounts" to bankAccountsToFirestoreList(BankAccountCatalog.defaultAccounts()),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
                 houseRef.set(housePayload).await()
+            } else {
+                val existingHouse = snap.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                if (existingHouse != null && existingHouse.members.none { it.userId == uid }) {
+                    val updatedMembers = existingHouse.members + myMemberBadge
+                    runCatching {
+                        houseRef.update(
+                            mapOf(
+                                "members" to memberBadgesToFirestoreList(updatedMembers),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                }
             }
 
             Result.success(targetHouseholdId)
@@ -398,6 +490,156 @@ class AuraFirestoreRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.WRITE, currentPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun saveFamilyMember(
+        householdId: String,
+        currentHousehold: Household?,
+        member: FamilyMemberBadge
+    ): Result<Unit> {
+        if (isLocalOfflineMode()) {
+            localStore!!.saveFamilyMember(member)
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            requireUserId()
+            val cleanId = member.userId.ifBlank { "mem_" + UUID.randomUUID().toString().take(8) }
+            val cleanMember = member.copy(
+                userId = cleanId,
+                displayName = member.displayName.trim().take(80).ifBlank { "Familiar" },
+                avatarEmoji = member.avatarEmoji.trim().take(16).ifBlank { "👤" },
+                role = member.role.ifBlank { "ADULT" }
+            )
+            val existing = currentHousehold?.members.orEmpty().toMutableList()
+            val idx = existing.indexOfFirst { it.userId == cleanId }
+            if (idx >= 0) {
+                existing[idx] = cleanMember
+            } else {
+                existing.add(cleanMember)
+            }
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "members" to memberBadgesToFirestoreList(existing),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun removeFamilyMember(
+        householdId: String,
+        currentHousehold: Household?,
+        memberUserId: String
+    ): Result<Unit> {
+        if (isLocalOfflineMode()) {
+            localStore!!.removeFamilyMember(memberUserId)
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            val uid = requireUserId()
+            if (memberUserId == uid) {
+                return Result.failure(IllegalArgumentException("Você não pode remover a si mesmo da família."))
+            }
+            val updated = currentHousehold?.members.orEmpty().filterNot { it.userId == memberUserId }
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "members" to memberBadgesToFirestoreList(updated),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun saveBankAccount(
+        householdId: String,
+        currentHousehold: Household?,
+        account: BankAccount
+    ): Result<Unit> {
+        if (isLocalOfflineMode()) {
+            localStore!!.saveBankAccount(account)
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            requireUserId()
+            val cleanId = account.id.ifBlank { "acc_" + UUID.randomUUID().toString().take(8) }
+            val cleanAcc = account.copy(
+                id = cleanId,
+                name = account.name.trim().take(80).ifBlank { account.institution.ifBlank { "Conta" } },
+                institution = account.institution.trim().take(60).ifBlank { "Banco" },
+                iconEmoji = account.iconEmoji.trim().take(16).ifBlank { "🏦" }
+            )
+            val baseAccounts = currentHousehold?.bankAccounts.orEmpty().ifEmpty { BankAccountCatalog.defaultAccounts() }.toMutableList()
+            val idx = baseAccounts.indexOfFirst { it.id == cleanId }
+            if (idx >= 0) {
+                baseAccounts[idx] = cleanAcc
+            } else {
+                baseAccounts.add(cleanAcc)
+            }
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "bankAccounts" to bankAccountsToFirestoreList(baseAccounts),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteBankAccount(
+        householdId: String,
+        currentHousehold: Household?,
+        accountId: String
+    ): Result<Unit> {
+        if (isLocalOfflineMode()) {
+            localStore!!.deleteBankAccount(accountId)
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            requireUserId()
+            val baseAccounts = currentHousehold?.bankAccounts.orEmpty().ifEmpty { BankAccountCatalog.defaultAccounts() }
+            val remaining = baseAccounts.filterNot { it.id == accountId }.ifEmpty { BankAccountCatalog.defaultAccounts() }
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "bankAccounts" to bankAccountsToFirestoreList(remaining),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
             Result.failure(e)
         }
     }
@@ -416,7 +658,12 @@ class AuraFirestoreRepository(
                 .snapshots()
                 .map { snapshot ->
                     if (snapshot.exists()) {
-                        snapshot.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        val loaded = snapshot.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        if (loaded != null && loaded.bankAccounts.isEmpty()) {
+                            loaded.copy(bankAccounts = BankAccountCatalog.defaultAccounts())
+                        } else {
+                            loaded
+                        }
                     } else {
                         null
                     }
@@ -487,7 +734,102 @@ class AuraFirestoreRepository(
         }
     }
 
-    // 3. Tasks Observation & Mutations (under /households/{householdId}/tasks)
+    suspend fun updateCategoryBudget(
+        householdId: String,
+        currentHousehold: Household?,
+        category: String,
+        limitBrl: Double
+    ): Result<Unit> {
+        val cleanCat = category.trim().take(50)
+        if (cleanCat.isEmpty()) return Result.success(Unit)
+        localStore?.updateCategoryBudget(cleanCat, limitBrl)
+        if (isLocalOfflineMode()) {
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            requireUserId()
+            val updatedMap = currentHousehold?.categoryBudgetsBrl.orEmpty().toMutableMap()
+            if (limitBrl <= 0.0) {
+                updatedMap.remove(cleanCat)
+            } else {
+                updatedMap[cleanCat] = limitBrl.coerceAtMost(1_000_000_000.0)
+            }
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "categoryBudgetsBrl" to updatedMap,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun saveCustomCategories(
+        householdId: String,
+        categories: List<String>
+    ): Result<Unit> {
+        val cleanList = categories.map { it.trim().take(40) }.filter { it.isNotEmpty() }.distinct().take(60)
+        localStore?.saveCustomCategories(cleanList)
+        if (isLocalOfflineMode()) {
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            requireUserId()
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "customCategories" to cleanList,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun syncHouseholdMuralItems(
+        householdId: String,
+        items: List<FamilyMuralItem>
+    ): Result<Unit> {
+        localStore?.syncHouseholdMuralItems(items)
+        if (isLocalOfflineMode() || householdId.isBlank()) {
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            requireUserId()
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "muralItems" to muralItemsToFirestoreList(items),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    // 3. Tasks Observation & Mutations
     fun observeHouseholdTasks(householdId: String): Flow<List<TaskItem>> = flow {
         val currentUid = currentEffectiveUserId()
         if (isLocalOfflineMode()) {
@@ -513,7 +855,14 @@ class AuraFirestoreRepository(
             db.collection("households").document(householdId).collection("tasks")
                 .snapshots()
                 .map { snapshot ->
-                    snapshot.toObjects(TaskItem::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    snapshot.documents.mapNotNull { doc ->
+                        val base = doc.toObject(TaskItem::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        base?.copy(
+                            id = doc.id,
+                            isInbox = doc.getBoolean("isInbox") ?: doc.getBoolean("inbox") ?: base.isInbox,
+                            isEssential = doc.getBoolean("isEssential") ?: doc.getBoolean("essential") ?: base.isEssential
+                        )
+                    }
                         .filter { task ->
                             isVisibleForMember(
                                 currentUserId = uid,
@@ -553,9 +902,11 @@ class AuraFirestoreRepository(
         householdId: String,
         title: String,
         notes: String,
+        location: String = "",
         category: String,
         priority: String,
         dateEpochDay: Long,
+        endDateEpochDay: Long = 0L,
         alarmHour: Int,
         alarmMinute: Int,
         alarmEnabled: Boolean,
@@ -579,21 +930,26 @@ class AuraFirestoreRepository(
         iconEmoji: String = "📋",
         taskColorHex: Long = assignedMemberColorHex,
         recurrence: String = TaskRecurrence.ONCE,
+        recurrenceWeekdays: List<Int> = emptyList(),
         subtasks: List<SubtaskItem> = emptyList(),
-        ringtoneCategory: String = "SUAVE"
+        ringtoneCategory: String = "APP_DEFAULT"
     ): Result<String> {
         val validScope = sanitizePrivacyScope(privacyScope)
         val validSplit = sanitizeSplitMode(splitMode)
         val safeCost = estimatedCostBrl.coerceIn(0.0, 1_000_000_000.0)
+        val safeEndEpoch = if (endDateEpochDay >= dateEpochDay) endDateEpochDay else 0L
+        val safeWeekdays = recurrenceWeekdays.filter { it in 1..7 }.distinct().sorted()
 
         if (isLocalOfflineMode()) {
             val id = localStore!!.addTask(
                 householdId = householdId,
                 title = title,
                 notes = notes,
+                location = location,
                 category = category,
                 priority = priority,
                 dateEpochDay = dateEpochDay,
+                endDateEpochDay = safeEndEpoch,
                 alarmHour = alarmHour,
                 alarmMinute = alarmMinute,
                 alarmEnabled = if (isInbox) false else alarmEnabled,
@@ -617,6 +973,7 @@ class AuraFirestoreRepository(
                 iconEmoji = iconEmoji,
                 taskColorHex = taskColorHex,
                 recurrence = recurrence,
+                recurrenceWeekdays = safeWeekdays,
                 subtasks = subtasks,
                 ringtoneCategory = ringtoneCategory
             )
@@ -628,6 +985,7 @@ class AuraFirestoreRepository(
             val cleanTitle = title.trim().take(140)
             require(cleanTitle.isNotEmpty()) { "Informe o título da tarefa." }
             val cleanNotes = notes.trim().take(500)
+            val cleanLocation = location.trim().take(160)
             val cleanCategory = category.trim().take(50).ifBlank { "Geral" }
             val validPriority = if (priority in listOf("LOW", "MEDIUM", "HIGH")) priority else "MEDIUM"
             val yearMonth = DateCalendarUtils.yearMonthFromEpochDay(dateEpochDay)
@@ -639,22 +997,26 @@ class AuraFirestoreRepository(
                 "householdId" to householdId,
                 "title" to cleanTitle,
                 "notes" to cleanNotes,
+                "location" to cleanLocation,
                 "category" to cleanCategory,
                 "priority" to validPriority,
                 "isEssential" to isEssential,
                 "dateEpochDay" to dateEpochDay.coerceIn(0L, 100000L),
+                "endDateEpochDay" to safeEndEpoch.coerceIn(0L, 100000L),
                 "yearMonth" to yearMonth,
                 "alarmHour" to alarmHour.coerceIn(0, 23).toLong(),
                 "alarmMinute" to alarmMinute.coerceIn(0, 59).toLong(),
                 "alarmEnabled" to (if (isInbox) false else alarmEnabled),
                 "completed" to false,
+                "completedDates" to emptyList<String>(),
+                "recurrenceWeekdays" to safeWeekdays,
                 "isInbox" to isInbox,
                 "durationMinutes" to durationMinutes.coerceIn(5, 720),
                 "iconEmoji" to iconEmoji.trim().take(16).ifBlank { "📋" },
                 "taskColorHex" to taskColorHex,
                 "recurrence" to recurrence.trim().take(24).ifBlank { TaskRecurrence.ONCE },
                 "subtasks" to subtasksToFirestoreList(subtasks),
-                "ringtoneCategory" to ringtoneCategory.trim().take(24).ifBlank { "SUAVE" },
+                "ringtoneCategory" to ringtoneCategory.trim().take(256).ifBlank { "APP_DEFAULT" },
                 "privacyScope" to validScope,
                 "visibleToMemberIds" to visibleToMemberIds.take(20),
                 "assignedMemberId" to assignedMemberId.take(128).ifBlank { uid },
@@ -680,6 +1042,113 @@ class AuraFirestoreRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateTask(
+        householdId: String,
+        taskId: String,
+        title: String,
+        notes: String,
+        location: String = "",
+        category: String,
+        priority: String,
+        dateEpochDay: Long,
+        endDateEpochDay: Long = 0L,
+        alarmHour: Int,
+        alarmMinute: Int,
+        alarmEnabled: Boolean,
+        privacyScope: String,
+        estimatedCostBrl: Double,
+        autoCreateExpenseOnComplete: Boolean,
+        isEssential: Boolean,
+        isInbox: Boolean,
+        durationMinutes: Int,
+        iconEmoji: String,
+        taskColorHex: Long,
+        recurrence: String,
+        recurrenceWeekdays: List<Int> = emptyList(),
+        subtasks: List<SubtaskItem>,
+        ringtoneCategory: String
+    ): Result<Unit> {
+        val validScope = sanitizePrivacyScope(privacyScope)
+        val safeCost = estimatedCostBrl.coerceIn(0.0, 1_000_000_000.0)
+        val safeEndEpoch = if (endDateEpochDay >= dateEpochDay) endDateEpochDay else 0L
+        val safeWeekdays = recurrenceWeekdays.filter { it in 1..7 }.distinct().sorted()
+        if (isLocalOfflineMode()) {
+            localStore!!.updateTask(
+                taskId = taskId,
+                title = title,
+                notes = notes,
+                location = location,
+                category = category,
+                priority = priority,
+                dateEpochDay = dateEpochDay,
+                endDateEpochDay = safeEndEpoch,
+                alarmHour = alarmHour,
+                alarmMinute = alarmMinute,
+                alarmEnabled = alarmEnabled,
+                privacyScope = validScope,
+                estimatedCostBrl = safeCost,
+                autoCreateExpenseOnComplete = autoCreateExpenseOnComplete,
+                isEssential = isEssential,
+                isInbox = isInbox,
+                durationMinutes = durationMinutes,
+                iconEmoji = iconEmoji,
+                taskColorHex = taskColorHex,
+                recurrence = recurrence,
+                recurrenceWeekdays = safeWeekdays,
+                subtasks = subtasks,
+                ringtoneCategory = ringtoneCategory
+            )
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId/tasks/$taskId"
+        return try {
+            requireUserId()
+            val cleanTitle = title.trim().take(140)
+            require(cleanTitle.isNotEmpty()) { "Informe o título da tarefa." }
+            val cleanNotes = notes.trim().take(500)
+            val cleanLocation = location.trim().take(160)
+            val cleanCategory = category.trim().take(50).ifBlank { "Geral" }
+            val validPriority = if (priority in listOf("LOW", "MEDIUM", "HIGH")) priority else "MEDIUM"
+            val yearMonth = DateCalendarUtils.yearMonthFromEpochDay(dateEpochDay)
+            val ref = db.collection("households").document(householdId).collection("tasks").document(taskId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "title" to cleanTitle,
+                    "notes" to cleanNotes,
+                    "location" to cleanLocation,
+                    "category" to cleanCategory,
+                    "priority" to validPriority,
+                    "isEssential" to isEssential,
+                    "dateEpochDay" to dateEpochDay.coerceIn(0L, 100000L),
+                    "endDateEpochDay" to safeEndEpoch.coerceIn(0L, 100000L),
+                    "yearMonth" to yearMonth,
+                    "alarmHour" to alarmHour.coerceIn(0, 23).toLong(),
+                    "alarmMinute" to alarmMinute.coerceIn(0, 59).toLong(),
+                    "alarmEnabled" to (if (isInbox) false else alarmEnabled),
+                    "isInbox" to isInbox,
+                    "durationMinutes" to durationMinutes.coerceIn(5, 720),
+                    "iconEmoji" to iconEmoji.trim().take(16).ifBlank { "📋" },
+                    "taskColorHex" to taskColorHex,
+                    "recurrence" to recurrence.trim().take(24).ifBlank { TaskRecurrence.ONCE },
+                    "recurrenceWeekdays" to safeWeekdays,
+                    "subtasks" to subtasksToFirestoreList(subtasks),
+                    "ringtoneCategory" to ringtoneCategory.trim().take(256).ifBlank { "APP_DEFAULT" },
+                    "privacyScope" to validScope,
+                    "estimatedCostBrl" to safeCost,
+                    "autoCreateExpenseOnComplete" to autoCreateExpenseOnComplete,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
             Result.failure(e)
         }
     }
@@ -802,13 +1271,13 @@ class AuraFirestoreRepository(
         householdId: String,
         taskId: String,
         completed: Boolean,
+        targetDateIso: String = "",
         completedByUserId: String = "",
         completedByName: String = "Família",
         taskForAutoExpense: TaskItem? = null
     ): Result<Unit> {
         var generatedTxId: String? = null
 
-        // If task is configured to automatically create a linked expense when completed
         if (completed && taskForAutoExpense != null &&
             taskForAutoExpense.autoCreateExpenseOnComplete &&
             taskForAutoExpense.estimatedCostBrl > 0.0 &&
@@ -845,6 +1314,7 @@ class AuraFirestoreRepository(
             localStore!!.toggleTaskCompleted(
                 taskId = taskId,
                 completed = completed,
+                targetDateIso = targetDateIso,
                 completedByUserId = completedByUserId.ifBlank { LocalOfflineStore.LOCAL_USER_ID },
                 completedByName = completedByName,
                 linkedTransactionId = generatedTxId
@@ -860,8 +1330,21 @@ class AuraFirestoreRepository(
             require(householdId.isNotBlank() && taskId.isNotBlank()) { "ID da tarefa inválido." }
             val ref = db.collection("households").document(householdId).collection("tasks").document(taskId)
             docPath = ref.path
+            val currentDates = taskForAutoExpense?.completedDates.orEmpty()
+            val updatedDates = if (targetDateIso.isNotBlank()) {
+                if (completed) {
+                    (currentDates + targetDateIso).distinct().sorted()
+                } else {
+                    currentDates.filterNot { it == targetDateIso }
+                }
+            } else {
+                currentDates
+            }
+            val isRecurring = taskForAutoExpense?.isRecurringOrMultiDay ?: false
+            val globalCompleted = if (isRecurring) false else completed
             val updates = mutableMapOf<String, Any>(
-                "completed" to completed,
+                "completed" to globalCompleted,
+                "completedDates" to updatedDates,
                 "completedByUserId" to if (completed) completedByUserId.ifBlank { uid } else "",
                 "completedByName" to if (completed) completedByName.take(80) else "",
                 "updatedAt" to FieldValue.serverTimestamp()
@@ -912,7 +1395,7 @@ class AuraFirestoreRepository(
         }
     }
 
-    // 4. Finance Transactions Observation & Mutations (under /households/{householdId}/transactions)
+    // 4. Finance Transactions Observation & Mutations
     fun observeHouseholdTransactions(householdId: String): Flow<List<FinanceTransaction>> = flow {
         val currentUid = currentEffectiveUserId()
         if (isLocalOfflineMode()) {
@@ -938,7 +1421,15 @@ class AuraFirestoreRepository(
             db.collection("households").document(householdId).collection("transactions")
                 .snapshots()
                 .map { snapshot ->
-                    snapshot.toObjects(FinanceTransaction::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    snapshot.documents.mapNotNull { doc ->
+                        val base = doc.toObject(FinanceTransaction::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        base?.copy(
+                            id = doc.id,
+                            isRecurring = doc.getBoolean("isRecurring") ?: doc.getBoolean("recurring") ?: base.isRecurring,
+                            isCreditCard = doc.getBoolean("isCreditCard") ?: doc.getBoolean("creditCard") ?: base.isCreditCard,
+                            isPaid = doc.getBoolean("isPaid") ?: doc.getBoolean("paid") ?: base.isPaid
+                        )
+                    }
                         .filter { tx ->
                             isVisibleForMember(
                                 currentUserId = uid,
@@ -989,7 +1480,16 @@ class AuraFirestoreRepository(
         splitSharesMap: Map<String, Double> = emptyMap(),
         splitShares: List<ExpenseSplitShare> = emptyList(),
         linkedTaskId: String = "",
-        generateCalendarTask: Boolean = false
+        generateCalendarTask: Boolean = false,
+        accountId: String = "acc_nubank",
+        accountName: String = "Nubank",
+        destinationAccountId: String = "",
+        destinationAccountName: String = "",
+        isRecurring: Boolean = false,
+        isCreditCard: Boolean = false,
+        installmentCount: Int = 1,
+        isPaid: Boolean = !isCreditCard,
+        accountClosingDay: Int = 25
     ): Result<String> {
         val validScope = sanitizePrivacyScope(privacyScope)
         val validSplit = sanitizeSplitMode(splitMode)
@@ -1021,7 +1521,15 @@ class AuraFirestoreRepository(
                 splitSharesMap = splitSharesMap,
                 splitShares = splitShares,
                 linkedTaskId = resolvedLinkedTaskId,
-                generateCalendarTask = generateCalendarTask
+                generateCalendarTask = generateCalendarTask,
+                accountId = accountId,
+                accountName = accountName,
+                destinationAccountId = destinationAccountId,
+                destinationAccountName = destinationAccountName,
+                isRecurring = isRecurring,
+                isCreditCard = isCreditCard,
+                installmentCount = installmentCount,
+                isPaid = isPaid
             )
             if (generateCalendarTask && resolvedLinkedTaskId.isBlank()) {
                 val scopeLabel = if (validScope == PrivacyScope.PERSONAL) "Conta Individual" else "Conta Familiar"
@@ -1064,61 +1572,104 @@ class AuraFirestoreRepository(
 
             val validCurrency = if (currency in listOf("BRL", "USD", "EUR", "GBP")) currency else "BRL"
             val safeRate = if (validCurrency == "BRL") 1.0 else exchangeRateToBrl.coerceIn(0.01, 10000.0)
-            val amountBrl = (Math.round(amountOriginal * safeRate * 100.0) / 100.0).coerceAtLeast(0.01)
-            val validType = if (type in listOf("EXPENSE", "INCOME")) type else "EXPENSE"
-            val validBucket = if (validType == "INCOME") {
-                "INCOME"
-            } else if (budgetBucket in listOf("NEEDS", "WANTS", "SAVINGS")) {
-                budgetBucket
-            } else {
-                "NEEDS"
+            val validType = if (type in listOf("EXPENSE", "INCOME", "TRANSFER")) type else "EXPENSE"
+            val validBucket = when (validType) {
+                "INCOME" -> "INCOME"
+                "TRANSFER" -> "TRANSFER"
+                else -> if (budgetBucket in listOf("NEEDS", "WANTS", "SAVINGS")) budgetBucket else "NEEDS"
             }
             val cleanCategory = category.trim().take(50).ifBlank { "Geral" }
-            val yearMonth = DateCalendarUtils.yearMonthFromEpochDay(dateEpochDay)
             val cleanAuthor = createdByName.trim().take(80).ifBlank { "Família" }
             val cleanResponsible = responsibleMemberName.trim().take(80).ifBlank { cleanAuthor }
 
-            val docRef = db.collection("households").document(householdId).collection("transactions").document()
-            docPath = docRef.path
-            val payload = mapOf(
-                "userId" to uid,
-                "householdId" to householdId,
-                "title" to cleanTitle,
-                "amountOriginal" to amountOriginal,
-                "currency" to validCurrency,
-                "exchangeRateToBrl" to safeRate,
-                "amountBrl" to amountBrl,
-                "type" to validType,
-                "budgetBucket" to validBucket,
-                "category" to cleanCategory,
-                "dateEpochDay" to dateEpochDay.coerceIn(0L, 100000L),
-                "yearMonth" to yearMonth,
-                "recurringSourceId" to recurringSourceId.take(128),
-                "createdByName" to cleanAuthor,
-                "createdByColorHex" to createdByColorHex,
-                "createdByEmoji" to createdByEmoji.trim().take(16).ifBlank { "🌿" },
-                "privacyScope" to validScope,
-                "visibleToMemberIds" to visibleToMemberIds.take(20),
-                "responsibleMemberId" to responsibleMemberId.take(128).ifBlank { uid },
-                "responsibleMemberName" to cleanResponsible,
-                "responsibleMemberColorHex" to responsibleMemberColorHex,
-                "responsibleMemberEmoji" to responsibleMemberEmoji.trim().take(16).ifBlank { "🌿" },
-                "splitMode" to validSplit,
-                "splitWithMemberIds" to splitWithMemberIds.take(20),
-                "splitSharesMap" to splitSharesMap,
-                "splitShares" to splitSharesToFirestoreList(splitShares),
-                "linkedTaskId" to linkedTaskId.take(128),
-                "generateCalendarTask" to generateCalendarTask,
-                "createdAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-            docRef.set(payload).await()
-            if (generateCalendarTask && linkedTaskId.isBlank()) {
+            val safeInstallments = if (validType == "EXPENSE" && isCreditCard) installmentCount.coerceIn(1, 48) else 1
+            val parentGroupId = if (safeInstallments > 1) "grp_" + UUID.randomUUID().toString().take(8) else ""
+            val rawBaseYm = DateCalendarUtils.yearMonthFromEpochDay(dateEpochDay)
+            val (_, _, baseDay) = DateCalendarUtils.fromEpochDay(dateEpochDay)
+            val safeClosingDay = accountClosingDay.coerceIn(1, 31)
+            // Compras no crédito lançadas após o dia de fechamento do cartão entram automaticamente na fatura do mês seguinte
+            val baseYm = if (validType == "EXPENSE" && isCreditCard && baseDay > safeClosingDay) {
+                DateCalendarUtils.shiftYearMonth(rawBaseYm, 1)
+            } else {
+                rawBaseYm
+            }
+
+            val perInstallmentOriginal = (Math.round((amountOriginal / safeInstallments) * 100.0) / 100.0).coerceAtLeast(0.01)
+            val perInstallmentBrl = (Math.round(perInstallmentOriginal * safeRate * 100.0) / 100.0).coerceAtLeast(0.01)
+
+            var firstDocId = ""
+            for (idx in 0 until safeInstallments) {
+                val docRef = db.collection("households").document(householdId).collection("transactions").document()
+                if (idx == 0) {
+                    firstDocId = docRef.id
+                    docPath = docRef.path
+                }
+                val targetYm = if (idx == 0) baseYm else DateCalendarUtils.shiftYearMonth(baseYm, idx)
+                val targetEpochDay = if (idx == 0) {
+                    dateEpochDay
+                } else {
+                    val parts = targetYm.split("-")
+                    val y = parts.getOrNull(0)?.toIntOrNull() ?: 2026
+                    val m = (parts.getOrNull(1)?.toIntOrNull() ?: 1).coerceIn(1, 12)
+                    val maxDay = DateCalendarUtils.daysInMonth(y, m)
+                    DateCalendarUtils.toEpochDay(y, m, baseDay.coerceIn(1, maxDay))
+                }
+                val displayTitle = if (safeInstallments > 1) {
+                    "$cleanTitle (${idx + 1}/$safeInstallments)".take(140)
+                } else {
+                    cleanTitle
+                }
+                val payload = mapOf(
+                    "userId" to uid,
+                    "householdId" to householdId,
+                    "title" to displayTitle,
+                    "amountOriginal" to perInstallmentOriginal,
+                    "currency" to validCurrency,
+                    "exchangeRateToBrl" to safeRate,
+                    "amountBrl" to perInstallmentBrl,
+                    "type" to validType,
+                    "budgetBucket" to validBucket,
+                    "category" to cleanCategory,
+                    "dateEpochDay" to targetEpochDay.coerceIn(0L, 100000L),
+                    "yearMonth" to targetYm,
+                    "recurringSourceId" to recurringSourceId.take(128),
+                    "createdByName" to cleanAuthor,
+                    "createdByColorHex" to createdByColorHex,
+                    "createdByEmoji" to createdByEmoji.trim().take(16).ifBlank { "🌿" },
+                    "privacyScope" to validScope,
+                    "visibleToMemberIds" to visibleToMemberIds.take(20),
+                    "responsibleMemberId" to responsibleMemberId.take(128).ifBlank { uid },
+                    "responsibleMemberName" to cleanResponsible,
+                    "responsibleMemberColorHex" to responsibleMemberColorHex,
+                    "responsibleMemberEmoji" to responsibleMemberEmoji.trim().take(16).ifBlank { "🌿" },
+                    "splitMode" to validSplit,
+                    "splitWithMemberIds" to splitWithMemberIds.take(20),
+                    "splitSharesMap" to splitSharesMap,
+                    "splitShares" to splitSharesToFirestoreList(splitShares),
+                    "linkedTaskId" to (if (idx == 0) linkedTaskId.take(128) else ""),
+                    "generateCalendarTask" to (if (idx == 0) generateCalendarTask else false),
+                    "accountId" to accountId.take(64).ifBlank { "acc_nubank" },
+                    "accountName" to accountName.take(80).ifBlank { "Nubank" },
+                    "destinationAccountId" to destinationAccountId.take(64),
+                    "destinationAccountName" to destinationAccountName.take(80),
+                    "isRecurring" to isRecurring,
+                    "isCreditCard" to (validType == "EXPENSE" && isCreditCard),
+                    "installmentCount" to safeInstallments,
+                    "installmentIndex" to (idx + 1),
+                    "parentTransactionId" to parentGroupId,
+                    "isPaid" to (if (validType == "EXPENSE" && isCreditCard) isPaid else true),
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(payload).await()
+            }
+
+            if (generateCalendarTask && linkedTaskId.isBlank() && firstDocId.isNotBlank()) {
                 val scopeLabel = if (validScope == PrivacyScope.PERSONAL) "Conta Individual" else "Conta Familiar"
                 val taskRes = addTask(
                     householdId = householdId,
                     title = "Pagar: $cleanTitle",
-                    notes = "$scopeLabel • Valor: ${formatCurrencyOriginal(amountOriginal, validCurrency)}",
+                    notes = "$scopeLabel • Valor: ${formatCurrencyOriginal(perInstallmentOriginal, validCurrency)}",
                     category = "Finanças",
                     priority = "HIGH",
                     dateEpochDay = dateEpochDay,
@@ -1133,28 +1684,156 @@ class AuraFirestoreRepository(
                     assignedMemberEmoji = if (validScope == PrivacyScope.PERSONAL) "🔒" else responsibleMemberEmoji,
                     createdByName = cleanAuthor,
                     createdByColorHex = createdByColorHex,
-                    linkedTransactionId = docRef.id,
-                    estimatedCostBrl = amountBrl,
+                    linkedTransactionId = firstDocId,
+                    estimatedCostBrl = perInstallmentBrl,
                     splitMode = validSplit,
                     splitShares = splitShares
                 )
                 val newTaskId = taskRes.getOrNull()
                 if (!newTaskId.isNullOrBlank()) {
                     runCatching {
-                        docRef.update(
-                            mapOf(
-                                "linkedTaskId" to newTaskId,
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                        ).await()
+                        db.collection("households").document(householdId)
+                            .collection("transactions").document(firstDocId)
+                            .update(
+                                mapOf(
+                                    "linkedTaskId" to newTaskId,
+                                    "updatedAt" to FieldValue.serverTimestamp()
+                                )
+                            ).await()
                     }
                 }
             }
-            Result.success(docRef.id)
+            Result.success(firstDocId)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateTransaction(
+        householdId: String,
+        transactionId: String,
+        title: String,
+        amountOriginal: Double,
+        currency: String,
+        exchangeRateToBrl: Double,
+        type: String,
+        budgetBucket: String,
+        category: String,
+        dateEpochDay: Long,
+        privacyScope: String,
+        accountId: String,
+        accountName: String,
+        destinationAccountId: String = "",
+        destinationAccountName: String = "",
+        isRecurring: Boolean = false,
+        isCreditCard: Boolean = false,
+        isPaid: Boolean = !isCreditCard
+    ): Result<Unit> {
+        val validScope = sanitizePrivacyScope(privacyScope)
+        if (isLocalOfflineMode()) {
+            localStore!!.updateTransaction(
+                txId = transactionId,
+                title = title,
+                amountOriginal = amountOriginal,
+                currency = currency,
+                exchangeRateToBrl = exchangeRateToBrl,
+                type = type,
+                budgetBucket = budgetBucket,
+                category = category,
+                dateEpochDay = dateEpochDay,
+                privacyScope = validScope,
+                accountId = accountId,
+                accountName = accountName,
+                destinationAccountId = destinationAccountId,
+                destinationAccountName = destinationAccountName,
+                isRecurring = isRecurring,
+                isCreditCard = isCreditCard,
+                isPaid = isPaid
+            )
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId/transactions/$transactionId"
+        return try {
+            requireUserId()
+            val cleanTitle = title.trim().take(140)
+            require(cleanTitle.isNotEmpty()) { "Informe a descrição." }
+            require(amountOriginal > 0.0) { "O valor deve ser maior que zero." }
+            val validCurrency = if (currency in listOf("BRL", "USD", "EUR", "GBP")) currency else "BRL"
+            val safeRate = if (validCurrency == "BRL") 1.0 else exchangeRateToBrl.coerceIn(0.01, 10000.0)
+            val amountBrl = (Math.round(amountOriginal * safeRate * 100.0) / 100.0).coerceAtLeast(0.01)
+            val validType = if (type in listOf("EXPENSE", "INCOME", "TRANSFER")) type else "EXPENSE"
+            val validBucket = when (validType) {
+                "INCOME" -> "INCOME"
+                "TRANSFER" -> "TRANSFER"
+                else -> if (budgetBucket in listOf("NEEDS", "WANTS", "SAVINGS")) budgetBucket else "NEEDS"
+            }
+            val ym = DateCalendarUtils.yearMonthFromEpochDay(dateEpochDay)
+            val ref = db.collection("households").document(householdId).collection("transactions").document(transactionId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "title" to cleanTitle,
+                    "amountOriginal" to amountOriginal,
+                    "currency" to validCurrency,
+                    "exchangeRateToBrl" to safeRate,
+                    "amountBrl" to amountBrl,
+                    "type" to validType,
+                    "budgetBucket" to validBucket,
+                    "category" to category.trim().take(50).ifBlank { "Geral" },
+                    "dateEpochDay" to dateEpochDay.coerceIn(0L, 100000L),
+                    "yearMonth" to ym,
+                    "privacyScope" to validScope,
+                    "accountId" to accountId.take(64).ifBlank { "acc_nubank" },
+                    "accountName" to accountName.take(80).ifBlank { "Nubank" },
+                    "destinationAccountId" to destinationAccountId.take(64),
+                    "destinationAccountName" to destinationAccountName.take(80),
+                    "isRecurring" to isRecurring,
+                    "isCreditCard" to (validType == "EXPENSE" && isCreditCard),
+                    "isPaid" to (if (validType == "EXPENSE" && isCreditCard) isPaid else true),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun setCreditTransactionPaid(
+        householdId: String,
+        transactionId: String,
+        isPaid: Boolean,
+        accountId: String,
+        accountName: String
+    ): Result<Unit> {
+        if (isLocalOfflineMode()) {
+            localStore!!.setCreditTransactionPaid(transactionId, isPaid, accountId, accountName)
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId/transactions/$transactionId"
+        return try {
+            requireUserId()
+            val ref = db.collection("households").document(householdId).collection("transactions").document(transactionId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "isPaid" to isPaid,
+                    "accountId" to accountId.take(64).ifBlank { "acc_nubank" },
+                    "accountName" to accountName.take(80).ifBlank { "Nubank" },
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
             Result.failure(e)
         }
     }
@@ -1180,7 +1859,7 @@ class AuraFirestoreRepository(
         }
     }
 
-    // 5. Subscriptions & Fixed Bills Observation & Mutations (under /households/{householdId}/subscriptions)
+    // 5. Subscriptions & Fixed Bills Observation & Mutations
     fun observeHouseholdSubscriptions(householdId: String): Flow<List<SubscriptionBill>> = flow {
         val currentUid = currentEffectiveUserId()
         if (isLocalOfflineMode()) {
@@ -1378,6 +2057,75 @@ class AuraFirestoreRepository(
         }
     }
 
+    suspend fun updateSubscriptionBill(
+        householdId: String,
+        subscriptionId: String,
+        title: String,
+        amountOriginal: Double,
+        currency: String,
+        exchangeRateToBrl: Double,
+        category: String,
+        budgetBucket: String,
+        dueDayOfMonth: Int,
+        reminderDaysBefore: Int,
+        autoPostEnabled: Boolean,
+        privacyScope: String
+    ): Result<Unit> {
+        val validScope = sanitizePrivacyScope(privacyScope)
+        if (isLocalOfflineMode()) {
+            localStore!!.updateSubscriptionBill(
+                subId = subscriptionId,
+                title = title,
+                amountOriginal = amountOriginal,
+                currency = currency,
+                exchangeRateToBrl = exchangeRateToBrl,
+                category = category,
+                budgetBucket = budgetBucket,
+                dueDayOfMonth = dueDayOfMonth,
+                reminderDaysBefore = reminderDaysBefore,
+                autoPostEnabled = autoPostEnabled,
+                privacyScope = validScope
+            )
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId/subscriptions/$subscriptionId"
+        return try {
+            requireUserId()
+            val cleanTitle = title.trim().take(140)
+            require(cleanTitle.isNotEmpty()) { "Informe o nome da assinatura." }
+            require(amountOriginal > 0.0) { "O valor deve ser maior que zero." }
+            val validCurrency = if (currency in listOf("BRL", "USD", "EUR", "GBP")) currency else "BRL"
+            val safeRate = if (validCurrency == "BRL") 1.0 else exchangeRateToBrl.coerceIn(0.01, 10000.0)
+            val amountBrl = (Math.round(amountOriginal * safeRate * 100.0) / 100.0).coerceAtLeast(0.01)
+            val validBucket = if (budgetBucket in listOf("NEEDS", "WANTS", "SAVINGS")) budgetBucket else "NEEDS"
+
+            val ref = db.collection("households").document(householdId).collection("subscriptions").document(subscriptionId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "title" to cleanTitle,
+                    "amountOriginal" to amountOriginal,
+                    "currency" to validCurrency,
+                    "exchangeRateToBrl" to safeRate,
+                    "amountBrl" to amountBrl,
+                    "category" to category.trim().take(50).ifBlank { "Assinatura" },
+                    "budgetBucket" to validBucket,
+                    "dueDayOfMonth" to dueDayOfMonth.coerceIn(1, 31).toLong(),
+                    "reminderDaysBefore" to reminderDaysBefore.coerceIn(0, 15).toLong(),
+                    "autoPostEnabled" to autoPostEnabled,
+                    "privacyScope" to validScope,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
     suspend fun postSubscriptionForMonth(
         subscription: SubscriptionBill,
         yearMonth: String,
@@ -1433,7 +2181,6 @@ class AuraFirestoreRepository(
             val month = (parts.getOrNull(1)?.toIntOrNull() ?: 1).coerceIn(1, 12)
             val dueEpochDay = DateCalendarUtils.toEpochDay(year, month, subscription.dueDayOfMonth.toInt().coerceIn(1, 28))
 
-            // 1. Add transaction entry preserving responsibility, privacy scope, and split shares
             val txResult = addTransaction(
                 householdId = subscription.householdId,
                 title = "${subscription.title} (Conta Recorrente)",
@@ -1464,7 +2211,6 @@ class AuraFirestoreRepository(
                 return Result.failure(txResult.exceptionOrNull() ?: Exception("Falha ao lançar conta fixa"))
             }
 
-            // 2. Mark subscription lastPostedYearMonth
             val subRef = db.collection("households").document(subscription.householdId)
                 .collection("subscriptions").document(subscription.id)
             docPath = subRef.path
@@ -1504,7 +2250,7 @@ class AuraFirestoreRepository(
         }
     }
 
-    // 6. Savings Goals Observation & Mutations (under /households/{householdId}/savings_goals)
+    // 6. Savings Goals Observation & Mutations
     fun observeHouseholdSavingsGoals(householdId: String): Flow<List<SavingsGoal>> = flow {
         val currentUid = currentEffectiveUserId()
         if (isLocalOfflineMode()) {
@@ -1631,6 +2377,56 @@ class AuraFirestoreRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateSavingsGoal(
+        householdId: String,
+        goalId: String,
+        title: String,
+        targetAmountBrl: Double,
+        currentAmountBrl: Double,
+        incomePercentage: Int,
+        category: String,
+        targetYearMonth: String
+    ): Result<Unit> {
+        if (isLocalOfflineMode()) {
+            localStore!!.updateSavingsGoal(
+                goalId = goalId,
+                title = title,
+                targetAmountBrl = targetAmountBrl,
+                currentAmountBrl = currentAmountBrl,
+                incomePercentage = incomePercentage,
+                category = category,
+                targetYearMonth = targetYearMonth
+            )
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId/savings_goals/$goalId"
+        return try {
+            requireUserId()
+            val cleanTitle = title.trim().take(140)
+            require(cleanTitle.isNotEmpty()) { "Informe o nome da meta." }
+            require(targetAmountBrl > 0.0) { "O valor alvo deve ser maior que zero." }
+            val ref = db.collection("households").document(householdId).collection("savings_goals").document(goalId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "title" to cleanTitle,
+                    "targetAmountBrl" to targetAmountBrl.coerceIn(1.0, 1_000_000_000.0),
+                    "currentAmountBrl" to currentAmountBrl.coerceIn(0.0, 1_000_000_000.0),
+                    "incomePercentage" to incomePercentage.coerceIn(0, 100).toLong(),
+                    "category" to category.trim().take(50).ifBlank { "Reserva" },
+                    "targetYearMonth" to targetYearMonth.trim().take(7),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
             Result.failure(e)
         }
     }

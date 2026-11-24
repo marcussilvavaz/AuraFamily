@@ -7,4 +7,17 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- Adaptive Widget Colors (Light Mode Default) -->
+    <color name="widget_bg_surface">#FFF7F9FC</color>
+    <color name="widget_bg_stroke">#FFD5DFEE</color>
+    <color name="widget_card_surface">#FFFFFFFF</color>
+    <color name="widget_card_stroke">#FFE1E8F4</color>
+    <color name="widget_pill_surface">#FFEAF0FF</color>
+    <color name="widget_pill_stroke">#FF4F6EF7</color>
+    <color name="widget_text_primary">#FF121622</color>
+    <color name="widget_text_secondary">#FF53607A</color>
+    <color name="widget_accent_blue">#FF335CFF</color>
+    <color name="widget_accent_emerald">#FF0B6E4F</color>
+    <color name="widget_accent_coral">#FFD9383A</color>
 </resources>

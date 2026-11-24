@@ -251,7 +251,7 @@ fun AuthScreen(
                     Box(modifier = Modifier.fillMaxSize()) {
                         Image(
                             painter = painterResource(id = R.drawable.img_hero_wealth_1795185246551),
-                            contentDescription = "Banner Aura Finanças",
+                            contentDescription = "Banner Omni",
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )
@@ -271,7 +271,7 @@ fun AuthScreen(
                         ) {
                             Column {
                                 Text(
-                                    text = "AURA FINANÇAS, SAÚDE & ROTINA",
+                                    text = "OMNI • TAREFAS, ROTINA, FINANÇAS & SAÚDE",
                                     style = MaterialTheme.typography.labelLarge,
                                     color = MaterialTheme.colorScheme.primary,
                                     fontWeight = FontWeight.Bold

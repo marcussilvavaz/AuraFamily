@@ -1,11 +1,25 @@
 package com.example.alarm
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.media.MediaPlayer
+import android.media.Ringtone
+import android.media.RingtoneManager
+import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.exp
@@ -16,6 +30,16 @@ data class TaskRingtoneOption(
     val categoryLabel: String,
     val title: String,
     val subtitle: String
+)
+
+data class ActiveRingingAlarm(
+    val notificationId: Int,
+    val title: String,
+    val message: String,
+    val soundUriString: String,
+    val vibrate: Boolean,
+    val isBillReminder: Boolean,
+    val startedAtMillis: Long = System.currentTimeMillis()
 )
 
 object TaskRingtoneCatalog {
@@ -64,12 +88,29 @@ object TaskRingtoneCatalog {
 }
 
 /**
- * Real-time PCM audio synthesizer (Android equivalent of Web Audio API oscillator preview)
- * that plays distinct melodic envelopes for Suave, Foco, Urgente/Alarme, Contas, and Discreto.
+ * Centralized single-instance audio & alarm controller for Omni.
+ * Guarantees that two audio instances (MediaPlayer, Ringtone, or synthesized AudioTrack)
+ * never play at the same time, enforces a 6-second auto-stop on previews, and allows
+ * immediate stopping of ringing alarms and previews from notifications, UI buttons, or onDispose.
  */
 object TaskTonePreviewPlayer {
-    private val scope = CoroutineScope(Dispatchers.Default)
+    private const val PREVIEW_MAX_DURATION_MS = 6_000L
+    private const val ALARM_AUTO_TIMEOUT_MS = 45_000L
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val lock = Any()
+
     private var activeJob: Job? = null
+    private var activeTimeoutJob: Job? = null
+    private var activeMediaPlayer: MediaPlayer? = null
+    private var activeRingtone: Ringtone? = null
+    private var activeAudioTrack: AudioTrack? = null
+
+    private val _activePreviewIdFlow = MutableStateFlow<String?>(null)
+    val activePreviewIdFlow: StateFlow<String?> = _activePreviewIdFlow.asStateFlow()
+
+    private val _activeRingingAlarmFlow = MutableStateFlow<ActiveRingingAlarm?>(null)
+    val activeRingingAlarmFlow: StateFlow<ActiveRingingAlarm?> = _activeRingingAlarmFlow.asStateFlow()
 
     private data class NoteSpec(
         val freqHz: Double,
@@ -78,47 +119,357 @@ object TaskTonePreviewPlayer {
         val decayFactor: Double = 3.5
     )
 
-    fun playPreview(ringtoneId: String) {
-        activeJob?.cancel()
-        activeJob = scope.launch {
+    /**
+     * Immediately stops and releases any playing MediaPlayer, Ringtone, or AudioTrack,
+     * and cancels vibration if a context is supplied.
+     */
+    fun stopAllAudio(context: Context? = null, dismissRingingNotification: Boolean = true) {
+        val prevAlarm: ActiveRingingAlarm?
+        synchronized(lock) {
+            activeJob?.cancel()
+            activeJob = null
+            activeTimeoutJob?.cancel()
+            activeTimeoutJob = null
+
             runCatching {
-                val notes = when (ringtoneId) {
-                    TaskRingtoneCatalog.SUAVE -> listOf(
-                        NoteSpec(523.25, 190, 20, 2.8), // C5
-                        NoteSpec(659.25, 190, 20, 2.8), // E5
-                        NoteSpec(783.99, 280, 0, 2.2)   // G5
-                    )
-                    TaskRingtoneCatalog.FOCO -> listOf(
-                        NoteSpec(587.33, 130, 35, 4.0), // D5
-                        NoteSpec(880.00, 240, 0, 3.0)   // A5
-                    )
-                    TaskRingtoneCatalog.URGENTE -> listOf(
-                        NoteSpec(880.00, 110, 25, 1.8), // A5
-                        NoteSpec(987.77, 110, 25, 1.8), // B5
-                        NoteSpec(880.00, 110, 25, 1.8), // A5
-                        NoteSpec(1174.66, 220, 0, 1.5)  // D6
-                    )
-                    TaskRingtoneCatalog.CONTAS -> listOf(
-                        NoteSpec(659.25, 120, 30, 3.5), // E5
-                        NoteSpec(783.99, 120, 30, 3.5), // G5
-                        NoteSpec(1046.50, 260, 0, 2.5)  // C6
-                    )
-                    TaskRingtoneCatalog.DISCRETO -> listOf(
-                        NoteSpec(440.00, 140, 0, 5.5)   // A4 soft drop
-                    )
-                    else -> listOf(
-                        NoteSpec(523.25, 180, 20, 3.0),
-                        NoteSpec(659.25, 220, 0, 3.0)
-                    )
+                activeMediaPlayer?.let { mp ->
+                    if (mp.isPlaying) mp.stop()
+                    mp.reset()
+                    mp.release()
                 }
-                synthesizeAndPlay(notes)
+            }
+            activeMediaPlayer = null
+
+            runCatching {
+                activeRingtone?.stop()
+            }
+            activeRingtone = null
+
+            runCatching {
+                activeAudioTrack?.let { track ->
+                    if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                        track.pause()
+                        track.flush()
+                        track.stop()
+                    }
+                    track.release()
+                }
+            }
+            activeAudioTrack = null
+
+            _activePreviewIdFlow.value = null
+            prevAlarm = _activeRingingAlarmFlow.value
+            _activeRingingAlarmFlow.value = null
+        }
+
+        if (context != null) {
+            runCatching {
+                val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                vibrator?.cancel()
+            }
+            if (dismissRingingNotification && prevAlarm != null) {
+                runCatching {
+                    NotificationManagerCompat.from(context).cancel(prevAlarm.notificationId)
+                }
             }
         }
     }
 
-    private fun synthesizeAndPlay(notes: List<NoteSpec>) {
+    /**
+     * Stops only an active preview (used in DisposableEffect onDispose when leaving a sound picker screen)
+     * without killing an active scheduled alarm if one happens to be ringing.
+     */
+    fun stopPreview(context: Context? = null) {
+        if (_activeRingingAlarmFlow.value != null && _activePreviewIdFlow.value == null) {
+            return
+        }
+        stopAllAudio(context = context, dismissRingingNotification = false)
+    }
+
+    /**
+     * Plays a synthesized tone preview (Suave, Foco, Urgente, Contas, Discreto).
+     * Tapping the same preview while playing toggles it off; otherwise stops any previous preview first.
+     */
+    fun playPreview(ringtoneId: String) {
+        if (_activePreviewIdFlow.value == ringtoneId) {
+            stopPreview()
+            return
+        }
+        stopPreview()
+        synchronized(lock) {
+            _activePreviewIdFlow.value = ringtoneId
+            activeJob = scope.launch {
+                try {
+                    val notes = when (ringtoneId) {
+                        TaskRingtoneCatalog.SUAVE -> listOf(
+                            NoteSpec(523.25, 190, 20, 2.8), // C5
+                            NoteSpec(659.25, 190, 20, 2.8), // E5
+                            NoteSpec(783.99, 280, 0, 2.2)   // G5
+                        )
+                        TaskRingtoneCatalog.FOCO -> listOf(
+                            NoteSpec(587.33, 130, 35, 4.0), // D5
+                            NoteSpec(880.00, 240, 0, 3.0)   // A5
+                        )
+                        TaskRingtoneCatalog.URGENTE -> listOf(
+                            NoteSpec(880.00, 110, 25, 1.8), // A5
+                            NoteSpec(987.77, 110, 25, 1.8), // B5
+                            NoteSpec(880.00, 110, 25, 1.8), // A5
+                            NoteSpec(1174.66, 220, 0, 1.5)  // D6
+                        )
+                        TaskRingtoneCatalog.CONTAS -> listOf(
+                            NoteSpec(659.25, 120, 30, 3.5), // E5
+                            NoteSpec(783.99, 120, 30, 3.5), // G5
+                            NoteSpec(1046.50, 260, 0, 2.5)  // C6
+                        )
+                        TaskRingtoneCatalog.DISCRETO -> listOf(
+                            NoteSpec(440.00, 140, 0, 5.5)   // A4 soft drop
+                        )
+                        else -> listOf(
+                            NoteSpec(523.25, 180, 20, 3.0),
+                            NoteSpec(659.25, 220, 0, 3.0)
+                        )
+                    }
+                    synthesizeAndPlay(notes)
+                } finally {
+                    if (_activePreviewIdFlow.value == ringtoneId) {
+                        _activePreviewIdFlow.value = null
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Plays a preview of a system ringtone or user-selected custom audio file URI.
+     * Automatically stops any previous preview and auto-terminates after 6 seconds.
+     */
+    fun playUriPreview(
+        context: Context,
+        soundUriString: String,
+        previewKey: String = "URI_PREVIEW",
+        vibrate: Boolean = false
+    ) {
+        if (_activePreviewIdFlow.value == previewKey) {
+            stopPreview(context)
+            return
+        }
+        stopPreview(context)
+        val appContext = context.applicationContext
+        val uri = resolveEffectiveSoundUri(soundUriString, isBillReminder = false)
+
+        synchronized(lock) {
+            _activePreviewIdFlow.value = previewKey
+            startMediaPlayerOrRingtoneLocked(
+                context = appContext,
+                uri = uri,
+                looping = false,
+                usage = AudioAttributes.USAGE_NOTIFICATION
+            )
+            activeTimeoutJob = scope.launch {
+                delay(PREVIEW_MAX_DURATION_MS)
+                if (_activePreviewIdFlow.value == previewKey) {
+                    stopPreview(appContext)
+                }
+            }
+        }
+
+        if (vibrate) {
+            vibrateOnce(appContext, 350L)
+        }
+    }
+
+    /**
+     * Starts an actual ringing alarm (Task, Post-Meal Glucose Timer, or Bill Reminder).
+     * Stops any existing audio first so two alarms never overlap, exposes activeRingingAlarmFlow
+     * for the in-app "Parar Alarme" banner, and auto-stops after 45 seconds if unattended.
+     */
+    fun startRingingAlarm(
+        context: Context,
+        notificationId: Int,
+        title: String,
+        message: String,
+        soundUriString: String,
+        vibrate: Boolean,
+        isBillReminder: Boolean
+    ) {
+        stopAllAudio(context, dismissRingingNotification = false)
+        val appContext = context.applicationContext
+        val uri = resolveEffectiveSoundUri(soundUriString, isBillReminder = isBillReminder)
+
+        val alarmState = ActiveRingingAlarm(
+            notificationId = notificationId,
+            title = title,
+            message = message,
+            soundUriString = soundUriString,
+            vibrate = vibrate,
+            isBillReminder = isBillReminder
+        )
+
+        synchronized(lock) {
+            _activeRingingAlarmFlow.value = alarmState
+            if (soundUriString.startsWith("TONE:")) {
+                val toneId = soundUriString.removePrefix("TONE:").ifBlank { TaskRingtoneCatalog.SUAVE }
+                activeJob = scope.launch {
+                    val notes = when (toneId) {
+                        TaskRingtoneCatalog.FOCO -> listOf(
+                            NoteSpec(587.33, 130, 35, 4.0),
+                            NoteSpec(880.00, 240, 0, 3.0)
+                        )
+                        TaskRingtoneCatalog.URGENTE -> listOf(
+                            NoteSpec(880.00, 110, 25, 1.8),
+                            NoteSpec(987.77, 110, 25, 1.8),
+                            NoteSpec(880.00, 110, 25, 1.8),
+                            NoteSpec(1174.66, 220, 0, 1.5)
+                        )
+                        TaskRingtoneCatalog.CONTAS -> listOf(
+                            NoteSpec(659.25, 120, 30, 3.5),
+                            NoteSpec(783.99, 120, 30, 3.5),
+                            NoteSpec(1046.50, 260, 0, 2.5)
+                        )
+                        TaskRingtoneCatalog.DISCRETO -> listOf(
+                            NoteSpec(440.00, 140, 0, 5.5)
+                        )
+                        else -> listOf(
+                            NoteSpec(523.25, 190, 20, 2.8),
+                            NoteSpec(659.25, 190, 20, 2.8),
+                            NoteSpec(783.99, 280, 0, 2.2)
+                        )
+                    }
+                    repeat(if (isBillReminder) 2 else 6) {
+                        synthesizeAndPlay(notes)
+                        delay(500L)
+                    }
+                }
+            } else {
+                startMediaPlayerOrRingtoneLocked(
+                    context = appContext,
+                    uri = uri,
+                    looping = !isBillReminder,
+                    usage = if (isBillReminder) AudioAttributes.USAGE_NOTIFICATION else AudioAttributes.USAGE_ALARM
+                )
+            }
+            activeTimeoutJob = scope.launch {
+                val timeout = if (isBillReminder) 8_000L else ALARM_AUTO_TIMEOUT_MS
+                delay(timeout)
+                // Stop audio playback after timeout while leaving notification visible
+                synchronized(lock) {
+                    activeJob?.cancel()
+                    activeJob = null
+                    runCatching {
+                        activeMediaPlayer?.let { mp ->
+                            if (mp.isPlaying) mp.stop()
+                            mp.reset()
+                            mp.release()
+                        }
+                    }
+                    activeMediaPlayer = null
+                    runCatching { activeRingtone?.stop() }
+                    activeRingtone = null
+                }
+                runCatching {
+                    val vibrator = appContext.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                    vibrator?.cancel()
+                }
+            }
+        }
+
+        if (vibrate) {
+            try {
+                val vibrator = appContext.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                if (vibrator != null && vibrator.hasVibrator()) {
+                    if (isBillReminder) {
+                        vibrateOnce(appContext, 450L)
+                    } else {
+                        val pattern = longArrayOf(0L, 500L, 350L, 500L, 350L, 500L)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
+                        } else {
+                            @Suppress("DEPRECATION")
+                            vibrator.vibrate(pattern, -1)
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun resolveEffectiveSoundUri(soundUriString: String, isBillReminder: Boolean): Uri? {
+        return try {
+            if (soundUriString.isNotBlank()) {
+                Uri.parse(soundUriString)
+            } else if (isBillReminder) {
+                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            } else {
+                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            }
+        } catch (_: Exception) {
+            RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        }
+    }
+
+    private fun startMediaPlayerOrRingtoneLocked(
+        context: Context,
+        uri: Uri?,
+        looping: Boolean,
+        usage: Int
+    ) {
+        if (uri == null) return
+        val startedWithMediaPlayer = runCatching {
+            val mp = MediaPlayer()
+            mp.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(usage)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            )
+            mp.setDataSource(context, uri)
+            mp.isLooping = looping
+            mp.setOnCompletionListener {
+                if (!looping) {
+                    synchronized(lock) {
+                        _activePreviewIdFlow.value = null
+                    }
+                }
+            }
+            mp.prepare()
+            mp.start()
+            activeMediaPlayer = mp
+            true
+        }.getOrDefault(false)
+
+        if (!startedWithMediaPlayer) {
+            runCatching {
+                val ringtone = RingtoneManager.getRingtone(context, uri)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    ringtone?.isLooping = looping
+                }
+                ringtone?.play()
+                activeRingtone = ringtone
+            }
+        }
+    }
+
+    private fun vibrateOnce(context: Context, durationMs: Long) {
+        try {
+            val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            if (vibrator != null && vibrator.hasVibrator()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(durationMs)
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private suspend fun synthesizeAndPlay(notes: List<NoteSpec>) {
         val sampleRate = 22050
-        val totalMs = notes.sumOf { it.durationMs + it.pauseAfterMs }.coerceAtLeast(100)
+        val totalMs = notes.sumOf { it.durationMs + it.pauseAfterMs }.coerceIn(100, PREVIEW_MAX_DURATION_MS.toInt())
         val totalSamples = (sampleRate * totalMs) / 1000
         val buffer = ShortArray(totalSamples)
 
@@ -129,7 +480,6 @@ object TaskTonePreviewPlayer {
                 if (cursor >= totalSamples) break
                 val t = i.toDouble() / sampleRate.toDouble()
                 val progress = i.toDouble() / noteSamples.toDouble()
-                // Smooth attack + exponential decay envelope
                 val attack = (i.toDouble() / (sampleRate * 0.012)).coerceAtMost(1.0)
                 val envelope = attack * exp(-note.decayFactor * progress)
                 val fundamental = sin(2.0 * PI * note.freqHz * t)
@@ -156,18 +506,34 @@ object TaskTonePreviewPlayer {
                     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                     .build()
             )
-            .setBufferSizeInBytes(byteCount.coerceAtLeast(AudioTrack.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )))
+            .setBufferSizeInBytes(
+                byteCount.coerceAtLeast(
+                    AudioTrack.getMinBufferSize(
+                        sampleRate,
+                        AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT
+                    )
+                )
+            )
             .setTransferMode(AudioTrack.MODE_STATIC)
             .build()
 
+        synchronized(lock) {
+            activeAudioTrack = track
+        }
         track.write(buffer, 0, buffer.size)
         track.play()
-        Thread.sleep((totalMs + 60).toLong())
-        track.stop()
-        track.release()
+        delay((totalMs + 60).toLong().coerceAtMost(PREVIEW_MAX_DURATION_MS))
+        synchronized(lock) {
+            runCatching {
+                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                    track.stop()
+                }
+                track.release()
+            }
+            if (activeAudioTrack === track) {
+                activeAudioTrack = null
+            }
+        }
     }
 }

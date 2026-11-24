@@ -32,12 +32,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.FontDownload
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RoundedCorner
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
@@ -50,6 +53,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -63,7 +67,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.alarm.AlarmScheduler
+import com.example.alarm.TaskTonePreviewPlayer
 import com.example.data.AppCustomizationConfig
 import com.example.data.CustomizationCatalog
 import com.example.data.CustomizationRepository
@@ -80,35 +86,16 @@ fun CustomizationStudioScreen(
 ) {
     val context = LocalContext.current
     val cardRadius = LocalOrganicCardRadius.current
+    val activePreviewId by TaskTonePreviewPlayer.activePreviewIdFlow.collectAsStateWithLifecycle()
+
+    DisposableEffect(Unit) {
+        onDispose {
+            TaskTonePreviewPlayer.stopPreview(context)
+        }
+    }
 
     // 0 = Fundo, 1 = Cartões, 2 = Letras, 3 = Botão/Primária, 4 = Destaque
     var selectedColorTarget by remember { mutableIntStateOf(0) }
-
-    val taskRingtoneLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            @Suppress("DEPRECATION")
-            val pickedUri: Uri? = result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
-            val uriString = pickedUri?.toString() ?: ""
-            val title = customizationRepo.resolveRingtoneTitle(pickedUri)
-            customizationRepo.updateTaskSound(uriString, title)
-            onShowMessage("Toque de tarefas atualizado para: $title")
-        }
-    }
-
-    val billRingtoneLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            @Suppress("DEPRECATION")
-            val pickedUri: Uri? = result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
-            val uriString = pickedUri?.toString() ?: ""
-            val title = customizationRepo.resolveRingtoneTitle(pickedUri)
-            customizationRepo.updateBillSound(uriString, title)
-            onShowMessage("Toque de contas fixas atualizado para: $title")
-        }
-    }
 
     LazyColumn(
         modifier = Modifier
@@ -516,239 +503,6 @@ fun CustomizationStudioScreen(
                                         }
                                     }
                                 }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 6. Notification & Alarm Ringtone Picker (Separate Profiles for Agenda Tasks & Finance Bills)
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(cardRadius),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.MusicNote,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Column {
-                            Text(
-                                text = "Toques de Notificação e Alarmes",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Escolha sons diferentes para a Agenda de Tarefas e para as Contas Fixas",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    // Profile A: Tasks & Calendar Alarms
-                    Surface(
-                        shape = RoundedCornerShape(24.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Text(
-                                text = "1. Alarme de Tarefas da Agenda",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Toque atual: ${config.taskAlarmSoundTitle}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.SemiBold
-                            )
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Button(
-                                    onClick = {
-                                        try {
-                                            val currentUri = if (config.taskAlarmSoundUri.isNotBlank()) {
-                                                Uri.parse(config.taskAlarmSoundUri)
-                                            } else {
-                                                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                                            }
-                                            val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
-                                                putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALL)
-                                                putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Escolher Toque para Tarefas")
-                                                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
-                                                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
-                                                putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, currentUri)
-                                            }
-                                            taskRingtoneLauncher.launch(intent)
-                                        } catch (_: Exception) {
-                                            onShowMessage("Use uma das opções rápidas de toque abaixo neste dispositivo.")
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("pick_task_ringtone_btn")
-                                ) {
-                                    Icon(imageVector = Icons.Default.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Escolher Toque")
-                                }
-
-                                FilledTonalButton(
-                                    onClick = {
-                                        AlarmScheduler.playCustomRingtoneAndVibrate(
-                                            context = context,
-                                            soundUriString = config.taskAlarmSoundUri,
-                                            vibrate = config.taskVibrateEnabled
-                                        )
-                                        onShowMessage("Reproduzindo prévia: ${config.taskAlarmSoundTitle}")
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    modifier = Modifier.testTag("preview_task_ringtone_btn")
-                                ) {
-                                    Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Ouvir")
-                                }
-                            }
-
-                            // Built-in system preset chips in case user wants one-tap selection
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                BuiltInSoundChip("Alarme Forte", RingtoneManager.TYPE_ALARM) { uri, label ->
-                                    customizationRepo.updateTaskSound(uri, label)
-                                }
-                                BuiltInSoundChip("Notificação Suave", RingtoneManager.TYPE_NOTIFICATION) { uri, label ->
-                                    customizationRepo.updateTaskSound(uri, label)
-                                }
-                                BuiltInSoundChip("Melodia Chamada", RingtoneManager.TYPE_RINGTONE) { uri, label ->
-                                    customizationRepo.updateTaskSound(uri, label)
-                                }
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Vibrar ao disparar alarme de tarefa", style = MaterialTheme.typography.bodySmall)
-                                Switch(
-                                    checked = config.taskVibrateEnabled,
-                                    onCheckedChange = { customizationRepo.updateTaskVibrate(it) }
-                                )
-                            }
-                        }
-                    }
-
-                    // Profile B: Recurring Subscriptions & Fixed Bills
-                    Surface(
-                        shape = RoundedCornerShape(24.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Text(
-                                text = "2. Lembrete de Contas Fixas e Assinaturas",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Toque atual: ${config.billReminderSoundTitle}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.SemiBold
-                            )
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = {
-                                        try {
-                                            val currentUri = if (config.billReminderSoundUri.isNotBlank()) {
-                                                Uri.parse(config.billReminderSoundUri)
-                                            } else {
-                                                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-                                            }
-                                            val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
-                                                putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALL)
-                                                putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Escolher Toque para Contas Fixas")
-                                                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
-                                                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
-                                                putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, currentUri)
-                                            }
-                                            billRingtoneLauncher.launch(intent)
-                                        } catch (_: Exception) {
-                                            onShowMessage("Use uma das opções rápidas de toque abaixo neste dispositivo.")
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("pick_bill_ringtone_btn")
-                                ) {
-                                    Icon(imageVector = Icons.Default.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Escolher Toque")
-                                }
-
-                                FilledTonalButton(
-                                    onClick = {
-                                        AlarmScheduler.playCustomRingtoneAndVibrate(
-                                            context = context,
-                                            soundUriString = config.billReminderSoundUri,
-                                            vibrate = config.billVibrateEnabled
-                                        )
-                                        onShowMessage("Reproduzindo prévia: ${config.billReminderSoundTitle}")
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    modifier = Modifier.testTag("preview_bill_ringtone_btn")
-                                ) {
-                                    Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Ouvir")
-                                }
-                            }
-
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                BuiltInSoundChip("Notificação Suave", RingtoneManager.TYPE_NOTIFICATION) { uri, label ->
-                                    customizationRepo.updateBillSound(uri, label)
-                                }
-                                BuiltInSoundChip("Alarme Forte", RingtoneManager.TYPE_ALARM) { uri, label ->
-                                    customizationRepo.updateBillSound(uri, label)
-                                }
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Vibrar nos lembretes de contas fixas", style = MaterialTheme.typography.bodySmall)
-                                Switch(
-                                    checked = config.billVibrateEnabled,
-                                    onCheckedChange = { customizationRepo.updateBillVibrate(it) }
-                                )
                             }
                         }
                     }

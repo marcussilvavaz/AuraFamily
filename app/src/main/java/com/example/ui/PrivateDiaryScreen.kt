@@ -31,13 +31,18 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.BookmarkAdded
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -304,12 +309,101 @@ fun ShiftMotivationalQuoteCard(
 fun PrivateDiaryScreen(
     initialEpochDay: Long,
     customizationConfig: AppCustomizationConfig,
+    customizationRepo: com.example.data.CustomizationRepository? = null,
     diaryRepo: PrivateDiaryRepository,
-    onShowBannerMessage: (String) -> Unit
+    onShowBannerMessage: (String) -> Unit,
+    initialSubTab: Int = 0,
+    householdMuralItems: List<com.example.data.FamilyMuralItem> = emptyList(),
+    onAddMuralItem: (title: String, category: String, notes: String, pinned: Boolean, isNote: Boolean) -> Unit = { _, _, _, _, _ -> },
+    onToggleMuralItem: (itemId: String) -> Unit = {},
+    onTogglePinMuralItem: (itemId: String) -> Unit = {},
+    onClearCompletedMuralItems: (category: String?) -> Unit = {},
+    onDeleteMuralItem: (itemId: String) -> Unit = {}
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val diaryState by diaryRepo.stateFlow.collectAsStateWithLifecycle()
     val cardRadius = LocalOrganicCardRadius.current
+    val organicButtonShape = com.example.ui.theme.omniOrganicButtonShape()
     val scope = rememberCoroutineScope()
+    val triggerFeedback = rememberOmniFeedback(onShowBannerMessage)
+
+    // Sub-tabs: 0 = Meu Diário (Com Bloqueio PIN/Biometria), 1 = Mural da Família (Compartilhado sem bloqueio)
+    var activeSubTab by rememberSaveable(initialSubTab) { mutableIntStateOf(initialSubTab) }
+
+    // When diaryBiometricLockEnabled is true, opening the "Meu Diário" sub-tab starts locked
+    var isUnlockedInThisVisit by remember {
+        mutableStateOf(!customizationConfig.diaryBiometricLockEnabled)
+    }
+    var showSecurityConfigModal by remember { mutableStateOf(false) }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Top Sub-tab Switcher: "Meu Diário" | "Mural da Família"
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = activeSubTab == 0,
+                onClick = { activeSubTab = 0 },
+                label = {
+                    Text(
+                        text = "🔒 Meu Diário",
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
+                shape = organicButtonShape,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("diary_subtab_private")
+            )
+            FilterChip(
+                selected = activeSubTab == 1,
+                onClick = { activeSubTab = 1 },
+                label = {
+                    Text(
+                        text = "📌 Mural da Família",
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
+                shape = organicButtonShape,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("diary_subtab_family_mural")
+            )
+        }
+
+        if (activeSubTab == 1) {
+            FamilyMuralSharedSubScreen(
+                customizationConfig = customizationConfig,
+                remoteMuralItems = householdMuralItems,
+                onAddMuralItem = onAddMuralItem,
+                onToggleMuralItem = onToggleMuralItem,
+                onTogglePinMuralItem = onTogglePinMuralItem,
+                onClearCompletedMuralItems = onClearCompletedMuralItems,
+                onDeleteMuralItem = onDeleteMuralItem
+            )
+            return@Column
+        }
+
+        if (customizationConfig.diaryBiometricLockEnabled && !isUnlockedInThisVisit) {
+            PrivateDiaryBiometricLockGate(
+                backupPin = customizationConfig.diaryBackupPin.ifBlank { "1234" },
+                accentColor = Color(customizationConfig.diaryColorHex),
+                onUnlocked = {
+                    isUnlockedInThisVisit = true
+                    triggerFeedback("🔓 Diário Privado desbloqueado!")
+                }
+            )
+            return@Column
+        }
 
     var selectedDayEpoch by rememberSaveable(initialEpochDay) {
         mutableLongStateOf(initialEpochDay)
@@ -334,6 +428,10 @@ fun PrivateDiaryScreen(
     var showAddSymptomDialog by remember { mutableStateOf(false) }
     var newSymptomInput by remember { mutableStateOf("") }
 
+    // Edit & Delete diary entry states
+    var editingEntry by remember { mutableStateOf<PrivateDiaryEntry?>(null) }
+    var deletingEntry by remember { mutableStateOf<PrivateDiaryEntry?>(null) }
+
     // AI Support Letter generation states
     var isGeneratingLetter by remember { mutableStateOf(false) }
     var activeLetter by remember { mutableStateOf<SupportLetterRecord?>(null) }
@@ -346,6 +444,91 @@ fun PrivateDiaryScreen(
 
     val dateFormatter = remember {
         DateTimeFormatter.ofPattern("EEEE, dd 'de' MMMM", Locale.forLanguageTag("pt-BR"))
+    }
+
+    if (showSecurityConfigModal && customizationRepo != null) {
+        var lockEnabledDraft by remember(customizationConfig.diaryBiometricLockEnabled) {
+            mutableStateOf(customizationConfig.diaryBiometricLockEnabled)
+        }
+        var pinDraft by remember(customizationConfig.diaryBackupPin) {
+            mutableStateOf(customizationConfig.diaryBackupPin.ifBlank { "1234" })
+        }
+        AlertDialog(
+            onDismissRequest = { showSecurityConfigModal = false },
+            title = {
+                Text(
+                    text = "🔒 Bloqueio do Diário (Biometria / PIN)",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Quando ativado, o Omni exigirá Biometria (impressão digital / facial) ou PIN sempre que você abrir a aba Diário.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Exigir Biometria / PIN ao abrir",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        androidx.compose.material3.Switch(
+                            checked = lockEnabledDraft,
+                            onCheckedChange = { lockEnabledDraft = it },
+                            modifier = Modifier.testTag("diary_modal_biometric_switch")
+                        )
+                    }
+                    AnimatedVisibility(visible = lockEnabledDraft) {
+                        OutlinedTextField(
+                            value = pinDraft,
+                            onValueChange = { raw ->
+                                pinDraft = raw.filter { it.isDigit() }.take(6)
+                            },
+                            label = { Text("PIN numérico do Diário (4 a 6 dígitos)") },
+                            singleLine = true,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("diary_modal_pin_input")
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val validPin = pinDraft.takeIf { it.length >= 4 } ?: "1234"
+                        customizationRepo.updateDiaryBiometricLock(
+                            enabled = lockEnabledDraft,
+                            backupPin = validPin
+                        )
+                        if (lockEnabledDraft) {
+                            isUnlockedInThisVisit = true
+                        }
+                        showSecurityConfigModal = false
+                        triggerFeedback(
+                            if (lockEnabledDraft) "🔒 Bloqueio por Biometria / PIN ativado no Diário!"
+                            else "🔓 Bloqueio do Diário desativado."
+                        )
+                    }
+                ) {
+                    Text("Salvar")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSecurityConfigModal = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 
     LazyColumn(
@@ -373,7 +556,8 @@ fun PrivateDiaryScreen(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
                         ) {
                             Box(
                                 modifier = Modifier
@@ -405,6 +589,48 @@ fun PrivateDiaryScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                            }
+                        }
+
+                        if (customizationRepo != null) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                if (customizationConfig.diaryBiometricLockEnabled) {
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(50))
+                                            .clickable { isUnlockedInThisVisit = false }
+                                            .testTag("btn_lock_diary_now")
+                                    ) {
+                                        Text(
+                                            text = "🔒 Trancar",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(50))
+                                        .clickable { showSecurityConfigModal = true }
+                                        .testTag("btn_diary_security_settings")
+                                ) {
+                                    Text(
+                                        text = if (customizationConfig.diaryBiometricLockEnabled) "⚙️ PIN/Bio" else "🔓 Biometria",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -745,7 +971,7 @@ fun PrivateDiaryScreen(
                         val now = LocalTime.now()
                         entryHour = now.hour
                         entryMinute = now.minute
-                        onShowBannerMessage("Registro salvo na linha do tempo do Diário Privado!")
+                        triggerFeedback("Registro salvo na linha do tempo do Diário Privado!")
                     },
                     shape = RoundedCornerShape(50),
                     modifier = Modifier
@@ -822,7 +1048,8 @@ fun PrivateDiaryScreen(
             items(dayEntries, key = { it.id }) { entry ->
                 PrivateDiaryTimelineItemCard(
                     entry = entry,
-                    onDelete = { diaryRepo.deleteDiaryEntry(entry.id) }
+                    onEdit = { editingEntry = entry },
+                    onDelete = { deletingEntry = entry }
                 )
             }
         }
@@ -857,6 +1084,7 @@ fun PrivateDiaryScreen(
                             }
                             newSymptomInput = ""
                             showAddSymptomDialog = false
+                            triggerFeedback("Tag '$clean' adicionada!")
                         }
                     }
                 ) {
@@ -871,15 +1099,169 @@ fun PrivateDiaryScreen(
         )
     }
 
+    // Edit Diary Entry Dialog
+    val currentEditingEntry = editingEntry
+    if (currentEditingEntry != null) {
+        var editDateDigits by remember(currentEditingEntry) {
+            mutableStateOf(OmniDateMaskUtils.epochDayToDigits(currentEditingEntry.epochDay))
+        }
+        var editHourText by remember(currentEditingEntry) {
+            mutableStateOf(String.format(Locale.US, "%02d", currentEditingEntry.hour))
+        }
+        var editMinuteText by remember(currentEditingEntry) {
+            mutableStateOf(String.format(Locale.US, "%02d", currentEditingEntry.minute))
+        }
+        var editMoodId by remember(currentEditingEntry) {
+            mutableStateOf(currentEditingEntry.moodId)
+        }
+        val editSymptoms = remember(currentEditingEntry) {
+            mutableStateListOf<String>().apply { addAll(currentEditingEntry.symptomTags) }
+        }
+        var editFreeText by remember(currentEditingEntry) {
+            mutableStateOf(currentEditingEntry.freeText)
+        }
+
+        AlertDialog(
+            onDismissRequest = { editingEntry = null },
+            title = { Text("Editar Registro do Diário Privado", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        MaskedDateTextField(
+                            digitsValue = editDateDigits,
+                            onDigitsChange = { editDateDigits = it },
+                            label = "Data (DD/MM/AAAA)",
+                            modifier = Modifier.weight(1.3f),
+                            testTag = "edit_diary_date_masked_input"
+                        )
+                        OutlinedTextField(
+                            value = editHourText,
+                            onValueChange = { editHourText = it.filter { ch -> ch.isDigit() }.take(2) },
+                            label = { Text("Hora") },
+                            singleLine = true,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                            ),
+                            modifier = Modifier.weight(0.6f)
+                        )
+                        OutlinedTextField(
+                            value = editMinuteText,
+                            onValueChange = { editMinuteText = it.filter { ch -> ch.isDigit() }.take(2) },
+                            label = { Text("Min") },
+                            singleLine = true,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                            ),
+                            modifier = Modifier.weight(0.6f)
+                        )
+                    }
+
+                    Text("Humor:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        PrivateDiaryCatalog.moodOptions.forEach { mood ->
+                            FilterChip(
+                                selected = editMoodId == mood.id,
+                                onClick = { editMoodId = mood.id },
+                                label = { Text("${mood.emoji} ${mood.label}", style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+
+                    Text("Sintomas / Sensações:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        allSymptomTags.forEach { tag ->
+                            val isSel = editSymptoms.contains(tag)
+                            FilterChip(
+                                selected = isSel,
+                                onClick = {
+                                    if (isSel) editSymptoms.remove(tag) else editSymptoms.add(tag)
+                                },
+                                label = { Text(tag, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = editFreeText,
+                        onValueChange = { editFreeText = it },
+                        label = { Text("Relato livre") },
+                        minLines = 2,
+                        maxLines = 4,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("edit_diary_free_text_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val newEpochDay = OmniDateMaskUtils.digitsToEpochDayOrNull(editDateDigits)
+                            ?: currentEditingEntry.epochDay
+                        val h = (editHourText.toIntOrNull() ?: currentEditingEntry.hour).coerceIn(0, 23)
+                        val m = (editMinuteText.toIntOrNull() ?: currentEditingEntry.minute).coerceIn(0, 59)
+                        diaryRepo.updateDiaryEntry(
+                            entryId = currentEditingEntry.id,
+                            epochDay = newEpochDay,
+                            hour = h,
+                            minute = m,
+                            moodId = editMoodId,
+                            symptomTags = editSymptoms.toList(),
+                            freeText = editFreeText
+                        )
+                        editingEntry = null
+                        triggerFeedback("Registro do diário atualizado com sucesso!")
+                    },
+                    modifier = Modifier.testTag("confirm_edit_diary_entry_btn")
+                ) {
+                    Text("Salvar Alterações")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingEntry = null }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    // Delete Diary Entry Confirmation Dialog
+    val entryToDelete = deletingEntry
+    if (entryToDelete != null) {
+        OmniConfirmDeleteDialog(
+            title = "Excluir Registro do Diário",
+            message = "Deseja excluir o registro das ${entryToDelete.timeFormatted}?",
+            onConfirm = {
+                diaryRepo.deleteDiaryEntry(entryToDelete.id)
+                deletingEntry = null
+                triggerFeedback("Registro do diário excluído!")
+            },
+            onDismiss = { deletingEntry = null }
+        )
+    }
+
     if (showApiKeyConfigDialog) {
         LocalGeminiApiKeyDialog(
             diaryRepo = diaryRepo,
             onDismiss = { showApiKeyConfigDialog = false },
             onSaved = {
                 showApiKeyConfigDialog = false
-                onShowBannerMessage("Configuração da chave Gemini atualizada com segurança!")
+                triggerFeedback("Configuração da chave Gemini atualizada com segurança!")
             }
         )
+    }
     }
 }
 
@@ -887,6 +1269,7 @@ fun PrivateDiaryScreen(
 @Composable
 private fun PrivateDiaryTimelineItemCard(
     entry: PrivateDiaryEntry,
+    onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
@@ -960,16 +1343,33 @@ private fun PrivateDiaryTimelineItemCard(
                         }
                     }
 
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteOutline,
-                            contentDescription = "Excluir entrada",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
+                    Row {
+                        IconButton(
+                            onClick = onEdit,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("edit_diary_entry_${entry.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Editar entrada",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onDelete,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("delete_diary_entry_${entry.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteOutline,
+                                contentDescription = "Excluir entrada",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
 
@@ -1292,6 +1692,460 @@ private fun SupportLetterGeneratorCard(
 }
 
 @Composable
+private fun FamilyMuralSharedSubScreen(
+    customizationConfig: AppCustomizationConfig,
+    remoteMuralItems: List<com.example.data.FamilyMuralItem>,
+    onAddMuralItem: (title: String, category: String, notes: String, pinned: Boolean, isNote: Boolean) -> Unit,
+    onToggleMuralItem: (itemId: String) -> Unit,
+    onTogglePinMuralItem: (itemId: String) -> Unit,
+    onClearCompletedMuralItems: (category: String?) -> Unit,
+    onDeleteMuralItem: (itemId: String) -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val cardRadius = LocalOrganicCardRadius.current
+    val organicButtonShape = com.example.ui.theme.omniOrganicButtonShape()
+    val accentColor = Color(customizationConfig.diaryColorHex)
+
+    var localTick by remember { mutableIntStateOf(0) }
+    val allItems = remember(remoteMuralItems, localTick) {
+        remoteMuralItems.ifEmpty {
+            com.example.data.OmniBackupAndMigrationManager.loadFamilyMuralItems(context)
+        }
+    }
+
+    var selectedCategoryFilter by rememberSaveable { mutableStateOf("TODOS") }
+    var newItemTitle by remember { mutableStateOf("") }
+    var newItemNotes by remember { mutableStateOf("") }
+    var newItemCategory by remember { mutableStateOf("Mercado") }
+    var newItemIsPinnedNote by remember { mutableStateOf(false) }
+
+    val categories = listOf("TODOS", "Mercado", "Casa", "Recados", "Farmácia")
+    val filteredItems = remember(allItems, selectedCategoryFilter) {
+        allItems
+            .filter { selectedCategoryFilter == "TODOS" || it.category.equals(selectedCategoryFilter, ignoreCase = true) }
+            .sortedWith(compareByDescending<com.example.data.FamilyMuralItem> { it.pinned }.thenBy { it.done })
+    }
+    val pinnedNotes = remember(filteredItems) { filteredItems.filter { it.pinned || it.isNote } }
+    val checklistItems = remember(filteredItems) { filteredItems.filter { !it.isNote } }
+    val completedChecklistCount = remember(checklistItems) { checklistItems.count { it.done } }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("family_mural_shared_list"),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        // Header & Quick Creation Card
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, accentColor.copy(alpha = 0.28f), RoundedCornerShape(cardRadius)),
+                shape = RoundedCornerShape(cardRadius),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "📌 Mural de Notas & Listas da Família",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = "Compartilhado em tempo real no Firestore e no Widget da Tela Inicial",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // Mode Switcher: Item de Lista / Compras vs Nota Fixada
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = !newItemIsPinnedNote,
+                            onClick = {
+                                newItemIsPinnedNote = false
+                                if (newItemCategory == "Recados") newItemCategory = "Mercado"
+                            },
+                            label = { Text("🛒 Item de Checklist", maxLines = 1, softWrap = false) },
+                            shape = organicButtonShape,
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = newItemIsPinnedNote,
+                            onClick = {
+                                newItemIsPinnedNote = true
+                                newItemCategory = "Recados"
+                            },
+                            label = { Text("📌 Nota / Recado Fixado", maxLines = 1, softWrap = false) },
+                            shape = organicButtonShape,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // Category chips
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf("Mercado", "Casa", "Recados", "Farmácia").forEach { cat ->
+                            FilterChip(
+                                selected = newItemCategory.equals(cat, ignoreCase = true),
+                                onClick = { newItemCategory = cat },
+                                label = { Text(cat, maxLines = 1, softWrap = false) },
+                                shape = organicButtonShape
+                            )
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = newItemTitle,
+                        onValueChange = { newItemTitle = it },
+                        label = {
+                            Text(if (newItemIsPinnedNote) "Título do Recado / Lembrete" else "Adicionar item na lista (ex.: Leite, Pão, Detergente)")
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("input_mural_new_title")
+                    )
+
+                    if (newItemIsPinnedNote) {
+                        OutlinedTextField(
+                            value = newItemNotes,
+                            onValueChange = { newItemNotes = it },
+                            label = { Text("Detalhes da nota (opcional)") },
+                            minLines = 2,
+                            maxLines = 4,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("input_mural_new_notes")
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            if (newItemTitle.isNotBlank()) {
+                                onAddMuralItem(
+                                    newItemTitle.trim(),
+                                    newItemCategory,
+                                    newItemNotes.trim(),
+                                    newItemIsPinnedNote,
+                                    newItemIsPinnedNote
+                                )
+                                newItemTitle = ""
+                                newItemNotes = ""
+                                localTick++
+                            }
+                        },
+                        shape = organicButtonShape,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("btn_add_mural_item_confirm")
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (newItemIsPinnedNote) "Fixar Nota no Mural da Família" else "Adicionar à Lista Compartilhada",
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
+        }
+
+        // Category Filter Row + "Limpar marcados" button
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                categories.forEach { cat ->
+                    FilterChip(
+                        selected = selectedCategoryFilter == cat,
+                        onClick = { selectedCategoryFilter = cat },
+                        label = { Text(if (cat == "TODOS") "Todos (${allItems.size})" else cat, maxLines = 1, softWrap = false) },
+                        shape = organicButtonShape
+                    )
+                }
+                if (completedChecklistCount > 0) {
+                    OutlinedButton(
+                        onClick = {
+                            val catToClear = if (selectedCategoryFilter == "TODOS") null else selectedCategoryFilter
+                            onClearCompletedMuralItems(catToClear)
+                            localTick++
+                        },
+                        shape = organicButtonShape,
+                        modifier = Modifier.testTag("btn_clear_completed_mural")
+                    ) {
+                        Text(
+                            text = "🧹 Limpar marcados ($completedChecklistCount)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
+        }
+
+        // Pinned Notes Section
+        if (pinnedNotes.isNotEmpty()) {
+            item {
+                Text(
+                    text = "📌 NOTAS & LEMBRETES FIXADOS",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = accentColor
+                )
+            }
+            items(pinnedNotes, key = { "note_${it.id}" }) { note ->
+                val memberColor = Color(note.addedByColorHex.toInt())
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.5.dp, memberColor.copy(alpha = 0.55f), RoundedCornerShape(cardRadius)),
+                    shape = RoundedCornerShape(cardRadius),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PushPin,
+                                    contentDescription = null,
+                                    tint = memberColor,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = note.title,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    shape = organicButtonShape,
+                                    color = memberColor.copy(alpha = 0.18f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .clip(CircleShape)
+                                                .background(memberColor)
+                                        )
+                                        Text(
+                                            text = note.addedBy,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = memberColor,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = {
+                                        onDeleteMuralItem(note.id)
+                                        localTick++
+                                    },
+                                    modifier = Modifier.size(30.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "Excluir nota",
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
+                            }
+                        }
+                        if (note.notes.isNotBlank()) {
+                            Text(
+                                text = note.notes,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Interactive Checklist Section (Lista de Compras / Mercado / Casa)
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "🛒 CHECKLISTS COMPARTILHADOS (${checklistItems.count { !it.done }} pendentes)",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        items(checklistItems, key = { "chk_${it.id}" }) { item ->
+            val creatorColor = Color(item.addedByColorHex.toInt())
+            val checkerColor = if (item.checkedByColorHex != 0L) Color(item.checkedByColorHex.toInt()) else creatorColor
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        width = 1.dp,
+                        color = if (item.done) MaterialTheme.colorScheme.outlineVariant else creatorColor.copy(alpha = 0.4f),
+                        shape = RoundedCornerShape(cardRadius)
+                    )
+                    .clickable {
+                        onToggleMuralItem(item.id)
+                        localTick++
+                    }
+                    .testTag("mural_checklist_item_${item.id}"),
+                shape = RoundedCornerShape(cardRadius),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = if (item.done) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                            contentDescription = "Marcar item",
+                            tint = if (item.done) IncomeEmerald else creatorColor,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = item.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                textDecoration = if (item.done) androidx.compose.ui.text.style.TextDecoration.LineThrough else androidx.compose.ui.text.style.TextDecoration.None,
+                                color = if (item.done) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = item.category,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = accentColor,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .clip(CircleShape)
+                                        .background(creatorColor)
+                                )
+                                Text(
+                                    text = "por ${item.addedBy}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (item.done && item.checkedBy.isNotBlank()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(checkerColor)
+                                    )
+                                    Text(
+                                        text = "✓ ${item.checkedBy}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = IncomeEmerald,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = {
+                                onTogglePinMuralItem(item.id)
+                                localTick++
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PushPin,
+                                contentDescription = "Fixar item",
+                                tint = if (item.pinned) accentColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                onDeleteMuralItem(item.id)
+                                localTick++
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteOutline,
+                                contentDescription = "Remover item",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun LocalGeminiApiKeyDialog(
     diaryRepo: PrivateDiaryRepository,
     onDismiss: () -> Unit,
@@ -1344,3 +2198,224 @@ private fun LocalGeminiApiKeyDialog(
         }
     )
 }
+
+@Composable
+private fun PrivateDiaryBiometricLockGate(
+    backupPin: String,
+    accentColor: Color,
+    onUnlocked: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val cardRadius = LocalOrganicCardRadius.current
+    var enteredPin by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val deviceCredentialLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            onUnlocked()
+        }
+    }
+
+    val launchNativeBiometricOrCredential: () -> Unit = remember(context) {
+        {
+            var launchedBiometric = false
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                try {
+                    val promptBuilder = android.hardware.biometrics.BiometricPrompt.Builder(context)
+                        .setTitle("Desbloquear Diário Privado")
+                        .setSubtitle("Use sua biometria ou PIN do aparelho")
+                        .setDescription("Seus registros do Diário Privado estão protegidos.")
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                        promptBuilder.setAllowedAuthenticators(
+                            android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                                android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                        )
+                    } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                        @Suppress("DEPRECATION")
+                        promptBuilder.setDeviceCredentialAllowed(true)
+                    } else {
+                        promptBuilder.setNegativeButton(
+                            "Usar PIN",
+                            androidx.core.content.ContextCompat.getMainExecutor(context)
+                        ) { _, _ -> }
+                    }
+                    val prompt = promptBuilder.build()
+                    val cancellationSignal = android.os.CancellationSignal()
+                    prompt.authenticate(
+                        cancellationSignal,
+                        androidx.core.content.ContextCompat.getMainExecutor(context),
+                        object : android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
+                            override fun onAuthenticationSucceeded(
+                                result: android.hardware.biometrics.BiometricPrompt.AuthenticationResult?
+                            ) {
+                                onUnlocked()
+                            }
+
+                            override fun onAuthenticationError(
+                                errorCode: Int,
+                                errString: CharSequence?
+                            ) {
+                                // Fallback to KeyguardManager or PIN field if hardware biometric is unavailable
+                                try {
+                                    val km = context.getSystemService(android.content.Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+                                    @Suppress("DEPRECATION")
+                                    val intent = km?.createConfirmDeviceCredentialIntent(
+                                        "Desbloquear Diário Privado",
+                                        "Confirme o bloqueio de tela do aparelho"
+                                    )
+                                    if (intent != null) {
+                                        deviceCredentialLauncher.launch(intent)
+                                    }
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                    )
+                    launchedBiometric = true
+                } catch (_: Exception) {
+                    launchedBiometric = false
+                }
+            }
+            if (!launchedBiometric) {
+                try {
+                    val km = context.getSystemService(android.content.Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+                    @Suppress("DEPRECATION")
+                    val intent = km?.createConfirmDeviceCredentialIntent(
+                        "Desbloquear Diário Privado",
+                        "Confirme sua identidade para acessar o Diário"
+                    )
+                    if (intent != null) {
+                        deviceCredentialLauncher.launch(intent)
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        launchNativeBiometricOrCredential()
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp)
+            .testTag("diary_biometric_lock_gate"),
+        contentAlignment = Alignment.Center
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(cardRadius),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(CircleShape)
+                        .background(accentColor.copy(alpha = 0.16f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = "Diário Protegido",
+                        tint = accentColor,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+
+                Text(
+                    text = "Diário Privado Protegido",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.ExtraBold
+                )
+
+                Text(
+                    text = "Use a Biometria / PIN do aparelho ou digite o seu PIN do Diário para acessar seus registros.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+
+                Button(
+                    onClick = { launchNativeBiometricOrCredential() },
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("btn_unlock_diary_biometric")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Key,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Desbloquear com Biometria / PIN do Aparelho",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                OutlinedTextField(
+                    value = enteredPin,
+                    onValueChange = { raw ->
+                        val digits = raw.filter { it.isDigit() }.take(6)
+                        enteredPin = digits
+                        errorMessage = null
+                        if (digits == backupPin) {
+                            onUnlocked()
+                        }
+                    },
+                    label = { Text("Ou digite o PIN do Diário") },
+                    placeholder = { Text("PIN numérico") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("input_unlock_diary_pin")
+                )
+
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage.orEmpty(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        if (enteredPin == backupPin) {
+                            onUnlocked()
+                        } else {
+                            errorMessage = "PIN incorreto. Tente novamente ou use a Biometria acima."
+                        }
+                    },
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("btn_unlock_diary_pin_confirm")
+                ) {
+                    Text("Entrar com PIN", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+

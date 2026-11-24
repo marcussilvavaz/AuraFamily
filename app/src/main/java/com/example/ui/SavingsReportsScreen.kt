@@ -75,6 +75,7 @@ import com.example.ui.theme.SavingsGold
 import com.example.ui.theme.WantsAmber
 import java.util.Locale
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SavingsReportsScreen(
     selectedYearMonth: String,
@@ -96,16 +97,44 @@ fun SavingsReportsScreen(
         category: String,
         targetYearMonth: String
     ) -> Unit,
+    onUpdateSavingsGoal: (
+        existing: SavingsGoal,
+        title: String,
+        targetAmountBrl: Double,
+        currentAmountBrl: Double,
+        incomePercentage: Int,
+        category: String,
+        targetYearMonth: String
+    ) -> Unit = { _, _, _, _, _, _, _ -> },
     onContributeGoal: (SavingsGoal, Double, Boolean) -> Unit,
-    onDeleteGoal: (String) -> Unit
+    onDeleteGoal: (String) -> Unit,
+    onUpdateCategoryBudget: (category: String, limitBrl: Double) -> Unit = { _, _ -> },
+    onAddCustomCategory: (String) -> Unit = {}
 ) {
     val cardRadius = LocalOrganicCardRadius.current
+    val hideValues = com.example.ui.theme.LocalFinancePrivacyHideValues.current
+    val triggerFeedback = rememberOmniFeedback()
     var showEditPlanDialog by remember { mutableStateOf(false) }
     var showAddGoalDialog by remember { mutableStateOf(false) }
+    var editingGoal by remember { mutableStateOf<SavingsGoal?>(null) }
+    var deletingGoal by remember { mutableStateOf<SavingsGoal?>(null) }
     var goalForContribution by remember { mutableStateOf<SavingsGoal?>(null) }
+    var editingCategoryBudget by remember { mutableStateOf<String?>(null) }
+    var showNewCategoryDialog by remember { mutableStateOf(false) }
+
+    val prevYearMonth = remember(selectedYearMonth) {
+        DateCalendarUtils.shiftYearMonth(selectedYearMonth, -1)
+    }
 
     val monthTransactions = remember(transactions, selectedYearMonth) {
         transactions.filter { it.yearMonth == selectedYearMonth }
+    }
+    val prevMonthExpenses = remember(transactions, prevYearMonth) {
+        transactions.filter { it.yearMonth == prevYearMonth && it.type == "EXPENSE" }
+    }
+    val prevCategoryTotals = remember(prevMonthExpenses) {
+        prevMonthExpenses.groupBy { it.category }
+            .mapValues { (_, list) -> list.sumOf { it.amountBrl } }
     }
     val monthExpenses = remember(monthTransactions) {
         monthTransactions.filter { it.type == "EXPENSE" }
@@ -115,6 +144,7 @@ fun SavingsReportsScreen(
     }
     val effectiveIncomeBrl = maxOf(household.monthlyIncomeBrl, loggedIncomeBrl)
     val totalExpensesBrl = monthExpenses.sumOf { it.amountBrl }
+    val prevTotalExpensesBrl = prevMonthExpenses.sumOf { it.amountBrl }
 
     val needsSpent = monthExpenses.filter { it.budgetBucket == "NEEDS" }.sumOf { it.amountBrl }
     val wantsSpent = monthExpenses.filter { it.budgetBucket == "WANTS" }.sumOf { it.amountBrl }
@@ -125,6 +155,17 @@ fun SavingsReportsScreen(
             .mapValues { (_, list) -> list.sumOf { it.amountBrl } }
             .entries
             .sortedByDescending { it.value }
+    }
+
+    val allAvailableCategories = remember(household.customCategories, household.categoryBudgetsBrl, categoryBreakdown) {
+        val defaultCats = listOf(
+            "Moradia", "Alimentação", "Supermercado", "Transporte",
+            "Saúde", "Educação", "Lazer", "Assinaturas", "Cartão", "Outros"
+        )
+        (defaultCats + household.customCategories + household.categoryBudgetsBrl.keys + categoryBreakdown.map { it.key })
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
     }
 
     LazyColumn(
@@ -143,24 +184,27 @@ fun SavingsReportsScreen(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Economia & Relatórios",
+                        text = "Metas & Teto de Gastos",
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Análise de ${DateCalendarUtils.formatYearMonthDisplay(selectedYearMonth)} e Metas Familiares",
+                        text = "Análise de ${DateCalendarUtils.formatYearMonthDisplay(selectedYearMonth)} vs ${DateCalendarUtils.formatYearMonthDisplay(prevYearMonth)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Button(
-                    onClick = { showAddGoalDialog = true },
+                    onClick = {
+                        editingGoal = null
+                        showAddGoalDialog = true
+                    },
                     shape = RoundedCornerShape(50),
                     modifier = Modifier.testTag("new_savings_goal_btn")
                 ) {
                     Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Nova Meta")
+                    Text("Nova Meta", maxLines = 1, softWrap = false)
                 }
             }
         }
@@ -183,12 +227,12 @@ fun SavingsReportsScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Regra de Orçamento por Porcentagem (${household.needsPercentage}/${household.wantsPercentage}/${household.savingsPercentage})",
+                                text = "Regra de Orçamento (${household.needsPercentage}/${household.wantsPercentage}/${household.savingsPercentage})",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Renda Familiar Base: ${formatCurrencyBrl(effectiveIncomeBrl)}",
+                                text = "Renda Familiar Base: ${formatCurrencyBrl(effectiveIncomeBrl, hideValues)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = JetBrainsMonoFontFamily,
                                 color = MaterialTheme.colorScheme.primary,
@@ -202,7 +246,7 @@ fun SavingsReportsScreen(
                         ) {
                             Icon(imageVector = Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Personalizar %")
+                            Text("Personalizar %", maxLines = 1, softWrap = false)
                         }
                     }
 
@@ -224,6 +268,212 @@ fun SavingsReportsScreen(
                         limitBrl = effectiveIncomeBrl * (household.savingsPercentage / 100.0),
                         barColor = SavingsGold
                     )
+                }
+            }
+        }
+
+        // 2.5. Category Spending Caps (Teto de Gastos) & Monthly Comparison Ranking
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("category_budgets_comparison_card"),
+                shape = RoundedCornerShape(cardRadius),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "🎯 Teto de Gastos por Categoria & Comparativo",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            val monthDiffText = if (prevTotalExpensesBrl > 0.0) {
+                                val diffPct = ((totalExpensesBrl - prevTotalExpensesBrl) / prevTotalExpensesBrl) * 100.0
+                                val sign = if (diffPct >= 0) "+" else ""
+                                "Total do mês: $sign${String.format(Locale.forLanguageTag("pt-BR"), "%.0f%%", diffPct)} vs ${DateCalendarUtils.formatYearMonthDisplay(prevYearMonth)}"
+                            } else {
+                                "Defina limites mensais por categoria com alerta visual"
+                            }
+                            Text(
+                                text = monthDiffText,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        FilledTonalButton(
+                            onClick = { showNewCategoryDialog = true },
+                            shape = RoundedCornerShape(50),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("add_custom_category_reports_btn")
+                        ) {
+                            Text("+ Categoria", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
+                        }
+                    }
+
+                    // Filter chips to quickly set or edit a Teto de Gastos on any category
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        allAvailableCategories.forEach { cat ->
+                            val hasCap = (household.categoryBudgetsBrl[cat] ?: 0.0) > 0.0
+                            FilterChip(
+                                selected = hasCap,
+                                onClick = { editingCategoryBudget = cat },
+                                label = {
+                                    val capVal = household.categoryBudgetsBrl[cat] ?: 0.0
+                                    Text(
+                                        text = if (capVal > 0.0) "$cat: ${formatCurrencyBrl(capVal, hideValues)}" else "+ Teto: $cat",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    val rankedCategories = remember(categoryBreakdown, household.categoryBudgetsBrl) {
+                        val map = linkedMapOf<String, Double>()
+                        categoryBreakdown.forEach { map[it.key] = it.value }
+                        household.categoryBudgetsBrl.forEach { (cat, limit) ->
+                            if (limit > 0.0 && !map.containsKey(cat)) {
+                                map[cat] = 0.0
+                            }
+                        }
+                        map.entries.toList()
+                    }
+
+                    if (rankedCategories.isEmpty()) {
+                        Text(
+                            text = "Toque em qualquer categoria acima para definir um Teto de Gastos mensal.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        rankedCategories.forEachIndexed { index, (cat, spentBrl) ->
+                            val prevSpent = prevCategoryTotals[cat] ?: 0.0
+                            val capBrl = household.categoryBudgetsBrl[cat] ?: 0.0
+                            val diffBadgeText = when {
+                                prevSpent > 0.0 -> {
+                                    val diffPct = ((spentBrl - prevSpent) / prevSpent) * 100.0
+                                    val sign = if (diffPct >= 0) "+" else ""
+                                    "$sign${String.format(Locale.forLanguageTag("pt-BR"), "%.0f%%", diffPct)} vs mês ant."
+                                }
+                                spentBrl > 0.0 -> "Novo neste mês"
+                                else -> "Sem gastos"
+                            }
+                            val diffBadgeColor = when {
+                                prevSpent > 0.0 && spentBrl > prevSpent * 1.05 -> ExpenseCoral
+                                prevSpent > 0.0 && spentBrl < prevSpent * 0.95 -> IncomeEmerald
+                                else -> MaterialTheme.colorScheme.primary
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text(
+                                                text = "#${index + 1} $cat",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Surface(
+                                                shape = RoundedCornerShape(50),
+                                                color = diffBadgeColor.copy(alpha = 0.14f)
+                                            ) {
+                                                Text(
+                                                    text = diffBadgeText,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = diffBadgeColor,
+                                                    fontWeight = FontWeight.Bold,
+                                                    maxLines = 1,
+                                                    softWrap = false,
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                        }
+                                        TextButton(
+                                            onClick = { editingCategoryBudget = cat },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                        ) {
+                                            Text(
+                                                text = if (capBrl > 0.0) "Editar Teto" else "Definir Teto",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                maxLines = 1,
+                                                softWrap = false
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "Gasto: ${formatCurrencyBrl(spentBrl, hideValues)}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = if (capBrl > 0.0) {
+                                                val pct = ((spentBrl / capBrl) * 100.0).toInt()
+                                                "Teto: ${formatCurrencyBrl(capBrl, hideValues)} ($pct%)"
+                                            } else {
+                                                "Mês ant.: ${formatCurrencyBrl(prevSpent, hideValues)}"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            color = if (capBrl > 0.0 && spentBrl > capBrl) ExpenseCoral else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+
+                                    if (capBrl > 0.0) {
+                                        val progress = (spentBrl / capBrl).toFloat().coerceIn(0f, 1f)
+                                        val barColor = when {
+                                            spentBrl > capBrl -> ExpenseCoral
+                                            progress >= 0.85f -> WantsAmber
+                                            else -> IncomeEmerald
+                                        }
+                                        LinearProgressIndicator(
+                                            progress = { progress },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(8.dp)
+                                                .clip(RoundedCornerShape(50)),
+                                            color = barColor,
+                                            trackColor = MaterialTheme.colorScheme.surfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -250,7 +500,7 @@ fun SavingsReportsScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Total gasto em ${DateCalendarUtils.formatYearMonthDisplay(selectedYearMonth)}: ${formatCurrencyBrl(totalExpensesBrl)}",
+                                text = "Total gasto em ${DateCalendarUtils.formatYearMonthDisplay(selectedYearMonth)}: ${formatCurrencyBrl(totalExpensesBrl, hideValues)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = JetBrainsMonoFontFamily,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -359,7 +609,7 @@ fun SavingsReportsScreen(
                                             )
                                         }
                                         Text(
-                                            text = "${String.format(Locale.forLanguageTag("pt-BR"), "%.0f%%", pct)} • ${formatCurrencyBrl(entry.value)}",
+                                            text = "${String.format(Locale.forLanguageTag("pt-BR"), "%.0f%%", pct)} • ${formatCurrencyBrl(entry.value, hideValues)}",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontFamily = JetBrainsMonoFontFamily,
                                             fontWeight = FontWeight.Bold
@@ -422,26 +672,181 @@ fun SavingsReportsScreen(
                 SavingsGoalCard(
                     goal = goal,
                     effectiveIncomeBrl = effectiveIncomeBrl,
+                    hideValues = hideValues,
                     onContributeClick = { goalForContribution = goal },
-                    onDeleteClick = { onDeleteGoal(goal.id) }
+                    onEditClick = {
+                        editingGoal = goal
+                        showAddGoalDialog = true
+                    },
+                    onDeleteClick = { deletingGoal = goal }
                 )
             }
         }
+    }
+
+    editingCategoryBudget?.let { cat ->
+        val initialLimit = household.categoryBudgetsBrl[cat] ?: 0.0
+        var limitText by remember(cat) {
+            mutableStateOf(if (initialLimit > 0.0) String.format(Locale.US, "%.2f", initialLimit) else "")
+        }
+        AlertDialog(
+            onDismissRequest = { editingCategoryBudget = null },
+            title = {
+                Text(
+                    text = "Teto de Gastos: $cat",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Defina o limite mensal para '$cat'. Deixe 0 para remover o limite.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = limitText,
+                        onValueChange = { limitText = it },
+                        label = { Text("Teto Mensal (R$)") },
+                        placeholder = { Text("Ex: 1200.00") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val parsed = limitText.replace(",", ".").toDoubleOrNull() ?: 0.0
+                        onUpdateCategoryBudget(cat, parsed.coerceAtLeast(0.0))
+                        triggerFeedback(
+                            if (parsed > 0.0) "Teto de $cat salvo!" else "Teto de $cat removido."
+                        )
+                        editingCategoryBudget = null
+                    }
+                ) {
+                    Text("Salvar Teto")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingCategoryBudget = null }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    if (showNewCategoryDialog) {
+        var newCatName by remember { mutableStateOf("") }
+        var newCatLimit by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showNewCategoryDialog = false },
+            title = {
+                Text(
+                    text = "Nova Categoria da Família",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Esta categoria será sincronizada para todos os aparelhos da família:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = newCatName,
+                        onValueChange = { newCatName = it },
+                        label = { Text("Nome da Categoria") },
+                        placeholder = { Text("Ex: Pets / Farmácia") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = newCatLimit,
+                        onValueChange = { newCatLimit = it },
+                        label = { Text("Teto Mensal Opcional (R$)") },
+                        placeholder = { Text("Ex: 400.00") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val clean = newCatName.trim()
+                        if (clean.isNotEmpty()) {
+                            onAddCustomCategory(clean)
+                            val limitVal = newCatLimit.replace(",", ".").toDoubleOrNull() ?: 0.0
+                            if (limitVal > 0.0) {
+                                onUpdateCategoryBudget(clean, limitVal)
+                            }
+                            triggerFeedback("Categoria '$clean' sincronizada na família!")
+                            showNewCategoryDialog = false
+                        }
+                    },
+                    enabled = newCatName.trim().isNotEmpty()
+                ) {
+                    Text("Criar Categoria")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNewCategoryDialog = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 
     if (showEditPlanDialog) {
         EditBudgetPlanDialog(
             household = household,
             onDismiss = { showEditPlanDialog = false },
-            onSave = onSaveBudgetPlan
+            onSave = { name, inc, n, w, s ->
+                onSaveBudgetPlan(name, inc, n, w, s)
+                triggerFeedback("Plano de economia salvo com sucesso!")
+            }
         )
     }
 
     if (showAddGoalDialog) {
+        val currentEditing = editingGoal
         AddSavingsGoalDialog(
+            initialGoal = currentEditing,
             effectiveIncomeBrl = effectiveIncomeBrl,
-            onDismiss = { showAddGoalDialog = false },
-            onSave = onAddSavingsGoal
+            onDismiss = {
+                showAddGoalDialog = false
+                editingGoal = null
+            },
+            onSave = { title, target, current, pct, cat, ym ->
+                if (currentEditing == null) {
+                    onAddSavingsGoal(title, target, current, pct, cat, ym)
+                    triggerFeedback("Meta '$title' criada com sucesso!")
+                } else {
+                    onUpdateSavingsGoal(currentEditing, title, target, current, pct, cat, ym)
+                    triggerFeedback("Meta '$title' atualizada!")
+                }
+                editingGoal = null
+            }
+        )
+    }
+
+    val goalToDelete = deletingGoal
+    if (goalToDelete != null) {
+        OmniConfirmDeleteDialog(
+            title = "Excluir Meta Financeira",
+            message = "Deseja excluir a meta '${goalToDelete.title}'?",
+            onConfirm = {
+                onDeleteGoal(goalToDelete.id)
+                triggerFeedback("Meta '${goalToDelete.title}' removida")
+                deletingGoal = null
+            },
+            onDismiss = { deletingGoal = null }
         )
     }
 
@@ -452,6 +857,7 @@ fun SavingsReportsScreen(
             onDismiss = { goalForContribution = null },
             onConfirm = { amount, recordInMonth ->
                 onContributeGoal(goal, amount, recordInMonth)
+                triggerFeedback("Aporte registrado na meta '${goal.title}'!")
             }
         )
     }
@@ -461,7 +867,9 @@ fun SavingsReportsScreen(
 private fun SavingsGoalCard(
     goal: SavingsGoal,
     effectiveIncomeBrl: Double,
+    hideValues: Boolean = false,
     onContributeClick: () -> Unit,
+    onEditClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
     val cardRadius = LocalOrganicCardRadius.current
@@ -490,21 +898,33 @@ private fun SavingsGoalCard(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "${goal.category} • Alocação: ${goal.incomePercentage}% da renda (${formatCurrencyBrl(monthlySuggestedBrl)}/mês)",
+                        text = "${goal.category} • Alocação: ${goal.incomePercentage}% da renda (${formatCurrencyBrl(monthlySuggestedBrl, hideValues)}/mês)",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
 
-                IconButton(
-                    onClick = onDeleteClick,
-                    modifier = Modifier.testTag("delete_goal_btn_${goal.id}")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.DeleteOutline,
-                        contentDescription = "Excluir meta",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                Row {
+                    IconButton(
+                        onClick = onEditClick,
+                        modifier = Modifier.testTag("edit_goal_btn_${goal.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "Editar meta",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    IconButton(
+                        onClick = onDeleteClick,
+                        modifier = Modifier.testTag("delete_goal_btn_${goal.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = "Excluir meta",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
             }
 
@@ -515,14 +935,14 @@ private fun SavingsGoalCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "Acumulado: ${formatCurrencyBrl(goal.currentAmountBrl)}",
+                    text = "Acumulado: ${formatCurrencyBrl(goal.currentAmountBrl, hideValues)}",
                     style = MaterialTheme.typography.labelLarge,
                     fontFamily = JetBrainsMonoFontFamily,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = "Meta: ${formatCurrencyBrl(goal.targetAmountBrl)} (${(progress * 100).toInt()}%)",
+                    text = "Meta: ${formatCurrencyBrl(goal.targetAmountBrl, hideValues)} (${(progress * 100).toInt()}%)",
                     style = MaterialTheme.typography.labelMedium,
                     fontFamily = JetBrainsMonoFontFamily,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -706,6 +1126,7 @@ private fun EditBudgetPlanDialog(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AddSavingsGoalDialog(
+    initialGoal: SavingsGoal? = null,
     effectiveIncomeBrl: Double,
     onDismiss: () -> Unit,
     onSave: (
@@ -717,12 +1138,22 @@ private fun AddSavingsGoalDialog(
         targetYearMonth: String
     ) -> Unit
 ) {
-    var title by remember { mutableStateOf("") }
-    var targetText by remember { mutableStateOf("10000") }
-    var currentText by remember { mutableStateOf("0") }
-    var percentageText by remember { mutableStateOf("10") }
-    var category by remember { mutableStateOf("Reserva") }
-    var targetYearMonth by remember { mutableStateOf("2027-12") }
+    var title by remember(initialGoal) { mutableStateOf(initialGoal?.title ?: "") }
+    var targetText by remember(initialGoal) {
+        mutableStateOf(
+            if (initialGoal != null) String.format(Locale.US, "%.2f", initialGoal.targetAmountBrl)
+            else "10000"
+        )
+    }
+    var currentText by remember(initialGoal) {
+        mutableStateOf(
+            if (initialGoal != null) String.format(Locale.US, "%.2f", initialGoal.currentAmountBrl)
+            else "0"
+        )
+    }
+    var percentageText by remember(initialGoal) { mutableStateOf((initialGoal?.incomePercentage ?: 10).toString()) }
+    var category by remember(initialGoal) { mutableStateOf(initialGoal?.category ?: "Reserva") }
+    var targetYearMonth by remember(initialGoal) { mutableStateOf(initialGoal?.targetYearMonth ?: "2027-12") }
 
     val targetVal = targetText.replace(",", ".").toDoubleOrNull() ?: 0.0
     val currentVal = currentText.replace(",", ".").toDoubleOrNull() ?: 0.0
@@ -733,7 +1164,7 @@ private fun AddSavingsGoalDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "Nova Meta Familiar por Porcentagem",
+                text = if (initialGoal == null) "Nova Meta Familiar por Porcentagem" else "Editar Meta Familiar",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
@@ -827,7 +1258,7 @@ private fun AddSavingsGoalDialog(
                 enabled = title.isNotBlank() && targetVal > 0.0,
                 modifier = Modifier.testTag("save_goal_confirm_btn")
             ) {
-                Text("Criar Meta")
+                Text(if (initialGoal == null) "Criar Meta" else "Atualizar Meta")
             }
         },
         dismissButton = {

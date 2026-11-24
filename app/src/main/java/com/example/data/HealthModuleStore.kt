@@ -37,17 +37,19 @@ data class DailyTrackerHabit(
 )
 
 /**
- * 2. Registro de Glicemia (mg/dL)
+ * 2. Registro de Monitoramento de Glicemia (mg/dL) com separação individual por membro
  */
 data class GlucoseRecord(
     val id: String,
     val dateIso: String,       // YYYY-MM-DD
     val dateEpochDay: Long,
     val timeHHmm: String,      // HH:mm
-    val slot: String,          // Jejum, 1h pós-café, Pré-almoço, 1h pós-almoço, etc.
+    val slot: String,          // Jejum, Pré-Refeição, 1h Pós-Café, 2h Pós-Café, etc.
     val valueMgDl: Int,
     val notes: String,
     val privacyScope: String = PrivacyScope.PERSONAL,
+    val memberId: String = "",
+    val memberName: String = "",
     val createdAtMillis: Long = System.currentTimeMillis()
 ) {
     fun statusLabel(): String = when {
@@ -59,13 +61,16 @@ data class GlucoseRecord(
         else -> "Alerta Elevado"
     }
 
+    val timeFormatted: String
+        get() = timeHHmm
+
     fun isAlert(): Boolean = valueMgDl < 70 ||
         (slot.contains("Jejum", ignoreCase = true) && valueMgDl > 125) ||
         (!slot.contains("Jejum", ignoreCase = true) && valueMgDl > 180)
 }
 
 /**
- * 3. Registro de Pressão Arterial (mmHg) e Pulso (bpm)
+ * 3. Registro de Pressão Arterial (mmHg) e Pulso (bpm) com separação individual por membro
  */
 data class BloodPressureRecord(
     val id: String,
@@ -77,6 +82,8 @@ data class BloodPressureRecord(
     val pulseBpm: Int = 72,    // ex: 72
     val notes: String,
     val privacyScope: String = PrivacyScope.PERSONAL,
+    val memberId: String = "",
+    val memberName: String = "",
     val createdAtMillis: Long = System.currentTimeMillis()
 ) {
     fun formattedValue(): String = "${systolic}/${diastolic} mmHg"
@@ -131,7 +138,16 @@ data class PostMealTimerState(
     val pausedRemainingSeconds: Int = 3600,
     val startedAtHHmm: String = "",
     val completedAlertPending: Boolean = false
-)
+) {
+    val durationMillis: Long
+        get() = totalDurationSeconds * 1000L
+
+    val targetEpochMillis: Long
+        get() = targetEndEpochMillis
+
+    val pausedRemainingMillis: Long
+        get() = if (isPaused) pausedRemainingSeconds * 1000L else 0L
+}
 
 /**
  * Estado consolidado do Módulo de Saúde (Passo 3)
@@ -287,10 +303,12 @@ class HealthRepository(context: Context) {
                         dateIso = obj.optString("dateIso"),
                         dateEpochDay = obj.optLong("dateEpochDay", DateCalendarUtils.todayEpochDay()),
                         timeHHmm = obj.optString("timeHHmm", "08:00"),
-                        slot = obj.optString("slot", DiabetesSlotCatalog.JEJUM),
+                        slot = DiabetesSlotCatalog.normalizeSlot(obj.optString("slot", DiabetesSlotCatalog.JEJUM)),
                         valueMgDl = obj.optInt("valueMgDl", 95),
                         notes = obj.optString("notes", ""),
                         privacyScope = obj.optString("privacyScope", PrivacyScope.PERSONAL),
+                        memberId = obj.optString("memberId", ""),
+                        memberName = obj.optString("memberName", ""),
                         createdAtMillis = obj.optLong("createdAtMillis", System.currentTimeMillis())
                     )
                 )
@@ -312,6 +330,8 @@ class HealthRepository(context: Context) {
                         pulseBpm = obj.optInt("pulseBpm", 72),
                         notes = obj.optString("notes", ""),
                         privacyScope = obj.optString("privacyScope", PrivacyScope.PERSONAL),
+                        memberId = obj.optString("memberId", ""),
+                        memberName = obj.optString("memberName", ""),
                         createdAtMillis = obj.optLong("createdAtMillis", System.currentTimeMillis())
                     )
                 )
@@ -420,6 +440,8 @@ class HealthRepository(context: Context) {
                     put("valueMgDl", g.valueMgDl)
                     put("notes", g.notes)
                     put("privacyScope", g.privacyScope)
+                    put("memberId", g.memberId)
+                    put("memberName", g.memberName)
                     put("createdAtMillis", g.createdAtMillis)
                 }
             )
@@ -439,6 +461,8 @@ class HealthRepository(context: Context) {
                     put("pulseBpm", bp.pulseBpm)
                     put("notes", bp.notes)
                     put("privacyScope", bp.privacyScope)
+                    put("memberId", bp.memberId)
+                    put("memberName", bp.memberName)
                     put("createdAtMillis", bp.createdAtMillis)
                 }
             )
@@ -486,6 +510,7 @@ class HealthRepository(context: Context) {
 
         prefs.edit().putString(KEY_HEALTH_JSON, root.toString()).apply()
         _stateFlow.value = updated
+        com.example.widget.OmniHomeWidgetProvider.requestUpdate(appContext)
     }
 
     private fun defaultTrackers(): List<DailyTrackerHabit> = listOf(
@@ -718,6 +743,37 @@ class HealthRepository(context: Context) {
         saveState(current.copy(trackers = current.trackers + newHabit))
     }
 
+    fun updateCustomTracker(
+        trackerId: String,
+        title: String,
+        emoji: String,
+        unit: String,
+        targetValue: Int,
+        stepValue: Int,
+        colorHex: Long,
+        privacyScope: String
+    ) {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isEmpty()) return
+        val current = _stateFlow.value
+        val updatedTrackers = current.trackers.map { existing ->
+            if (existing.id == trackerId) {
+                existing.copy(
+                    title = cleanTitle,
+                    emoji = emoji.ifBlank { existing.emoji },
+                    unit = unit.trim().ifBlank { existing.unit },
+                    targetValue = targetValue.coerceAtLeast(1),
+                    stepValue = stepValue.coerceAtLeast(1),
+                    colorHex = colorHex,
+                    privacyScope = privacyScope
+                )
+            } else {
+                existing
+            }
+        }
+        saveState(current.copy(trackers = updatedTrackers))
+    }
+
     fun deleteTracker(trackerId: String) {
         val current = _stateFlow.value
         saveState(current.copy(trackers = current.trackers.filterNot { it.id == trackerId }))
@@ -733,7 +789,9 @@ class HealthRepository(context: Context) {
         slot: String,
         valueMgDl: Int,
         notes: String,
-        privacyScope: String
+        privacyScope: String,
+        memberId: String = "",
+        memberName: String = ""
     ) {
         val current = _stateFlow.value
         val newRecord = GlucoseRecord(
@@ -741,15 +799,75 @@ class HealthRepository(context: Context) {
             dateIso = DateCalendarUtils.formatIsoDate(dateEpochDay),
             dateEpochDay = dateEpochDay,
             timeHHmm = timeHHmm.ifBlank { DateCalendarUtils.currentTimeHHmm() },
-            slot = slot,
+            slot = DiabetesSlotCatalog.normalizeSlot(slot),
             valueMgDl = valueMgDl.coerceIn(20, 600),
             notes = notes.trim(),
-            privacyScope = privacyScope
+            privacyScope = privacyScope,
+            memberId = memberId,
+            memberName = memberName
         )
         val sorted = (listOf(newRecord) + current.glucoseRecords).sortedWith(
             compareByDescending<GlucoseRecord> { it.dateEpochDay }.thenByDescending { it.timeHHmm }
         )
         saveState(current.copy(glucoseRecords = sorted))
+    }
+
+    fun addGlucoseRecord(
+        dateIso: String,
+        timeFormatted: String,
+        slot: String,
+        valueMgDl: Int,
+        notes: String = "",
+        privacyScope: String = PrivacyScope.PERSONAL,
+        memberId: String = "",
+        memberName: String = ""
+    ) {
+        val epochDay = runCatching { java.time.LocalDate.parse(dateIso).toEpochDay() }
+            .getOrDefault(DateCalendarUtils.todayEpochDay())
+        addGlucoseRecord(
+            dateEpochDay = epochDay,
+            timeHHmm = timeFormatted,
+            slot = slot,
+            valueMgDl = valueMgDl,
+            notes = notes,
+            privacyScope = privacyScope,
+            memberId = memberId,
+            memberName = memberName
+        )
+    }
+
+    fun updateGlucoseRecord(
+        recordId: String,
+        dateEpochDay: Long,
+        timeHHmm: String,
+        slot: String,
+        valueMgDl: Int,
+        notes: String,
+        privacyScope: String,
+        memberId: String = "",
+        memberName: String = ""
+    ) {
+        val current = _stateFlow.value
+        val updated = current.glucoseRecords.map { existing ->
+            if (existing.id == recordId) {
+                existing.copy(
+                    dateIso = DateCalendarUtils.formatIsoDate(dateEpochDay),
+                    dateEpochDay = dateEpochDay,
+                    timeHHmm = timeHHmm.ifBlank { existing.timeHHmm },
+                    slot = DiabetesSlotCatalog.normalizeSlot(slot),
+                    valueMgDl = valueMgDl.coerceIn(20, 600),
+                    notes = notes.trim(),
+                    privacyScope = privacyScope,
+                    memberId = memberId.ifBlank { existing.memberId },
+                    memberName = memberName.ifBlank { existing.memberName }
+                )
+            } else {
+                existing
+            }
+        }.sortedWith(
+            compareByDescending<GlucoseRecord> { it.dateEpochDay }.thenByDescending { it.timeHHmm }
+        )
+        saveState(current.copy(glucoseRecords = updated))
     }
 
     fun deleteGlucoseRecord(recordId: String) {
@@ -764,7 +882,9 @@ class HealthRepository(context: Context) {
         diastolic: Int,
         pulseBpm: Int,
         notes: String,
-        privacyScope: String
+        privacyScope: String,
+        memberId: String = "",
+        memberName: String = ""
     ) {
         val current = _stateFlow.value
         val newRecord = BloodPressureRecord(
@@ -776,7 +896,9 @@ class HealthRepository(context: Context) {
             diastolic = diastolic.coerceIn(30, 180),
             pulseBpm = pulseBpm.coerceIn(35, 220),
             notes = notes.trim(),
-            privacyScope = privacyScope
+            privacyScope = privacyScope,
+            memberId = memberId,
+            memberName = memberName
         )
         val sorted = (listOf(newRecord) + current.bloodPressureRecords).sortedWith(
             compareByDescending<BloodPressureRecord> { it.dateEpochDay }.thenByDescending { it.timeHHmm }
@@ -784,9 +906,92 @@ class HealthRepository(context: Context) {
         saveState(current.copy(bloodPressureRecords = sorted))
     }
 
+    fun updateBloodPressureRecord(
+        recordId: String,
+        dateEpochDay: Long,
+        timeHHmm: String,
+        systolic: Int,
+        diastolic: Int,
+        pulseBpm: Int,
+        notes: String,
+        privacyScope: String,
+        memberId: String = "",
+        memberName: String = ""
+    ) {
+        val current = _stateFlow.value
+        val updated = current.bloodPressureRecords.map { existing ->
+            if (existing.id == recordId) {
+                existing.copy(
+                    dateIso = DateCalendarUtils.formatIsoDate(dateEpochDay),
+                    dateEpochDay = dateEpochDay,
+                    timeHHmm = timeHHmm.ifBlank { existing.timeHHmm },
+                    systolic = systolic.coerceIn(50, 260),
+                    diastolic = diastolic.coerceIn(30, 180),
+                    pulseBpm = pulseBpm.coerceIn(35, 220),
+                    notes = notes.trim(),
+                    privacyScope = privacyScope,
+                    memberId = memberId.ifBlank { existing.memberId },
+                    memberName = memberName.ifBlank { existing.memberName }
+                )
+            } else {
+                existing
+            }
+        }.sortedWith(
+            compareByDescending<BloodPressureRecord> { it.dateEpochDay }.thenByDescending { it.timeHHmm }
+        )
+        saveState(current.copy(bloodPressureRecords = updated))
+    }
+
     fun deleteBloodPressureRecord(recordId: String) {
         val current = _stateFlow.value
         saveState(current.copy(bloodPressureRecords = current.bloodPressureRecords.filterNot { it.id == recordId }))
+    }
+
+    /**
+     * Mescla registros de glicemia e pressão arterial recuperados de armazenamento legado ou backup JSON
+     * evitando duplicatas por ID ou assinatura (data + hora + valor).
+     */
+    fun mergeImportedHealthRecords(
+        importedGlucose: List<GlucoseRecord>,
+        importedBp: List<BloodPressureRecord>
+    ): Int {
+        val current = _stateFlow.value
+        val existingGlIds = current.glucoseRecords.map { it.id }.toMutableSet()
+        val existingGlSigs = current.glucoseRecords.map { "${it.dateIso}_${it.timeHHmm}_${it.valueMgDl}_${it.memberId}" }.toMutableSet()
+
+        val addedGlucose = mutableListOf<GlucoseRecord>()
+        for (rec in importedGlucose) {
+            val sig = "${rec.dateIso}_${rec.timeHHmm}_${rec.valueMgDl}_${rec.memberId}"
+            if (!existingGlIds.contains(rec.id) && !existingGlSigs.contains(sig)) {
+                existingGlIds.add(rec.id)
+                existingGlSigs.add(sig)
+                addedGlucose.add(rec.copy(slot = DiabetesSlotCatalog.normalizeSlot(rec.slot)))
+            }
+        }
+
+        val existingBpIds = current.bloodPressureRecords.map { it.id }.toMutableSet()
+        val existingBpSigs = current.bloodPressureRecords.map { "${it.dateIso}_${it.timeHHmm}_${it.systolic}_${it.diastolic}_${it.memberId}" }.toMutableSet()
+        val addedBp = mutableListOf<BloodPressureRecord>()
+        for (bp in importedBp) {
+            val sig = "${bp.dateIso}_${bp.timeHHmm}_${bp.systolic}_${bp.diastolic}_${bp.memberId}"
+            if (!existingBpIds.contains(bp.id) && !existingBpSigs.contains(sig)) {
+                existingBpIds.add(bp.id)
+                existingBpSigs.add(sig)
+                addedBp.add(bp)
+            }
+        }
+
+        val totalAdded = addedGlucose.size + addedBp.size
+        if (totalAdded > 0) {
+            val mergedGl = (current.glucoseRecords + addedGlucose).sortedWith(
+                compareByDescending<GlucoseRecord> { it.dateEpochDay }.thenByDescending { it.timeHHmm }
+            )
+            val mergedBp = (current.bloodPressureRecords + addedBp).sortedWith(
+                compareByDescending<BloodPressureRecord> { it.dateEpochDay }.thenByDescending { it.timeHHmm }
+            )
+            saveState(current.copy(glucoseRecords = mergedGl, bloodPressureRecords = mergedBp))
+        }
+        return totalAdded
     }
 
     // =========================================================================
@@ -860,6 +1065,31 @@ class HealthRepository(context: Context) {
                 )
             )
         )
+    }
+
+    fun startPostMealTimer(mealLabel: String, durationMillis: Long) {
+        startPostMealTimer(
+            mealLabel = mealLabel,
+            durationSeconds = (durationMillis / 1000L).toInt().coerceAtLeast(60)
+        )
+    }
+
+    fun pausePostMealTimer() {
+        val timer = _stateFlow.value.postMealTimer
+        if (timer.isRunning && !timer.isPaused) {
+            pauseOrResumePostMealTimer()
+        }
+    }
+
+    fun resumePostMealTimer() {
+        val timer = _stateFlow.value.postMealTimer
+        if (timer.isRunning && timer.isPaused) {
+            pauseOrResumePostMealTimer()
+        }
+    }
+
+    fun markPostMealTimerCompleted() {
+        markPostMealTimerFinished()
     }
 
     fun dismissPostMealTimerAlert() {
@@ -1050,7 +1280,7 @@ object MedicalReportPdfGenerator {
             12f,
             boxFillPaint
         )
-        canvas.drawText("AURAMANAGER • RELATÓRIO MÉDICO E DE SAÚDE", leftMargin + 14f, y + 4f, titlePaint)
+        canvas.drawText("OMNI • RELATÓRIO MÉDICO E DE SAÚDE", leftMargin + 14f, y + 4f, titlePaint)
         val emittedNow = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.forLanguageTag("pt-BR")).format(Date())
         canvas.drawText(
             "Paciente / Perfil: $profileName   •   Período: $periodLabel   •   Emissão: $emittedNow",
@@ -1117,22 +1347,23 @@ object MedicalReportPdfGenerator {
         canvas.drawLine(leftMargin, y, rightMargin, y, dividerPaint)
         y += 20f
 
-        // 2. Histórico de Glicemia (somente se Diabetes / Glicemia estiver marcado no questionário)
+        // 2. Histórico de Monitoramento de Glicemia (somente se Diabetes / Glicemia estiver marcado no questionário)
         if (customizationConfig.diabetesEnabled) {
-            canvas.drawText("2. HISTÓRICO DE GLICEMIA CAPILAR (mg/dL)", leftMargin, y, sectionHeaderPaint)
+            canvas.drawText("2. MONITORAMENTO DE GLICEMIA (mg/dL)", leftMargin, y, sectionHeaderPaint)
             y += 16f
-            canvas.drawText("DATA        HORA   MOMENTO / SLOT         VALOR      CLASSIFICAÇÃO & OBSERVAÇÕES", leftMargin, y, bodyBoldPaint)
+            canvas.drawText("DATA        HORA   MEMBRO       MOMENTO / SLOT       VALOR      CLASSIFICAÇÃO & OBS.", leftMargin, y, bodyBoldPaint)
             y += 12f
 
             if (filteredGlucose.isEmpty()) {
                 canvas.drawText("Nenhuma medição de glicemia registrada no período selecionado.", leftMargin, y, subtitlePaint)
                 y += 18f
             } else {
-                filteredGlucose.take(12).forEach { rec ->
-                    val slotFixed = rec.slot.take(20).padEnd(20, ' ')
+                filteredGlucose.take(14).forEach { rec ->
+                    val memberTag = rec.memberName.ifBlank { profileName }.take(11).padEnd(11, ' ')
+                    val slotFixed = rec.slot.take(18).padEnd(18, ' ')
                     val valFixed = "${rec.valueMgDl} mg/dL".padEnd(10, ' ')
-                    val noteClean = if (rec.notes.isNotBlank()) " - ${rec.notes.take(30)}" else ""
-                    val line = "${rec.dateIso}  ${rec.timeHHmm}  $slotFixed $valFixed ${rec.statusLabel()}$noteClean"
+                    val noteClean = if (rec.notes.isNotBlank()) " - ${rec.notes.take(24)}" else ""
+                    val line = "${rec.dateIso}  ${rec.timeHHmm}  $memberTag  $slotFixed $valFixed ${rec.statusLabel()}$noteClean"
                     canvas.drawText(line, leftMargin, y, bodyPaint)
                     y += 13f
                 }
@@ -1147,18 +1378,19 @@ object MedicalReportPdfGenerator {
         if (customizationConfig.bloodPressureEnabled) {
             canvas.drawText("3. HISTÓRICO DE PRESSÃO ARTERIAL (mmHg) & PULSO (bpm)", leftMargin, y, sectionHeaderPaint)
             y += 16f
-            canvas.drawText("DATA        HORA   PAS/PAD (mmHg)   PULSO     CLASSIFICAÇÃO & OBSERVAÇÕES", leftMargin, y, bodyBoldPaint)
+            canvas.drawText("DATA        HORA   MEMBRO       PAS/PAD (mmHg)   PULSO     CLASSIFICAÇÃO & OBS.", leftMargin, y, bodyBoldPaint)
             y += 12f
 
             if (filteredBp.isEmpty()) {
                 canvas.drawText("Nenhuma aferição de pressão arterial registrada no período selecionado.", leftMargin, y, subtitlePaint)
                 y += 18f
             } else {
-                filteredBp.take(12).forEach { bp ->
+                filteredBp.take(14).forEach { bp ->
+                    val memberTag = bp.memberName.ifBlank { profileName }.take(11).padEnd(11, ' ')
                     val bpFixed = "${bp.systolic}/${bp.diastolic} mmHg".padEnd(15, ' ')
                     val pulseFixed = "${bp.pulseBpm} bpm".padEnd(9, ' ')
-                    val noteClean = if (bp.notes.isNotBlank()) " - ${bp.notes.take(30)}" else ""
-                    val line = "${bp.dateIso}  ${bp.timeHHmm}  $bpFixed $pulseFixed ${bp.statusLabel()}$noteClean"
+                    val noteClean = if (bp.notes.isNotBlank()) " - ${bp.notes.take(24)}" else ""
+                    val line = "${bp.dateIso}  ${bp.timeHHmm}  $memberTag  $bpFixed $pulseFixed ${bp.statusLabel()}$noteClean"
                     canvas.drawText(line, leftMargin, y, bodyPaint)
                     y += 13f
                 }
@@ -1203,7 +1435,7 @@ object MedicalReportPdfGenerator {
 
         // Rodapé
         canvas.drawText(
-            "Documento gerado nativamente em PDF pelo aplicativo AuraManager (com.auramanager.app) para acompanhamento médico.",
+            "Documento gerado nativamente em PDF pelo aplicativo Omni (com.auramanager.app) para acompanhamento médico.",
             leftMargin,
             pageHeight - 28f,
             subtitlePaint
@@ -1239,7 +1471,7 @@ object MedicalReportPdfGenerator {
             val reportsDir = File(context.filesDir, "relatorios_medicos").apply {
                 if (!exists()) mkdirs()
             }
-            val fileName = "Relatorio_Medico_AuraManager_${DateCalendarUtils.formatIsoDate(DateCalendarUtils.todayEpochDay())}.pdf"
+            val fileName = "Relatorio_Medico_Omni_${DateCalendarUtils.formatIsoDate(DateCalendarUtils.todayEpochDay())}.pdf"
             val pdfFile = File(reportsDir, fileName)
             var summary = ""
             FileOutputStream(pdfFile).use { fos ->

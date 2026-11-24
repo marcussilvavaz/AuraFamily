@@ -1,11 +1,15 @@
 package com.example
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
@@ -15,6 +19,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -43,6 +48,8 @@ import com.example.ui.AppUpdateAvailableDialog
 import com.example.ui.AppUpdateTopPillBanner
 import com.example.ui.AuthScreen
 import com.example.ui.MainFeatureScreen
+import com.example.ui.OmniPermissionHelper
+import com.example.ui.OmniSplashScreen
 import com.example.ui.signOut
 import com.example.ui.theme.AuraFinancasTheme
 import com.example.viewmodel.AuraViewModel
@@ -50,31 +57,90 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 
+import android.content.Intent
+import com.example.widget.OmniHomeWidgetProvider
+
 class MainActivity : ComponentActivity() {
+    private val pendingWidgetActionState = mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         AlarmScheduler.ensureNotificationChannel(this)
+        extractWidgetAction(intent)
         setContent {
-            AuraAppRoot()
+            AuraAppRoot(
+                pendingWidgetAction = pendingWidgetActionState.value,
+                onConsumeWidgetAction = { pendingWidgetActionState.value = null }
+            )
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        extractWidgetAction(intent)
+    }
+
+    private fun extractWidgetAction(intent: Intent?) {
+        val action = intent?.getStringExtra(OmniHomeWidgetProvider.EXTRA_WIDGET_ACTION)
+        if (!action.isNullOrBlank()) {
+            pendingWidgetActionState.value = action
+            intent.removeExtra(OmniHomeWidgetProvider.EXTRA_WIDGET_ACTION)
         }
     }
 }
 
 @Composable
-fun AuraAppRoot() {
+fun AuraAppRoot(
+    pendingWidgetAction: String? = null,
+    onConsumeWidgetAction: () -> Unit = {}
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val customizationRepo = remember(context) { CustomizationRepository(context) }
     val customizationConfig by customizationRepo.configFlow.collectAsStateWithLifecycle()
 
-    // Initialize AppUpdateManager at root level so new builds in AI Studio publish immediately
-    // even while on AuthScreen or Onboarding, and installed phones show the update prompt on ANY screen.
     val updateManager = remember(context) { AppUpdateManager(context.applicationContext) }
     val updateState by updateManager.uiState.collectAsStateWithLifecycle()
 
+    var showSplash by rememberSaveable { mutableStateOf(pendingWidgetAction.isNullOrBlank()) }
+    var hasRequestedInitialPermissions by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(pendingWidgetAction) {
+        if (!pendingWidgetAction.isNullOrBlank()) {
+            showSplash = false
+        }
+    }
+
+    val notificationPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+    if (showSplash && pendingWidgetAction.isNullOrBlank()) {
+        OmniSplashScreen(
+            onSplashFinished = {
+                showSplash = false
+            }
+        )
+        return
+    }
+
+    // Request POST_NOTIFICATIONS automatically on first launch after splash on Android 13+
+    LaunchedEffect(hasRequestedInitialPermissions) {
+        if (!hasRequestedInitialPermissions) {
+            hasRequestedInitialPermissions = true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                !OmniPermissionHelper.hasNotificationPermission(context)
+            ) {
+                runCatching {
+                    notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+        }
+    }
+
     var currentUser by remember { mutableStateOf(Firebase.auth.currentUser) }
-    // Show Google Sign-In screen on launch with the option "Fazer login depois"
     var hasSkippedGoogleLogin by rememberSaveable { mutableStateOf(false) }
     var showOptionalLoginScreen by rememberSaveable { mutableStateOf(false) }
 
@@ -102,7 +168,9 @@ fun AuraAppRoot() {
     }
 
     val user = currentUser
-    val shouldShowAuthScreen = user == null && (!hasSkippedGoogleLogin || showOptionalLoginScreen)
+    val shouldShowAuthScreen = user == null &&
+        (!hasSkippedGoogleLogin || showOptionalLoginScreen) &&
+        pendingWidgetAction.isNullOrBlank()
 
     if (shouldShowAuthScreen) {
         BackHandler {
@@ -152,7 +220,7 @@ fun AuraAppRoot() {
         }
     } else {
         val activeUserId = user?.uid ?: LocalOfflineStore.LOCAL_USER_ID
-        val displayName = user?.displayName ?: "Família Aura"
+        val displayName = user?.displayName ?: "Família Omni"
         val userEmail = user?.email
         val scope = rememberCoroutineScope()
         val credentialManager = remember(context) { CredentialManager.create(context) }
@@ -201,7 +269,9 @@ fun AuraAppRoot() {
                             )
                         }
                     },
-                    sharedUpdateManager = updateManager
+                    sharedUpdateManager = updateManager,
+                    pendingWidgetAction = pendingWidgetAction,
+                    onConsumeWidgetAction = onConsumeWidgetAction
                 )
             }
         }

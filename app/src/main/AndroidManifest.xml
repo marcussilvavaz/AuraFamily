@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <queries>
         <intent>
@@ -15,6 +17,10 @@
         </intent>
         <intent>
             <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="geo" />
         </intent>
     </queries>
 
@@ -39,9 +45,98 @@
             </intent-filter>
         </activity>
 
+        <!-- Compact Floating Dialog Activity launched from Home Screen Widgets -->
+        <activity
+            android:name=".widget.QuickGlucoseWidgetDialogActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="Omni • Registro Rápido"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:windowSoftInputMode="stateAlwaysVisible|adjustResize" />
+
+        <service
+            android:name=".widget.OmniWidgetsRemoteViewsService"
+            android:exported="false"
+            android:permission="android.permission.BIND_REMOTEVIEWS" />
+
         <receiver
             android:name=".alarm.TaskAndBillAlarmReceiver"
             android:exported="false" />
+
+        <!-- 1. Widget Independente: Omni • Agenda & Tarefas -->
+        <receiver
+            android:name=".widget.OmniAgendaWidgetProvider"
+            android:exported="true"
+            android:label="Omni • Agenda &amp; Tarefas">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.auramanager.app.ACTION_TOGGLE_TASK_FROM_WIDGET" />
+                <action android:name="com.auramanager.app.ACTION_WIDGET_REFRESH" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/omni_agenda_widget_info" />
+        </receiver>
+
+        <!-- 2. Widget Independente: Omni • Monitoramento de Glicemia -->
+        <receiver
+            android:name=".widget.OmniGlucoseWidgetProvider"
+            android:exported="true"
+            android:label="Omni • Monitoramento de Glicemia">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.auramanager.app.ACTION_GLUCOSE_WIDGET_TIMER_TOGGLE" />
+                <action android:name="com.auramanager.app.ACTION_GLUCOSE_WIDGET_TIMER_RESET" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/omni_glucose_widget_info" />
+        </receiver>
+
+        <!-- 3. Widget Independente: Omni • Finanças & Cartões -->
+        <receiver
+            android:name=".widget.OmniFinanceWidgetProvider"
+            android:exported="true"
+            android:label="Omni • Finanças &amp; Cartões">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.auramanager.app.ACTION_TOGGLE_FINANCE_EYE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/omni_finance_widget_info" />
+        </receiver>
+
+        <!-- 4. Widget Independente: Omni • Lista & Mural da Família -->
+        <receiver
+            android:name=".widget.OmniFamilyListWidgetProvider"
+            android:exported="true"
+            android:label="Omni • Lista &amp; Mural da Família">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.auramanager.app.ACTION_TOGGLE_MURAL_ITEM" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/omni_family_list_widget_info" />
+        </receiver>
+
+        <!-- Widget Hub Completo (compatibilidade com widgets já adicionados) -->
+        <receiver
+            android:name=".widget.OmniHomeWidgetProvider"
+            android:exported="true"
+            android:label="Omni • Hub Completo &amp; Voz">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.auramanager.app.ACTION_WIDGET_REFRESH" />
+                <action android:name="com.auramanager.app.ACTION_WIDGET_GLUCOSE_TOGGLE" />
+                <action android:name="com.auramanager.app.ACTION_WIDGET_GLUCOSE_RESET" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/omni_home_widget_info" />
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"
