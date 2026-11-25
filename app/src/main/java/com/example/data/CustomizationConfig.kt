@@ -138,6 +138,8 @@ data class AppCustomizationConfig(
     // 3. Módulos de Saúde (switches opcionais)
     val pregnancyEnabled: Boolean = false,
     val pregnancyDppDate: String = "", // Data Prevista do Parto (DD/MM/AAAA)
+    val pregnancyNotes: String = "",
+    val pregnancyComparisonMode: String = "TODOS", // "DOCE", "FRUTA", "ANIMAL", "TODOS"
     val diabetesEnabled: Boolean = false,
     val diabetesSlots: Set<String> = DiabetesSlotCatalog.defaultSelectedSlots,
     val bloodPressureEnabled: Boolean = false,
@@ -502,6 +504,7 @@ class CustomizationRepository(context: Context) {
             savedDiabetesSlotsRaw.split("|")
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
+                .map { DiabetesSlotCatalog.normalizeSlot(it) }
                 .toSet()
                 .ifEmpty { DiabetesSlotCatalog.defaultSelectedSlots }
         }
@@ -577,6 +580,7 @@ class CustomizationRepository(context: Context) {
             energyNight = prefs.getString(KEY_ENERGY_NIGHT, EnergyLevel.BAIXA) ?: EnergyLevel.BAIXA,
             pregnancyEnabled = prefs.getBoolean(KEY_PREGNANCY_ENABLED, false),
             pregnancyDppDate = prefs.getString(KEY_PREGNANCY_DPP, "") ?: "",
+            pregnancyComparisonMode = prefs.getString(KEY_PREGNANCY_COMPARISON_MODE, "TODOS") ?: "TODOS",
             diabetesEnabled = prefs.getBoolean(KEY_DIABETES_ENABLED, false),
             diabetesSlots = diabetesSlotsSet,
             bloodPressureEnabled = prefs.getBoolean(KEY_BP_ENABLED, false),
@@ -681,6 +685,7 @@ class CustomizationRepository(context: Context) {
             .putString(KEY_ENERGY_NIGHT, updated.energyNight)
             .putBoolean(KEY_PREGNANCY_ENABLED, updated.pregnancyEnabled)
             .putString(KEY_PREGNANCY_DPP, updated.pregnancyDppDate)
+            .putString(KEY_PREGNANCY_COMPARISON_MODE, updated.pregnancyComparisonMode)
             .putBoolean(KEY_DIABETES_ENABLED, updated.diabetesEnabled)
             .putString(KEY_DIABETES_SLOTS, updated.diabetesSlots.joinToString("|"))
             .putBoolean(KEY_BP_ENABLED, updated.bloodPressureEnabled)
@@ -836,17 +841,39 @@ class CustomizationRepository(context: Context) {
         )
     }
 
+    fun updateConfig(transform: (AppCustomizationConfig) -> AppCustomizationConfig) {
+        val current = _configFlow.value
+        saveAndEmit(transform(current))
+    }
+
     fun updatePregnancyModule(
         enabled: Boolean,
-        dppDate: String = _configFlow.value.pregnancyDppDate
+        dppDate: String = _configFlow.value.pregnancyDppDate,
+        notes: String = _configFlow.value.pregnancyNotes,
+        comparisonMode: String = _configFlow.value.pregnancyComparisonMode
     ) {
         val current = _configFlow.value
+        val validMode = when (comparisonMode.uppercase()) {
+            "DOCE", "FRUTA", "ANIMAL", "TODOS" -> comparisonMode.uppercase()
+            else -> "TODOS"
+        }
         saveAndEmit(
             current.copy(
                 pregnancyEnabled = enabled,
-                pregnancyDppDate = dppDate
+                pregnancyDppDate = dppDate,
+                pregnancyNotes = notes,
+                pregnancyComparisonMode = validMode
             )
         )
+    }
+
+    fun updatePregnancyComparisonMode(comparisonMode: String) {
+        val current = _configFlow.value
+        val validMode = when (comparisonMode.uppercase()) {
+            "DOCE", "FRUTA", "ANIMAL", "TODOS" -> comparisonMode.uppercase()
+            else -> "TODOS"
+        }
+        saveAndEmit(current.copy(pregnancyComparisonMode = validMode))
     }
 
     fun updateDiabetesModule(
@@ -1360,5 +1387,6 @@ class CustomizationRepository(context: Context) {
         private const val KEY_FINANCE_PRIVACY_HIDE_VALUES = "finance_privacy_hide_values"
         private const val KEY_PROFILE_AVATAR_BASE64 = "profile_avatar_base64"
         private const val KEY_THEME_MODE = "theme_mode"
+        private const val KEY_PREGNANCY_COMPARISON_MODE = "pregnancy_comparison_mode"
     }
 }

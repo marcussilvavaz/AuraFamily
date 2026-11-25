@@ -324,6 +324,7 @@ object OmniBackupAndMigrationManager {
         val recoveredAccounts = mutableListOf<BankAccount>()
         val recoveredGlucose = mutableListOf<GlucoseRecord>()
         val recoveredBp = mutableListOf<BloodPressureRecord>()
+        val recoveredInsulin = mutableListOf<InsulinRecord>()
         val recoveredDiaryEntries = mutableListOf<PrivateDiaryEntry>()
         val recoveredSupportLetters = mutableListOf<SupportLetterRecord>()
 
@@ -368,6 +369,9 @@ object OmniBackupAndMigrationManager {
                     }
                     root.optJSONArray("bloodPressureRecords")?.let { arr ->
                         recoveredBp.addAll(parseBpFromJsonArray(arr))
+                    }
+                    root.optJSONArray("insulinRecords")?.let { arr ->
+                        recoveredInsulin.addAll(parseInsulinFromJsonArray(arr))
                     }
                 }
 
@@ -498,11 +502,12 @@ object OmniBackupAndMigrationManager {
             }
         }
 
-        // 3. Merge recovered Health records (glucose & blood pressure)
-        if (recoveredGlucose.isNotEmpty() || recoveredBp.isNotEmpty()) {
+        // 3. Merge recovered Health records (glucose, blood pressure & insulin)
+        if (recoveredGlucose.isNotEmpty() || recoveredBp.isNotEmpty() || recoveredInsulin.isNotEmpty()) {
             healthMerged += healthRepo.mergeImportedHealthRecords(
                 importedGlucose = recoveredGlucose,
-                importedBp = recoveredBp
+                importedBp = recoveredBp,
+                importedInsulin = recoveredInsulin
             )
         }
 
@@ -832,6 +837,24 @@ object OmniBackupAndMigrationManager {
         }
         root.put("bloodPressureRecords", bpArr)
 
+        val insulinArr = JSONArray()
+        healthState.insulinRecords.forEach { rec ->
+            insulinArr.put(
+                JSONObject().apply {
+                    put("id", rec.id)
+                    put("dateIso", rec.dateIso)
+                    put("timeFormatted", rec.timeFormatted)
+                    put("insulinType", rec.insulinType)
+                    put("units", rec.units)
+                    put("injectionSite", rec.injectionSite)
+                    put("memberId", rec.memberId)
+                    put("notes", rec.notes)
+                    put("timestampEpochMillis", rec.timestampEpochMillis)
+                }
+            )
+        }
+        root.put("insulinRecords", insulinArr)
+
         // Private Diary
         val diaryArr = JSONArray()
         diaryState.entries.forEach { entry ->
@@ -1000,11 +1023,16 @@ object OmniBackupAndMigrationManager {
                 }
             }
 
-            // 4. Health (Glucose & Blood Pressure)
+            // 4. Health (Glucose, Blood Pressure & Insulin)
             val importedGlucose = root.optJSONArray("glucoseRecords")?.let { parseGlucoseFromJsonArray(it) }.orEmpty()
             val importedBp = root.optJSONArray("bloodPressureRecords")?.let { parseBpFromJsonArray(it) }.orEmpty()
-            if (importedGlucose.isNotEmpty() || importedBp.isNotEmpty()) {
-                healthMerged += healthRepo.mergeImportedHealthRecords(importedGlucose, importedBp)
+            val importedInsulin = root.optJSONArray("insulinRecords")?.let { parseInsulinFromJsonArray(it) }.orEmpty()
+            if (importedGlucose.isNotEmpty() || importedBp.isNotEmpty() || importedInsulin.isNotEmpty()) {
+                healthMerged += healthRepo.mergeImportedHealthRecords(
+                    importedGlucose = importedGlucose,
+                    importedBp = importedBp,
+                    importedInsulin = importedInsulin
+                )
             }
 
             // 5. Private Diary
@@ -1247,8 +1275,31 @@ object OmniBackupAndMigrationManager {
                         notes = obj.optString("notes", ""),
                         privacyScope = obj.optString("privacyScope", PrivacyScope.PERSONAL),
                         memberId = obj.optString("memberId", ""),
-                        memberName = obj.optString("memberName", "Você"),
+                        memberName = obj.optString("memberName", "Marcus"),
                         createdAtMillis = createdAt
+                    )
+                )
+            }
+        }
+    }
+
+    private fun parseInsulinFromJsonArray(arr: JSONArray): List<InsulinRecord> {
+        return buildList {
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val units = obj.optInt("units", 0)
+                if (units <= 0) continue
+                add(
+                    InsulinRecord(
+                        id = obj.optString("id", "ins_$i"),
+                        dateIso = obj.optString("dateIso", DateCalendarUtils.todayIsoDate()),
+                        timeFormatted = obj.optString("timeFormatted", "08:00"),
+                        insulinType = obj.optString("insulinType", "Basal / Glargina"),
+                        units = units,
+                        injectionSite = obj.optString("injectionSite", InsulinSiteCatalog.ABDOMEN_ESQ),
+                        memberId = obj.optString("memberId", "Marcus"),
+                        notes = obj.optString("notes", ""),
+                        timestampEpochMillis = obj.optLong("timestampEpochMillis", System.currentTimeMillis())
                     )
                 )
             }

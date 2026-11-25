@@ -1379,6 +1379,25 @@ class AuraViewModel(
         }
     }
 
+    fun updateHouseholdPregnancyConfig(
+        dppDate: String,
+        comparisonMode: String,
+        showConfirmationBanner: Boolean = false
+    ) {
+        viewModelScope.launch {
+            val result = repository.updateHouseholdPregnancyConfig(
+                householdId = currentHouseholdId(),
+                dppDate = dppDate,
+                comparisonMode = comparisonMode
+            )
+            if (showConfirmationBanner) {
+                result.onSuccess {
+                    _statusBannerMessage.value = "DPP e comparador da gestação sincronizados com a família!"
+                }
+            }
+        }
+    }
+
     fun refreshMorningSummarySchedule(
         context: Context,
         enabled: Boolean,

@@ -207,11 +207,14 @@ fun FamilyHubScreen(
     onOpenProfileSettings: () -> Unit,
     onToggleFinancePrivacy: () -> Unit = {},
     onToggleMuralItem: (String) -> Unit = {},
-    onAddQuickMuralItem: (String) -> Unit = {}
+    onAddQuickMuralItem: (String) -> Unit = {},
+    customizationRepo: com.example.data.CustomizationRepository? = null,
+    onSyncPregnancyConfigToCloud: (dppDate: String, comparisonMode: String) -> Unit = { _, _ -> }
 ) {
     val cardRadius = LocalOrganicCardRadius.current
     val hideFinanceValues = com.example.ui.theme.LocalFinancePrivacyHideValues.current
     val organicButtonShape = com.example.ui.theme.omniOrganicButtonShape()
+    var showEditPregnancyDppDialog by remember { mutableStateOf(false) }
 
     // All expandable smartwatch widgets start collapsed (false) by default
     val expandedWidgets = remember {
@@ -884,8 +887,28 @@ fun FamilyHubScreen(
             }
         }
 
+        // Card de Gestação (DPP) com Comparador (Doce / Fruta / Animal) e Próximo Marco no Hub
+        val effectiveDppDate = household.pregnancyDppDate.ifBlank { customizationConfig.pregnancyDppDate }
+        val effectiveComparisonMode = household.pregnancyComparisonMode.ifBlank {
+            customizationConfig.pregnancyComparisonMode.ifBlank { "Todos" }
+        }
+        if (customizationConfig.pregnancyEnabled || effectiveDppDate.isNotBlank()) {
+            item(key = "hub_bento_pregnancy_dpp") {
+                OmniPregnancyHeroCard(
+                    dppDateRaw = effectiveDppDate,
+                    comparisonMode = effectiveComparisonMode,
+                    accentColor = Color(0xFFD84B72),
+                    onSelectComparisonMode = { newMode ->
+                        customizationRepo?.updatePregnancyComparisonMode(newMode)
+                        onSyncPregnancyConfigToCloud(effectiveDppDate, newMode)
+                    },
+                    onOpenEditDpp = { showEditPregnancyDppDialog = true }
+                )
+            }
+        }
+
         // 2. BENTO GRID & MAIN BLOCKS IN THE HUB
-        // Full-Width Block A: Monitoramento de Glicemia & Saúde
+        // Full-Width Block A: Monitoramento de Glicemia, Insulina & Saúde
         if (HubWidgetIds.HEALTH_SUMMARY in activeWidgetIds) {
             item(key = "hub_bento_health") {
                 val isExpanded = expandedWidgets[HubWidgetIds.HEALTH_SUMMARY] == true
@@ -893,10 +916,13 @@ fun FamilyHubScreen(
                     healthState = healthState,
                     healthRepo = healthRepo,
                     customizationConfig = customizationConfig,
+                    familyMembers = officialMembers,
+                    currentUserProfile = userProfile,
                     moduleColorHex = customizationConfig.healthColorHex,
                     expanded = isExpanded,
                     onToggleExpand = { expandedWidgets[HubWidgetIds.HEALTH_SUMMARY] = !isExpanded },
                     onIncrementTracker = onIncrementHealthTracker,
+                    onAddSupplyToMural = onAddQuickMuralItem,
                     onOpenHealthScreen = onOpenHealthScreen
                 )
             }
@@ -1313,6 +1339,27 @@ fun FamilyHubScreen(
                 }
             }
         }
+    }
+
+    if (showEditPregnancyDppDialog) {
+        val currentDpp = household.pregnancyDppDate.ifBlank { customizationConfig.pregnancyDppDate }
+        val currentMode = household.pregnancyComparisonMode.ifBlank {
+            customizationConfig.pregnancyComparisonMode.ifBlank { "TODOS" }
+        }
+        EditDppAndUltrasoundDialog(
+            initialDppDate = currentDpp,
+            initialPregnancyEnabled = customizationConfig.pregnancyEnabled || currentDpp.isNotBlank(),
+            onDismiss = { showEditPregnancyDppDialog = false },
+            onSave = { enabled, newDpp ->
+                customizationRepo?.updatePregnancyModule(
+                    enabled = enabled,
+                    dppDate = newDpp,
+                    comparisonMode = currentMode
+                )
+                onSyncPregnancyConfigToCloud(newDpp, currentMode)
+                showEditPregnancyDppDialog = false
+            }
+        )
     }
 }
 
@@ -2294,35 +2341,57 @@ private fun SmartwatchHealthWidget(
     healthState: com.example.data.HealthModuleState,
     healthRepo: com.example.data.HealthRepository?,
     customizationConfig: AppCustomizationConfig,
+    familyMembers: List<com.example.data.FamilyMemberBadge> = emptyList(),
+    currentUserProfile: UserProfile? = null,
     moduleColorHex: Long,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onIncrementTracker: (dateIso: String, trackerId: String, step: Int) -> Unit,
+    onAddSupplyToMural: (String) -> Unit = {},
     onOpenHealthScreen: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val triggerFeedback = rememberOmniFeedback()
     val cardRadius = LocalOrganicCardRadius.current
     val organicShape = RoundedCornerShape(cardRadius)
-    val todayIso = remember { DateCalendarUtils.formatIsoDate(DateCalendarUtils.todayEpochDay()) }
+    val todayEpoch = remember { DateCalendarUtils.todayEpochDay() }
+    val todayIso = remember { DateCalendarUtils.formatIsoDate(todayEpoch) }
     val totalTrackers = healthState.trackers.size.coerceAtLeast(1)
     val completedTrackers = healthState.completedTrackersCount(todayIso)
     val progressRatio = (completedTrackers.toFloat() / totalTrackers.toFloat()).coerceIn(0f, 1f)
 
+    val activeMember = remember(familyMembers, currentUserProfile, customizationConfig.profileName) {
+        familyMembers.firstOrNull {
+            (currentUserProfile != null && it.userId == currentUserProfile.uid) ||
+                it.displayName.equals(customizationConfig.profileName, ignoreCase = true)
+        } ?: familyMembers.firstOrNull() ?: com.example.data.FamilyMemberBadge(
+            userId = currentUserProfile?.uid?.ifBlank { "marcus" } ?: "marcus",
+            displayName = customizationConfig.profileName.ifBlank { "Marcus" },
+            colorHex = customizationConfig.profileColorHex
+        )
+    }
+
+    var showHubGlucoseModal by remember { mutableStateOf(false) }
+    var hubPreselectedSlot by remember { mutableStateOf(com.example.data.DiabetesSlotCatalog.JEJUM) }
+    var showHubInsulinModal by remember { mutableStateOf(false) }
+
     val latestGlucose = healthState.glucoseRecords.firstOrNull()
     val latestBp = healthState.bloodPressureRecords.firstOrNull()
+    val latestInsulinBanner = remember(healthState.insulinRecords, activeMember) {
+        healthState.formatLatestInsulinBanner(activeMember.userId, activeMember.displayName)
+    }
     val timer = healthState.postMealTimer
     val ringColor = remember(moduleColorHex) { Color(moduleColorHex.toInt()) }
 
-    // Live countdown ticker when diabetesEnabled is true
+    // Live 1h (60:00) countdown ticker when diabetesEnabled is true
     var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
-    var selectedMealLabel by remember(timer.mealLabel) {
-        mutableStateOf(timer.mealLabel.ifBlank { "Almoço" })
+    var selectedPostMealSlot by remember(timer.mealLabel) {
+        mutableStateOf(
+            com.example.data.DiabetesSlotCatalog.normalizeSlot(timer.mealLabel)
+                .takeIf { it in com.example.data.DiabetesSlotCatalog.postMealTimerSlots }
+                ?: com.example.data.DiabetesSlotCatalog.POS_ALMOCO_1H
+        )
     }
-    var selectedDurationMillis by remember(timer.durationMillis) {
-        mutableStateOf(if (timer.durationMillis > 0L) timer.durationMillis else 60L * 60L * 1000L)
-    }
-    var quickGlucoseValueInput by remember { mutableStateOf("") }
 
     androidx.compose.runtime.LaunchedEffect(
         customizationConfig.diabetesEnabled,
@@ -2330,7 +2399,7 @@ private fun SmartwatchHealthWidget(
         timer.targetEpochMillis
     ) {
         if (!customizationConfig.diabetesEnabled) return@LaunchedEffect
-        while (timer.isRunning) {
+        while (timer.isRunning && !timer.isPaused) {
             val current = System.currentTimeMillis()
             nowMillis = current
             if (current >= timer.targetEpochMillis && timer.targetEpochMillis > 0L) {
@@ -2341,12 +2410,12 @@ private fun SmartwatchHealthWidget(
         }
     }
 
-    val remainingMillis = remember(timer, nowMillis, selectedDurationMillis) {
+    val remainingMillis = remember(timer, nowMillis) {
         when {
-            timer.isRunning -> (timer.targetEpochMillis - nowMillis).coerceAtLeast(0L)
+            timer.isRunning && !timer.isPaused -> (timer.targetEpochMillis - nowMillis).coerceAtLeast(0L)
             timer.pausedRemainingMillis > 0L -> timer.pausedRemainingMillis
             timer.completedAlertPending -> 0L
-            else -> selectedDurationMillis
+            else -> 3600L * 1000L
         }
     }
     val totalMinutes = (remainingMillis / 1000L) / 60L
@@ -2400,7 +2469,6 @@ private fun SmartwatchHealthWidget(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.weight(1f)
                 ) {
-                    // Smartwatch Circular Progress Ring for Daily Trackers (Inegociáveis)
                     Box(
                         modifier = Modifier.size(54.dp),
                         contentAlignment = Alignment.Center
@@ -2436,7 +2504,7 @@ private fun SmartwatchHealthWidget(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = if (customizationConfig.diabetesEnabled) {
-                                "Saúde, Glicemia & Timer"
+                                "Saúde, Glicemia & Insulina"
                             } else {
                                 "Saúde & Inegociáveis"
                             },
@@ -2465,24 +2533,24 @@ private fun SmartwatchHealthWidget(
                         if (customizationConfig.diabetesEnabled) {
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
+                                text = "💉 $latestInsulinBanner",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
                                 text = when {
-                                    timer.completedAlertPending -> "🔔 Alarme Pós-${timer.mealLabel}! Hora de medir a glicemia"
-                                    timer.isRunning -> "⏱️ Cronômetro Pós-${timer.mealLabel}: $formattedCountdown restantes"
+                                    timer.completedAlertPending -> "🔔 Alarme ${timer.mealLabel}! Hora de medir a glicemia"
+                                    timer.isRunning && !timer.isPaused -> "⏱️ Cronômetro ${timer.mealLabel}: $formattedCountdown restantes"
                                     timer.pausedRemainingMillis > 0L -> "⏸️ Cronômetro pausado ($formattedCountdown)"
-                                    else -> "⏱️ Cronômetro de Glicemia pronto (${selectedDurationMillis / 60000L} min)"
+                                    else -> "⏱️ Cronômetro Pós-Refeição 1h (60:00) pronto"
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = if (timer.completedAlertPending) ExpenseCoral else ringColor
-                            )
-                        } else if (customizationConfig.pregnancyEnabled) {
-                            val preg = com.example.data.PregnancyCalculator.calculateFromDpp(customizationConfig.pregnancyDppDate)
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "🤰 Gestação: Semana ${preg.currentWeek} (+${preg.currentDaysRemainder}d)",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFD84B72)
                             )
                         }
                     }
@@ -2494,7 +2562,7 @@ private fun SmartwatchHealthWidget(
                 )
             }
 
-            // Always-visible Quick Glucose Timer Strip in the Hub when Diabetes/Glicemia is enabled
+            // Always-visible Quick Glucose + Insulin + 1h Timer Strip in the Hub when collapsed
             if (customizationConfig.diabetesEnabled && !expanded) {
                 Surface(
                     shape = RoundedCornerShape(18.dp),
@@ -2514,84 +2582,46 @@ private fun SmartwatchHealthWidget(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "🩸 Glicemia Pós-$selectedMealLabel",
+                                text = "🩸 $selectedPostMealSlot • $formattedCountdown",
                                 style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Cronômetro: $formattedCountdown",
-                                style = MaterialTheme.typography.titleSmall,
                                 fontFamily = JetBrainsMonoFontFamily,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = if (timer.completedAlertPending) ExpenseCoral else ringColor
                             )
+                            Text(
+                                text = latestInsulinBanner,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            if (!timer.isRunning) {
-                                FilledTonalButton(
-                                    onClick = {
-                                        val duration = if (timer.pausedRemainingMillis > 0L) {
-                                            timer.pausedRemainingMillis
-                                        } else {
-                                            selectedDurationMillis
-                                        }
-                                        if (timer.pausedRemainingMillis > 0L) {
-                                            healthRepo?.resumePostMealTimer()
-                                        } else {
-                                            healthRepo?.startPostMealTimer(selectedMealLabel, selectedDurationMillis)
-                                        }
-                                        nowMillis = System.currentTimeMillis()
-                                        com.example.alarm.AlarmScheduler.schedulePostMealGlucoseAlarm(
-                                            context = context,
-                                            triggerAtMillis = nowMillis + duration,
-                                            mealLabel = selectedMealLabel
-                                        )
-                                        triggerFeedback("Cronômetro de glicemia iniciado!")
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                    modifier = Modifier.testTag("hub_compact_start_glucose_timer_btn")
-                                ) {
-                                    Text(
-                                        text = if (timer.pausedRemainingMillis > 0L) "Retomar" else "Iniciar Timer",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            } else {
-                                OutlinedButton(
-                                    onClick = {
-                                        healthRepo?.pausePostMealTimer()
-                                        com.example.alarm.AlarmScheduler.cancelPostMealGlucoseAlarm(context)
-                                        triggerFeedback("Cronômetro pausado")
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                    modifier = Modifier.testTag("hub_compact_pause_glucose_timer_btn")
-                                ) {
-                                    Text("Pausar", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                                }
+                            FilledTonalButton(
+                                onClick = {
+                                    hubPreselectedSlot = selectedPostMealSlot
+                                    showHubGlucoseModal = true
+                                },
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.testTag("hub_compact_measure_glucose_btn")
+                            ) {
+                                Text("+ Medir", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                             }
-                            if (timer.isRunning || timer.pausedRemainingMillis > 0L || timer.completedAlertPending) {
-                                OutlinedButton(
-                                    onClick = {
-                                        healthRepo?.resetPostMealTimer()
-                                        com.example.alarm.AlarmScheduler.cancelPostMealGlucoseAlarm(context)
-                                        triggerFeedback("Cronômetro zerado")
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                    modifier = Modifier.testTag("hub_compact_reset_glucose_timer_btn")
-                                ) {
-                                    Text("Zerar", style = MaterialTheme.typography.labelSmall)
-                                }
+                            FilledTonalButton(
+                                onClick = { showHubInsulinModal = true },
+                                shape = RoundedCornerShape(50),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.testTag("hub_compact_add_insulin_btn")
+                            ) {
+                                Text("+ Insulina", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
                 }
             }
 
-            // Expandable Drawer with Full Glucose Post-Meal Countdown Timer, Quick Daily Trackers (+1), and Latest Measurements
+            // Expandable Drawer with 6 Official Periods, Insulin Rotation & Replenishment, 1h Post-Meal Timer, and Daily Trackers
             AnimatedVisibility(
                 visible = expanded,
                 enter = hubOrganicEnterTransition(),
@@ -2603,7 +2633,6 @@ private fun SmartwatchHealthWidget(
                         .padding(start = 18.dp, end = 18.dp, bottom = 18.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Dedicated Glicemia & Cronômetro Pós-Refeição Card inside Hub when diabetesEnabled == true
                     if (customizationConfig.diabetesEnabled) {
                         Surface(
                             shape = RoundedCornerShape(18.dp),
@@ -2619,6 +2648,14 @@ private fun SmartwatchHealthWidget(
                                     .padding(14.dp),
                                 verticalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
+                                val todayRecordsBySlot = remember(healthState.glucoseRecords, todayEpoch, activeMember) {
+                                    healthState.glucoseRecordsForMemberAndDate(
+                                        dateEpochDay = todayEpoch,
+                                        memberId = activeMember.userId,
+                                        memberName = activeMember.displayName
+                                    ).associateBy { com.example.data.DiabetesSlotCatalog.normalizeSlot(it.slot) }
+                                }
+
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -2626,14 +2663,12 @@ private fun SmartwatchHealthWidget(
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = "🩸 Glicemia & Cronômetro Pós-Refeição",
+                                            text = "🩸 Glicemia (6 Períodos) & Insulina",
                                             style = MaterialTheme.typography.titleSmall,
                                             fontWeight = FontWeight.Bold
                                         )
                                         Text(
-                                            text = latestGlucose?.let {
-                                                "Última: ${it.valueMgDl} mg/dL (${it.slot} • ${it.timeFormatted})"
-                                            } ?: "Nenhuma medição registrada hoje",
+                                            text = "${todayRecordsBySlot.size} de 6 períodos medidos hoje (${activeMember.displayName})",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -2647,75 +2682,157 @@ private fun SmartwatchHealthWidget(
                                     )
                                 }
 
-                                // Duration preset chips (1h, 1h30, 2h)
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Tempo:",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    listOf(
-                                        "1h" to (60L * 60L * 1000L),
-                                        "1h30" to (90L * 60L * 1000L),
-                                        "2h" to (120L * 60L * 1000L)
-                                    ).forEach { (label, millis) ->
-                                        FilterChip(
-                                            selected = selectedDurationMillis == millis,
-                                            onClick = {
-                                                selectedDurationMillis = millis
-                                                if (!timer.isRunning) {
-                                                    healthRepo?.resetPostMealTimer()
-                                                }
-                                            },
-                                            label = { Text(label, style = MaterialTheme.typography.labelSmall) },
-                                            shape = RoundedCornerShape(50)
-                                        )
-                                    }
-                                }
-
-                                // Meal selector chips
+                                // 6 Official Glucose Slots Chips (tapping opens AddGlucoseRecordDialog for that period)
                                 FlowRow(
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    listOf("Café", "Almoço", "Lanche", "Jantar").forEach { meal ->
+                                    com.example.data.DiabetesSlotCatalog.allSlots.forEach { slot ->
+                                        val rec = todayRecordsBySlot[slot]
                                         FilterChip(
-                                            selected = selectedMealLabel == meal,
-                                            onClick = { selectedMealLabel = meal },
-                                            label = { Text(meal, style = MaterialTheme.typography.labelSmall) },
+                                            selected = rec != null,
+                                            onClick = {
+                                                hubPreselectedSlot = slot
+                                                showHubGlucoseModal = true
+                                            },
+                                            label = {
+                                                Text(
+                                                    text = if (rec != null) "$slot • ${rec.valueMgDl}" else slot,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = if (rec != null) FontWeight.Bold else FontWeight.Medium
+                                                )
+                                            },
                                             shape = RoundedCornerShape(50)
                                         )
                                     }
                                 }
 
-                                // Timer action buttons (Iniciar / Pausar / Zerar)
+                                // Insulin Summary Banner + Quick Action Buttons (+ Medir / + Insulina)
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "💉 $latestInsulinBanner",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Button(
+                                                onClick = {
+                                                    hubPreselectedSlot = com.example.data.DiabetesSlotCatalog.JEJUM
+                                                    showHubGlucoseModal = true
+                                                },
+                                                shape = RoundedCornerShape(50),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("hub_expanded_add_glucose_btn")
+                                            ) {
+                                                Text("+ Medir Glicemia", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                            }
+                                            FilledTonalButton(
+                                                onClick = { showHubInsulinModal = true },
+                                                shape = RoundedCornerShape(50),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("hub_expanded_add_insulin_btn")
+                                            ) {
+                                                Text("+ Insulina", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+
+                                        // 1-Tap Supply Replenishment Chips -> Family Mural ("Compras")
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .horizontalScroll(rememberScrollState()),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "Repor insumos:",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            com.example.data.SupplyReplenishCatalog.items.forEach { supply ->
+                                                Surface(
+                                                    shape = RoundedCornerShape(50),
+                                                    color = ringColor.copy(alpha = 0.14f),
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(50))
+                                                        .clickable {
+                                                            onAddSupplyToMural(supply)
+                                                            triggerFeedback("'$supply' enviado para a lista de Compras do Mural!")
+                                                        }
+                                                ) {
+                                                    Text(
+                                                        text = "🛒 + $supply",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = ringColor,
+                                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Fixed 1h Post-Meal Countdown Selector ("1h Pós-Café", "1h Pós-Almoço", "1h Pós-Janta")
+                                Text(
+                                    text = "⏱️ Cronômetro Pós-Refeição 1h (60:00):",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    com.example.data.DiabetesSlotCatalog.postMealTimerSlots.forEach { slot ->
+                                        FilterChip(
+                                            selected = selectedPostMealSlot == slot,
+                                            onClick = { selectedPostMealSlot = slot },
+                                            label = { Text(slot, style = MaterialTheme.typography.labelSmall) },
+                                            shape = RoundedCornerShape(50)
+                                        )
+                                    }
+                                }
+
+                                // Timer action buttons (Iniciar 1h / Pausar / Zerar)
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    if (!timer.isRunning) {
+                                    if (!timer.isRunning || timer.isPaused) {
                                         Button(
                                             onClick = {
-                                                val duration = if (timer.pausedRemainingMillis > 0L) {
-                                                    timer.pausedRemainingMillis
+                                                val durationSec = if (timer.pausedRemainingSeconds > 0) {
+                                                    timer.pausedRemainingSeconds
                                                 } else {
-                                                    selectedDurationMillis
+                                                    3600
                                                 }
-                                                if (timer.pausedRemainingMillis > 0L) {
+                                                if (timer.pausedRemainingSeconds > 0) {
                                                     healthRepo?.resumePostMealTimer()
                                                 } else {
-                                                    healthRepo?.startPostMealTimer(selectedMealLabel, selectedDurationMillis)
+                                                    healthRepo?.startPostMealTimer(selectedPostMealSlot, 3600)
                                                 }
                                                 nowMillis = System.currentTimeMillis()
                                                 com.example.alarm.AlarmScheduler.schedulePostMealGlucoseAlarm(
                                                     context = context,
-                                                    triggerAtMillis = nowMillis + duration,
-                                                    mealLabel = selectedMealLabel
+                                                    triggerAtMillis = nowMillis + (durationSec * 1000L),
+                                                    mealLabel = selectedPostMealSlot
                                                 )
-                                                triggerFeedback("Alarme de glicemia agendado!")
+                                                triggerFeedback("Alarme de 1h ($selectedPostMealSlot) agendado!")
                                             },
                                             shape = RoundedCornerShape(50),
                                             modifier = Modifier
@@ -2723,7 +2840,7 @@ private fun SmartwatchHealthWidget(
                                                 .testTag("hub_start_glucose_timer_btn")
                                         ) {
                                             Text(
-                                                text = if (timer.pausedRemainingMillis > 0L) "Retomar Timer" else "Iniciar Cronômetro",
+                                                text = if (timer.pausedRemainingSeconds > 0) "Retomar 1h" else "Iniciar 1h (60:00)",
                                                 maxLines = 1,
                                                 softWrap = false,
                                                 overflow = TextOverflow.Ellipsis
@@ -2755,64 +2872,6 @@ private fun SmartwatchHealthWidget(
                                         modifier = Modifier.testTag("hub_reset_glucose_timer_btn")
                                     ) {
                                         Text("Zerar", maxLines = 1, softWrap = false)
-                                    }
-                                }
-
-                                // Quick Glucose Log inside Hub
-                                if (healthRepo != null) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        androidx.compose.material3.OutlinedTextField(
-                                            value = quickGlucoseValueInput,
-                                            onValueChange = { quickGlucoseValueInput = it.filter { ch -> ch.isDigit() }.take(3) },
-                                            label = { Text("Registrar Glicemia (mg/dL)") },
-                                            singleLine = true,
-                                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                                            ),
-                                            shape = RoundedCornerShape(16.dp),
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .testTag("hub_quick_glucose_input")
-                                        )
-                                        FilledTonalButton(
-                                            onClick = {
-                                                val mgDl = quickGlucoseValueInput.toIntOrNull()
-                                                if (mgDl != null && mgDl in 20..600) {
-                                                    val slot = when (selectedMealLabel) {
-                                                        "Café" -> "1h pós-café"
-                                                        "Almoço" -> "1h pós-almoço"
-                                                        "Jantar" -> "1h pós-jantar"
-                                                        else -> "Pós-$selectedMealLabel"
-                                                    }
-                                                    val cal = java.util.Calendar.getInstance()
-                                                    val timeStr = String.format(
-                                                        java.util.Locale.getDefault(),
-                                                        "%02d:%02d",
-                                                        cal.get(java.util.Calendar.HOUR_OF_DAY),
-                                                        cal.get(java.util.Calendar.MINUTE)
-                                                    )
-                                                    healthRepo.addGlucoseRecord(
-                                                        dateIso = todayIso,
-                                                        timeFormatted = timeStr,
-                                                        slot = slot,
-                                                        valueMgDl = mgDl,
-                                                        notes = "Registrado pelo Hub"
-                                                    )
-                                                    healthRepo.resetPostMealTimer()
-                                                    com.example.alarm.AlarmScheduler.cancelPostMealGlucoseAlarm(context)
-                                                    quickGlucoseValueInput = ""
-                                                    triggerFeedback("Glicemia ($mgDl mg/dL) salva com sucesso!")
-                                                }
-                                            },
-                                            shape = RoundedCornerShape(50),
-                                            modifier = Modifier.testTag("hub_quick_glucose_save_btn")
-                                        ) {
-                                            Text("Salvar", fontWeight = FontWeight.Bold)
-                                        }
                                     }
                                 }
                             }
@@ -2885,58 +2944,6 @@ private fun SmartwatchHealthWidget(
                         }
                     }
 
-                    // Latest clinical measurements summary chips (only for marked questionnaire modules)
-                    if (customizationConfig.diabetesEnabled || customizationConfig.bloodPressureEnabled) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            if (customizationConfig.diabetesEnabled) {
-                                Surface(
-                                    shape = RoundedCornerShape(14.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Column(modifier = Modifier.padding(10.dp)) {
-                                        Text(
-                                            text = "Última Glicemia",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        Text(
-                                            text = latestGlucose?.let { "${it.valueMgDl} mg/dL (${it.slot})" } ?: "Sem registro",
-                                            style = MaterialTheme.typography.labelLarge,
-                                            fontFamily = JetBrainsMonoFontFamily,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-
-                            if (customizationConfig.bloodPressureEnabled) {
-                                Surface(
-                                    shape = RoundedCornerShape(14.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Column(modifier = Modifier.padding(10.dp)) {
-                                        Text(
-                                            text = "Última Pressão",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        Text(
-                                            text = latestBp?.let { "${it.systolic}/${it.diastolic} mmHg" } ?: "Sem registro",
-                                            style = MaterialTheme.typography.labelLarge,
-                                            fontFamily = JetBrainsMonoFontFamily,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
                     Button(
                         onClick = onOpenHealthScreen,
                         shape = RoundedCornerShape(50),
@@ -2946,7 +2953,7 @@ private fun SmartwatchHealthWidget(
                     ) {
                         Text(
                             if (customizationConfig.diabetesEnabled) {
-                                "Abrir Módulo de Saúde, Glicemia & Relatório PDF"
+                                "Abrir Saúde, Glicemia, Insulina & PDF"
                             } else {
                                 "Abrir Módulo de Saúde & Relatório PDF"
                             }
@@ -2961,5 +2968,63 @@ private fun SmartwatchHealthWidget(
                 }
             }
         }
+    }
+
+    if (showHubGlucoseModal && healthRepo != null) {
+        AddGlucoseRecordDialog(
+            initialEpochDay = todayEpoch,
+            initialSlot = hubPreselectedSlot,
+            memberName = activeMember.displayName,
+            onDismiss = { showHubGlucoseModal = false },
+            onSave = { dateEpochDay, timeHHmm, slot, mgDl, notes, privacyScope, autoStart1hTimer ->
+                healthRepo.addGlucoseRecord(
+                    dateEpochDay = dateEpochDay,
+                    timeHHmm = timeHHmm,
+                    slot = slot,
+                    valueMgDl = mgDl,
+                    notes = notes,
+                    privacyScope = privacyScope,
+                    memberId = activeMember.userId,
+                    memberName = activeMember.displayName
+                )
+                healthRepo.dismissPostMealTimerAlert()
+                if (autoStart1hTimer) {
+                    val targetPostSlot = com.example.data.DiabetesSlotCatalog.postMealSlotForPreMeal(slot)
+                    selectedPostMealSlot = targetPostSlot
+                    healthRepo.startPostMealTimer(targetPostSlot, 3600)
+                    com.example.alarm.AlarmScheduler.schedulePostMealGlucoseAlarm(
+                        context = context,
+                        triggerAtMillis = System.currentTimeMillis() + 3600_000L,
+                        mealLabel = targetPostSlot
+                    )
+                }
+                showHubGlucoseModal = false
+                triggerFeedback("Glicemia ($mgDl mg/dL • $slot) salva!")
+            }
+        )
+    }
+
+    if (showHubInsulinModal && healthRepo != null) {
+        AddInsulinRecordDialog(
+            initialEpochDay = todayEpoch,
+            activeMember = activeMember,
+            familyMembers = familyMembers.ifEmpty { listOf(activeMember) },
+            healthState = healthState,
+            onDismiss = { showHubInsulinModal = false },
+            onSave = { dateEpochDay, timeHHmm, insType, doseUi, site, memberBadge, notes ->
+                healthRepo.addInsulinRecord(
+                    dateEpochDay = dateEpochDay,
+                    timeHHmm = timeHHmm,
+                    insulinType = insType,
+                    doseUnits = doseUi,
+                    site = site,
+                    notes = notes,
+                    memberId = memberBadge.userId,
+                    memberName = memberBadge.displayName
+                )
+                showHubInsulinModal = false
+                triggerFeedback("Insulina ($insType ${doseUi} UI • $site) registrada!")
+            }
+        )
     }
 }

@@ -423,41 +423,59 @@ class OmniGlucoseWidgetProvider : AppWidgetProvider() {
                 )
             )
             views.setOnClickPendingIntent(
-                R.id.widget_slot_btn_1h_almoco,
+                R.id.widget_slot_btn_1h_cafe,
                 OmniCategoryWidgetsUpdater.buildQuickGlucoseDialogPendingIntent(
                     context,
                     9304,
+                    DiabetesSlotCatalog.POS_CAFE_1H
+                )
+            )
+            views.setOnClickPendingIntent(
+                R.id.widget_slot_btn_almoco,
+                OmniCategoryWidgetsUpdater.buildQuickGlucoseDialogPendingIntent(
+                    context,
+                    9305,
+                    DiabetesSlotCatalog.ALMOCO
+                )
+            )
+            views.setOnClickPendingIntent(
+                R.id.widget_slot_btn_1h_almoco,
+                OmniCategoryWidgetsUpdater.buildQuickGlucoseDialogPendingIntent(
+                    context,
+                    9306,
                     DiabetesSlotCatalog.POS_ALMOCO_1H
                 )
             )
             views.setOnClickPendingIntent(
-                R.id.widget_slot_btn_2h_almoco,
+                R.id.widget_slot_btn_janta,
                 OmniCategoryWidgetsUpdater.buildQuickGlucoseDialogPendingIntent(
                     context,
-                    9305,
-                    DiabetesSlotCatalog.POS_ALMOCO_2H
+                    9309,
+                    DiabetesSlotCatalog.JANTA
                 )
             )
             views.setOnClickPendingIntent(
-                R.id.widget_slot_btn_jantar,
+                R.id.widget_slot_btn_1h_janta,
                 OmniCategoryWidgetsUpdater.buildQuickGlucoseDialogPendingIntent(
                     context,
-                    9306,
-                    DiabetesSlotCatalog.POS_JANTAR_1H
+                    9310,
+                    DiabetesSlotCatalog.POS_JANTA_1H
                 )
             )
 
-            // Post-Meal Timer row
+            // Post-Meal Timer row (fixed 1h = 3600s)
             val now = System.currentTimeMillis()
-            val mealLabel = timer.mealLabel.ifBlank { "Refeição" }
-            views.setTextViewText(R.id.widget_glucose_timer_label, "⏱️ Pós-$mealLabel")
+            val mealLabel = DiabetesSlotCatalog.normalizeSlot(timer.mealLabel)
+                .takeIf { it in DiabetesSlotCatalog.postMealTimerSlots }
+                ?: DiabetesSlotCatalog.POS_ALMOCO_1H
+            views.setTextViewText(R.id.widget_glucose_timer_label, "⏱️ $mealLabel")
 
             val remainingMillis = if (timer.isRunning && !timer.isPaused) {
                 (timer.targetEndEpochMillis - now).coerceAtLeast(0L)
             } else if (timer.isRunning && timer.isPaused) {
                 timer.pausedRemainingSeconds * 1000L
             } else {
-                timer.totalDurationSeconds.coerceAtLeast(60) * 1000L
+                3600_000L
             }
 
             if (timer.isRunning && !timer.isPaused && remainingMillis > 0L) {
@@ -482,15 +500,13 @@ class OmniGlucoseWidgetProvider : AppWidgetProvider() {
                 )
                 views.setTextViewText(R.id.widget_glucose_only_btn_toggle, "▶ Retomar")
             } else {
-                val totalSec = timer.totalDurationSeconds.takeIf { it > 0 } ?: 3600
                 views.setViewVisibility(R.id.widget_glucose_only_chronometer, View.GONE)
                 views.setViewVisibility(R.id.widget_glucose_only_static_time, View.VISIBLE)
                 views.setTextViewText(
                     R.id.widget_glucose_only_static_time,
-                    formatSec(totalSec)
+                    formatSec(3600)
                 )
-                val labelH = if (totalSec >= 7200) "▶ 2h" else "▶ 1h"
-                views.setTextViewText(R.id.widget_glucose_only_btn_toggle, labelH)
+                views.setTextViewText(R.id.widget_glucose_only_btn_toggle, "▶ 1h")
             }
 
             val toggleIntent = Intent(context, OmniGlucoseWidgetProvider::class.java).apply {

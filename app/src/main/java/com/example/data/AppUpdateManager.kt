@@ -64,10 +64,10 @@ data class AppReleaseMetadata(
         const val GITHUB_LATEST_RELEASE_API_URL = "https://api.github.com/repos/marcussilvavaz/AuraFamily/releases/latest"
         const val GITHUB_DEFAULT_APK_DOWNLOAD_URL = "https://github.com/marcussilvavaz/AuraFamily/releases/latest/download/Omni.apk"
         const val RELEASE_NOTES_SIMPLE =
-            "• Blindagem multi-família no Firestore com memberUids sincronizado e consultas compatíveis com Security Rules\n" +
-            "• Trava de convite ('Aceitar novos membros') no Perfil para controlar quem pode entrar por código familiar\n" +
-            "• Fusão segura para FAM_OMNI2448 (Família Vaz), sincronização Cloud-First e fotos de perfil em Base64\n" +
-            "• Tema Preto Puro (AMOLED), diagnóstico detalhado de Login Google/SHA-1 e alarmes exatos em 2º plano (One UI)"
+            "• Glicemia nos 6 períodos oficiais (Jejum, 1h Pós-Café, Almoço, 1h Pós-Almoço, Janta e 1h Pós-Janta) com cronômetro de 1h integrado\n" +
+            "• Controle de Insulina com rodízio visual de 8 locais, alarmes de horários fixos e reposição de insumos em 1 toque no Mural\n" +
+            "• Card de Gestação (DPP / Ultrassom) com comparador Doce, Fruta e Animal (semanas 4 a 42), tamanho/peso e próximos marcos\n" +
+            "• Relatório Médico Consolidado em PDF limpo com botão direto 'Abrir / Compartilhar PDF'"
 
         const val DEFAULT_RELEASE_NOTES = RELEASE_NOTES_SIMPLE
     }

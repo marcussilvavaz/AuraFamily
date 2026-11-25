@@ -54,62 +54,94 @@
             android:textStyle="bold" />
     </LinearLayout>
 
-    <!-- Row 2: Quick Period Selector Chips (opens Floating Dialog pre-selected) -->
+    <!-- Row 2A & 2B: 6 Official Period Selector Chips (opens Floating Dialog pre-selected) -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
+        android:layout_marginTop="5dp"
         android:orientation="horizontal">
 
         <TextView
             android:id="@+id/widget_slot_btn_jejum"
             android:layout_width="0dp"
-            android:layout_height="24dp"
+            android:layout_height="22dp"
             android:layout_marginEnd="4dp"
             android:layout_weight="1"
             android:background="@drawable/omni_widget_card_bg"
             android:gravity="center"
             android:text="Jejum"
             android:textColor="@color/widget_text_primary"
-            android:textSize="10sp"
+            android:textSize="9.5sp"
             android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_slot_btn_1h_cafe"
+            android:layout_width="0dp"
+            android:layout_height="22dp"
+            android:layout_marginEnd="4dp"
+            android:layout_weight="1"
+            android:background="@drawable/omni_widget_card_bg"
+            android:gravity="center"
+            android:text="1h Pós-Café"
+            android:textColor="@color/widget_text_primary"
+            android:textSize="9.5sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_slot_btn_almoco"
+            android:layout_width="0dp"
+            android:layout_height="22dp"
+            android:layout_weight="1"
+            android:background="@drawable/omni_widget_card_bg"
+            android:gravity="center"
+            android:text="Almoço"
+            android:textColor="@color/widget_text_primary"
+            android:textSize="9.5sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:orientation="horizontal">
 
         <TextView
             android:id="@+id/widget_slot_btn_1h_almoco"
             android:layout_width="0dp"
-            android:layout_height="24dp"
+            android:layout_height="22dp"
             android:layout_marginEnd="4dp"
             android:layout_weight="1"
             android:background="@drawable/omni_widget_card_bg"
             android:gravity="center"
-            android:text="1h Almoço"
+            android:text="1h Pós-Almoço"
             android:textColor="@color/widget_text_primary"
-            android:textSize="10sp"
+            android:textSize="9.5sp"
             android:textStyle="bold" />
 
         <TextView
-            android:id="@+id/widget_slot_btn_2h_almoco"
+            android:id="@+id/widget_slot_btn_janta"
             android:layout_width="0dp"
-            android:layout_height="24dp"
+            android:layout_height="22dp"
             android:layout_marginEnd="4dp"
             android:layout_weight="1"
             android:background="@drawable/omni_widget_card_bg"
             android:gravity="center"
-            android:text="2h Almoço"
+            android:text="Janta"
             android:textColor="@color/widget_text_primary"
-            android:textSize="10sp"
+            android:textSize="9.5sp"
             android:textStyle="bold" />
 
         <TextView
-            android:id="@+id/widget_slot_btn_jantar"
+            android:id="@+id/widget_slot_btn_1h_janta"
             android:layout_width="0dp"
-            android:layout_height="24dp"
+            android:layout_height="22dp"
             android:layout_weight="1"
             android:background="@drawable/omni_widget_card_bg"
             android:gravity="center"
-            android:text="Pós-Jantar"
+            android:text="1h Pós-Janta"
             android:textColor="@color/widget_text_primary"
-            android:textSize="10sp"
+            android:textSize="9.5sp"
             android:textStyle="bold" />
     </LinearLayout>
 

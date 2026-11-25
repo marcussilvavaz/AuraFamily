@@ -25,14 +25,16 @@ import java.util.UUID
 class AuraFirestoreRepository(
     private val db: FirebaseFirestore,
     private val auth: FirebaseAuth = Firebase.auth,
-    private val localStore: LocalOfflineStore? = null
+    private val localStore: LocalOfflineStore? = null,
+    private val appContext: Context? = null
 ) {
     constructor(context: Context) : this(
         db = FirebaseFirestore.getInstance(
             context.applicationContext.getString(R.string.firestore_database_id)
         ),
         auth = Firebase.auth,
-        localStore = LocalOfflineStore(context.applicationContext)
+        localStore = LocalOfflineStore(context.applicationContext),
+        appContext = context.applicationContext
     )
 
     init {
@@ -647,6 +649,7 @@ class AuraFirestoreRepository(
             "subscriptions",
             "savings_goals",
             "health_logs",
+            "insulin_records",
             "diary_entries"
         )
 
@@ -717,6 +720,22 @@ class AuraFirestoreRepository(
             }
             if ((targetHouse?.monthlyIncomeBrl ?: 0.0) <= 0.0 && dupHouse.monthlyIncomeBrl > 0.0 && dupHouse.monthlyIncomeBrl != 8500.0) {
                 mergePayload["monthlyIncomeBrl"] = dupHouse.monthlyIncomeBrl
+            }
+            if (targetHouse?.pregnancyDppDate.isNullOrBlank() && dupHouse.pregnancyDppDate.isNotBlank()) {
+                mergePayload["pregnancyDppDate"] = dupHouse.pregnancyDppDate
+            }
+            if (targetHouse?.insulinConfigs.isNullOrEmpty() && dupHouse.insulinConfigs.isNotEmpty()) {
+                mergePayload["insulinConfigs"] = dupHouse.insulinConfigs.map { cfg ->
+                    mapOf(
+                        "id" to cfg.id,
+                        "memberId" to cfg.memberId,
+                        "insulinType" to cfg.insulinType,
+                        "defaultUnits" to cfg.defaultUnits,
+                        "alarmHour" to cfg.alarmHour,
+                        "alarmMinute" to cfg.alarmMinute,
+                        "alarmEnabled" to cfg.alarmEnabled
+                    )
+                }
             }
             targetRef.set(mergePayload, SetOptions.merge()).await()
 
@@ -846,6 +865,109 @@ class AuraFirestoreRepository(
             subscriptions = remoteSubs,
             savingsGoals = remoteGoals
         )
+
+        val ctx = appContext
+        if (ctx != null) {
+            runCatching {
+                val healthRepo = HealthRepository(ctx)
+                val healthSnap = runCatching { houseRef.collection("health_logs").get().await() }.getOrNull()
+                val remoteGlucose = mutableListOf<GlucoseRecord>()
+                val remoteBp = mutableListOf<BloodPressureRecord>()
+                for (doc in healthSnap?.documents.orEmpty()) {
+                    val data = doc.data ?: continue
+                    val logType = (data["logType"] as? String).orEmpty()
+                    if (logType == "BLOOD_PRESSURE" || data.containsKey("systolic")) {
+                        val systolic = (data["systolic"] as? Number)?.toInt() ?: continue
+                        val diastolic = (data["diastolic"] as? Number)?.toInt() ?: continue
+                        val pulse = (data["pulseBpm"] as? Number)?.toInt() ?: 75
+                        val dateIso = (data["dateIso"] as? String).orEmpty()
+                        val timeFormatted = (data["timeFormatted"] as? String).orEmpty()
+                        val memberId = (data["memberId"] as? String)?.trim().orEmpty()
+                        val notes = (data["notes"] as? String).orEmpty()
+                        val epochMs = (data["timestampEpochMillis"] as? Number)?.toLong() ?: System.currentTimeMillis()
+                        remoteBp.add(
+                            BloodPressureRecord(
+                                id = doc.id,
+                                dateIso = dateIso.ifBlank { DateCalendarUtils.todayIsoDate() },
+                                timeFormatted = timeFormatted.ifBlank { "08:00" },
+                                systolic = systolic,
+                                diastolic = diastolic,
+                                pulseBpm = pulse,
+                                memberId = memberId.ifBlank { profile.displayName.ifBlank { "Marcus" } },
+                                notes = notes,
+                                timestampEpochMillis = epochMs
+                            )
+                        )
+                    } else if (data.containsKey("valueMgDl")) {
+                        val valueMgDl = (data["valueMgDl"] as? Number)?.toInt() ?: continue
+                        val rawSlot = (data["slot"] as? String).orEmpty()
+                        val dateIso = (data["dateIso"] as? String).orEmpty()
+                        val timeFormatted = (data["timeFormatted"] as? String).orEmpty()
+                        val memberId = (data["memberId"] as? String)?.trim().orEmpty()
+                        val notes = (data["notes"] as? String).orEmpty()
+                        val epochMs = (data["timestampEpochMillis"] as? Number)?.toLong() ?: System.currentTimeMillis()
+                        remoteGlucose.add(
+                            GlucoseRecord(
+                                id = doc.id,
+                                dateIso = dateIso.ifBlank { DateCalendarUtils.todayIsoDate() },
+                                timeFormatted = timeFormatted.ifBlank { "08:00" },
+                                slot = DiabetesSlotCatalog.normalizeSlot(rawSlot),
+                                valueMgDl = valueMgDl,
+                                memberId = memberId.ifBlank { profile.displayName.ifBlank { "Marcus" } },
+                                notes = notes,
+                                timestampEpochMillis = epochMs
+                            )
+                        )
+                    }
+                }
+
+                val insulinSnap = runCatching { houseRef.collection("insulin_records").get().await() }.getOrNull()
+                val remoteInsulin = insulinSnap?.documents.orEmpty().mapNotNull { doc ->
+                    val data = doc.data ?: return@mapNotNull null
+                    val units = (data["units"] as? Number)?.toInt() ?: return@mapNotNull null
+                    val insulinType = (data["insulinType"] as? String)?.trim().orEmpty()
+                    val site = (data["injectionSite"] as? String)?.trim().orEmpty()
+                    val dateIso = (data["dateIso"] as? String)?.trim().orEmpty()
+                    val timeFormatted = (data["timeFormatted"] as? String)?.trim().orEmpty()
+                    val memberId = (data["memberId"] as? String)?.trim().orEmpty()
+                    val notes = (data["notes"] as? String)?.trim().orEmpty()
+                    val epochMs = (data["timestampEpochMillis"] as? Number)?.toLong() ?: System.currentTimeMillis()
+                    InsulinRecord(
+                        id = doc.id,
+                        dateIso = dateIso.ifBlank { DateCalendarUtils.todayIsoDate() },
+                        timeFormatted = timeFormatted.ifBlank { "08:00" },
+                        insulinType = insulinType.ifBlank { "Basal / Glargina" },
+                        units = units,
+                        injectionSite = site.ifBlank { InsulinSiteCatalog.ABDOMEN_ESQ },
+                        memberId = memberId.ifBlank { profile.displayName.ifBlank { "Marcus" } },
+                        notes = notes,
+                        timestampEpochMillis = epochMs
+                    )
+                }
+
+                healthRepo.replaceWithCloudHealthPull(
+                    glucoseRecords = remoteGlucose,
+                    bloodPressureRecords = remoteBp,
+                    insulinRecords = remoteInsulin,
+                    insulinConfigs = remoteHousehold.insulinConfigs,
+                    loggedUserId = uid,
+                    loggedUserName = profile.displayName
+                )
+
+                val customRepo = CustomizationRepository(ctx)
+                val currentCustom = customRepo.configFlow.value
+                val cloudDpp = remoteHousehold.pregnancyDppDate.trim()
+                val cloudMode = remoteHousehold.pregnancyComparisonMode.trim().uppercase(Locale.ROOT)
+                if (cloudDpp.isNotBlank() || cloudMode.isNotBlank()) {
+                    customRepo.updatePregnancyModule(
+                        enabled = if (cloudDpp.isNotBlank()) true else currentCustom.pregnancyEnabled,
+                        dppDate = cloudDpp.ifBlank { currentCustom.pregnancyDppDate },
+                        notes = currentCustom.pregnancyNotes,
+                        comparisonMode = cloudMode.ifBlank { currentCustom.pregnancyComparisonMode }
+                    )
+                }
+            }
+        }
     }
 
     /**
@@ -1579,6 +1701,40 @@ class AuraFirestoreRepository(
             ref.update(
                 mapOf(
                     "muralItems" to muralItemsToFirestoreList(items),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateHouseholdPregnancyConfig(
+        householdId: String,
+        dppDate: String,
+        comparisonMode: String
+    ): Result<Unit> {
+        val cleanDpp = dppDate.trim().take(20)
+        val cleanMode = when (comparisonMode.trim().uppercase(Locale.ROOT)) {
+            "DOCE", "FRUTA", "ANIMAL", "TODOS" -> comparisonMode.trim().uppercase(Locale.ROOT)
+            else -> "TODOS"
+        }
+        if (isLocalOfflineMode() || householdId.isBlank()) {
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            requireUserId()
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "pregnancyDppDate" to cleanDpp,
+                    "pregnancyComparisonMode" to cleanMode,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()

@@ -28,21 +28,25 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FamilyRestroom
-import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Medication
 import androidx.compose.material.icons.filled.MonitorHeart
-import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.AlertDialog
@@ -71,6 +75,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -96,13 +101,20 @@ import com.example.data.CustomizationRepository
 import com.example.data.DailyTrackerHabit
 import com.example.data.DateCalendarUtils
 import com.example.data.DiabetesSlotCatalog
+import com.example.data.FamilyMemberBadge
+import com.example.data.GlucoseContextCatalog
 import com.example.data.GlucoseRecord
-import com.example.data.HealthCatalog
-import com.example.data.HealthFinanceSuggestion
 import com.example.data.HealthRepository
+import com.example.data.Household
+import com.example.data.InsulinRecord
+import com.example.data.InsulinScheduleConfig
+import com.example.data.InsulinSiteCatalog
+import com.example.data.InsulinTypeCatalog
 import com.example.data.MedicalReportPdfGenerator
 import com.example.data.PregnancyCalculator
 import com.example.data.PrivacyScope
+import com.example.data.SupplyReplenishCatalog
+import com.example.data.UserProfile
 import com.example.data.formatCurrencyBrl
 import com.example.ui.theme.ExpenseCoral
 import com.example.ui.theme.IncomeEmerald
@@ -122,22 +134,42 @@ fun HealthModuleScreen(
     healthRepo: HealthRepository,
     onCreateHealthFinanceExpense: (title: String, amountBrl: Double, category: String, privacyScope: String) -> Unit,
     onShowBannerMessage: (String) -> Unit,
-    household: com.example.data.Household = com.example.data.Household(),
-    userProfile: com.example.data.UserProfile? = null
+    household: Household = Household(),
+    userProfile: UserProfile? = null,
+    pendingGlucoseSlotFromNotification: String? = null,
+    onConsumePendingGlucoseSlot: () -> Unit = {},
+    onAddSupplyToMural: (String) -> Unit = {},
+    onSyncPregnancyConfigToCloud: (dppDate: String, comparisonMode: String) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val cardRadius = LocalOrganicCardRadius.current
     val healthState by healthRepo.stateFlow.collectAsStateWithLifecycle()
     val triggerFeedback = rememberOmniFeedback(onShowBannerMessage)
 
-    val selectedDateIso = remember(selectedEpochDay) {
-        DateCalendarUtils.formatIsoDate(selectedEpochDay)
+    // Navegação de data dedicada ao Monitoramento de Glicemia & Saúde (< Hoje >)
+    var activeDateEpochDay by rememberSaveable(selectedEpochDay) {
+        mutableLongStateOf(selectedEpochDay)
+    }
+    val todayEpochDay = remember { DateCalendarUtils.todayEpochDay() }
+    val selectedDateIso = remember(activeDateEpochDay) {
+        DateCalendarUtils.formatIsoDate(activeDateEpochDay)
     }
 
     // Lista oficial de membros da família (ex: Marcus e Nathalia) sincronizada com o Firestore
-    val familyMembers = remember(household.members, customizationConfig.profileName, customizationConfig.profileColorHex, userProfile?.userId) {
+    val familyMembers = remember(
+        household.members,
+        customizationConfig.profileName,
+        customizationConfig.profileColorHex,
+        userProfile?.userId,
+        userProfile?.displayName
+    ) {
+        val resolvedFallbackName = userProfile?.displayName?.takeIf {
+            it.isNotBlank() && !it.equals("Você", true) && !it.equals("VO", true)
+        } ?: customizationConfig.profileName.takeIf {
+            it.isNotBlank() && !it.equals("Você", true) && !it.equals("VO", true)
+        } ?: "Marcus"
         household.membersWithAssignedColors(
-            fallbackProfileName = customizationConfig.profileName,
+            fallbackProfileName = resolvedFallbackName,
             fallbackProfileColorHex = customizationConfig.profileColorHex,
             fallbackUserId = userProfile?.userId.orEmpty()
         )
@@ -149,28 +181,38 @@ fun HealthModuleScreen(
                 it.isCurrentUser ||
                 it.displayName.equals(customizationConfig.profileName, ignoreCase = true)
         } ?: familyMembers.firstOrNull()
-            ?: com.example.data.FamilyMemberBadge(
+            ?: FamilyMemberBadge(
                 userId = userProfile?.userId.orEmpty().ifBlank { "member_primary" },
-                displayName = customizationConfig.profileName.ifBlank { "Meu Perfil" },
+                displayName = customizationConfig.profileName.takeIf {
+                    it.isNotBlank() && !it.equals("Você", true) && !it.equals("VO", true)
+                } ?: "Marcus",
                 colorHex = customizationConfig.profileColorHex
             )
     }
 
-    var selectedMemberId by remember(defaultMember.userId) { mutableStateOf(defaultMember.userId) }
+    var selectedMemberId by rememberSaveable(defaultMember.userId) { mutableStateOf(defaultMember.userId) }
     val activeMember = remember(familyMembers, selectedMemberId, defaultMember) {
-        familyMembers.firstOrNull { it.userId == selectedMemberId } ?: defaultMember
+        familyMembers.firstOrNull {
+            it.userId == selectedMemberId || it.displayName.equals(selectedMemberId, ignoreCase = true)
+        } ?: defaultMember
     }
     val isPrimaryDefaultMember = remember(activeMember, defaultMember) {
         activeMember.userId == defaultMember.userId ||
             activeMember.displayName.equals(defaultMember.displayName, ignoreCase = true)
     }
 
-    // Filtro de Escopo na Saúde ("ALL", PrivacyScope.PERSONAL, PrivacyScope.FAMILY)
-    var scopeFilter by remember { mutableStateOf("ALL") }
-    // Sub-aba das medições clínicas: "GLUCOSE" (Glicemia) ou "BP" (Pressão Arterial)
-    var clinicalTab by remember { mutableStateOf("GLUCOSE") }
+    // Migração automática em segundo plano de registros antigos sem memberId válido ou com "Você" / "VO"
+    LaunchedEffect(defaultMember.userId, defaultMember.displayName, healthState.glucoseRecords.size, healthState.insulinRecords.size) {
+        healthRepo.migratePlaceholderMembersToLoggedMember(
+            loggedMemberId = defaultMember.userId,
+            loggedMemberName = defaultMember.displayName
+        )
+    }
+
+    // Filtro de Escopo nos Trackers ("ALL", PrivacyScope.PERSONAL, PrivacyScope.FAMILY)
+    var scopeFilter by rememberSaveable { mutableStateOf("ALL") }
     // Período selecionado para o Relatório Médico PDF (7, 30 ou 365 dias)
-    var pdfPeriodDays by remember { mutableIntStateOf(30) }
+    var pdfPeriodDays by rememberSaveable { mutableIntStateOf(30) }
 
     // Modais de criação/edição e exclusão com confirmação
     var showAddTrackerDialog by remember { mutableStateOf(false) }
@@ -182,25 +224,46 @@ fun HealthModuleScreen(
     var glucoseToDelete by remember { mutableStateOf<GlucoseRecord?>(null) }
     var presetGlucoseSlot by remember { mutableStateOf(DiabetesSlotCatalog.JEJUM) }
 
+    var showAddInsulinDialog by remember { mutableStateOf(false) }
+    var insulinToEdit by remember { mutableStateOf<InsulinRecord?>(null) }
+    var insulinToDelete by remember { mutableStateOf<InsulinRecord?>(null) }
+    var showInsulinSchedulesDialog by remember { mutableStateOf(false) }
+
+    var showUnifiedHistoryModal by remember { mutableStateOf(false) }
+
     var showAddBpDialog by remember { mutableStateOf(false) }
     var bpToEdit by remember { mutableStateOf<BloodPressureRecord?>(null) }
     var bpToDelete by remember { mutableStateOf<BloodPressureRecord?>(null) }
 
     var showEditDppDialog by remember { mutableStateOf(false) }
-    var financeSuggestionToConfirm by remember { mutableStateOf<HealthFinanceSuggestion?>(null) }
 
-    // Cronômetro Pós-Refeição em tempo real
+    // Quando a notificação do cronômetro de 1h pós-refeição dispara e o usuário toca nela,
+    // abre diretamente o modal de registro de glicemia naquele slot ("1h Pós-Café", "1h Pós-Almoço" ou "1h Pós-Janta").
+    LaunchedEffect(pendingGlucoseSlotFromNotification) {
+        val slotFromNotif = pendingGlucoseSlotFromNotification
+        if (!slotFromNotif.isNullOrBlank()) {
+            presetGlucoseSlot = DiabetesSlotCatalog.normalizeSlot(slotFromNotif)
+            glucoseToEdit = null
+            showAddGlucoseDialog = true
+            onConsumePendingGlucoseSlot()
+        }
+    }
+
+    // Cronômetro Pós-Refeição fixo em 1h (60:00) integrado ao card de Glicemia
     val timerState = healthState.postMealTimer
-    var selectedMealForTimer by remember(timerState.mealLabel) { mutableStateOf(timerState.mealLabel) }
-    var selectedDurationSeconds by remember(timerState.totalDurationSeconds) {
-        mutableIntStateOf(timerState.totalDurationSeconds.coerceAtLeast(60))
+    var selectedMealForTimer by remember(timerState.mealLabel) {
+        mutableStateOf(
+            DiabetesSlotCatalog.normalizeSlot(timerState.mealLabel)
+                .takeIf { it in DiabetesSlotCatalog.postMealTimerSlots }
+                ?: DiabetesSlotCatalog.POS_ALMOCO_1H
+        )
     }
     var liveRemainingSeconds by remember(timerState) {
         mutableIntStateOf(
             if (timerState.isRunning && !timerState.isPaused) {
                 ((timerState.targetEndEpochMillis - System.currentTimeMillis()) / 1000L).toInt().coerceAtLeast(0)
             } else {
-                timerState.pausedRemainingSeconds
+                timerState.pausedRemainingSeconds.coerceIn(0, 3600)
             }
         )
     }
@@ -213,11 +276,13 @@ fun HealthModuleScreen(
                     liveRemainingSeconds = 0
                     healthRepo.markPostMealTimerFinished()
                     TaskTonePreviewPlayer.playPreview("SUAVE")
+                    val targetSlot = DiabetesSlotCatalog.slotForPostMealTimer(timerState.mealLabel, 3600)
                     AlarmScheduler.showImmediateNotification(
                         context = context,
-                        notificationId = 7744,
-                        title = "⏰ Pós-${timerState.mealLabel} Concluído!",
-                        message = "Momento ideal para registrar sua medição no Monitoramento de Glicemia."
+                        notificationId = 7701,
+                        title = "⏰ 1h Concluída ($targetSlot)!",
+                        message = "Toque para registrar sua medição de glicemia ($targetSlot) agora.",
+                        openGlucoseSlot = targetSlot
                     )
                     break
                 } else {
@@ -226,7 +291,7 @@ fun HealthModuleScreen(
                 delay(1000L)
             }
         } else {
-            liveRemainingSeconds = timerState.pausedRemainingSeconds
+            liveRemainingSeconds = timerState.pausedRemainingSeconds.coerceIn(0, 3600)
         }
     }
 
@@ -238,39 +303,48 @@ fun HealthModuleScreen(
         }
     }
 
-    // Filtra medições clínicas individualmente pelo membro selecionado (Marcus / Nathalia) sem misturar dados do casal
+    fun matchesActiveMember(recordMemberId: String, recordMemberName: String): Boolean {
+        val cleanId = recordMemberId.trim()
+        val cleanName = recordMemberName.trim()
+        if ((cleanId.isBlank() || cleanId.equals("Você", true) || cleanId.equals("VO", true)) &&
+            (cleanName.isBlank() || cleanName.equals("Você", true) || cleanName.equals("VO", true))
+        ) {
+            return isPrimaryDefaultMember
+        }
+        return cleanId.equals(activeMember.userId, ignoreCase = true) ||
+            cleanId.equals(activeMember.displayName, ignoreCase = true) ||
+            cleanName.equals(activeMember.displayName, ignoreCase = true) ||
+            cleanName.equals(activeMember.userId, ignoreCase = true)
+    }
+
+    // Filtra medições clínicas individualmente pelo membro selecionado (ex: Marcus | Nathalia)
     val filteredGlucose = remember(healthState.glucoseRecords, activeMember, isPrimaryDefaultMember) {
         healthState.glucoseRecords.filter { rec ->
-            val matchesMember = if (rec.memberId.isBlank() && rec.memberName.isBlank()) {
-                isPrimaryDefaultMember
-            } else {
-                rec.memberId == activeMember.userId ||
-                    rec.memberName.equals(activeMember.displayName, ignoreCase = true)
-            }
-            matchesMember
+            matchesActiveMember(rec.memberId, rec.memberName)
+        }
+    }
+
+    val filteredInsulin = remember(healthState.insulinRecords, activeMember, isPrimaryDefaultMember) {
+        healthState.insulinRecords.filter { rec ->
+            matchesActiveMember(rec.memberId, rec.memberId)
         }
     }
 
     val filteredBp = remember(healthState.bloodPressureRecords, activeMember, isPrimaryDefaultMember) {
         healthState.bloodPressureRecords.filter { rec ->
-            val matchesMember = if (rec.memberId.isBlank() && rec.memberName.isBlank()) {
-                isPrimaryDefaultMember
-            } else {
-                rec.memberId == activeMember.userId ||
-                    rec.memberName.equals(activeMember.displayName, ignoreCase = true)
-            }
-            matchesMember
+            matchesActiveMember(rec.memberId, rec.memberName)
         }
     }
 
-    val memberFilteredHealthState = remember(healthState, filteredGlucose, filteredBp) {
+    val memberFilteredHealthState = remember(healthState, filteredGlucose, filteredBp, filteredInsulin) {
         healthState.copy(
             glucoseRecords = filteredGlucose,
-            bloodPressureRecords = filteredBp
+            bloodPressureRecords = filteredBp,
+            insulinRecords = filteredInsulin
         )
     }
 
-    // Launcher para salvar PDF nativo em local escolhido pelo usuário (CreateDocument)
+    // Launcher para salvar PDF nativo em pasta escolhida pelo usuário (CreateDocument)
     val createPdfDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/pdf")
     ) { targetUri ->
@@ -284,13 +358,24 @@ fun HealthModuleScreen(
                 healthState = memberFilteredHealthState
             )
             if (result.success) {
-                healthRepo.recordGeneratedPdfInfo(result.filePath, result.summaryText)
-                onShowBannerMessage("📄 Relatório Médico de ${activeMember.displayName} salvo! ${result.summaryText}")
+                val localCopy = MedicalReportPdfGenerator.exportToLocalAppFile(
+                    context = context,
+                    profileName = activeMember.displayName,
+                    periodDays = pdfPeriodDays,
+                    customizationConfig = customizationConfig,
+                    healthState = memberFilteredHealthState
+                )
+                val safePath = if (localCopy.success) localCopy.filePath else ""
+                healthRepo.recordGeneratedPdfInfo(safePath, result.summaryText)
+                onShowBannerMessage("📄 Relatório Médico de ${activeMember.displayName} salvo com sucesso!")
             } else {
                 onShowBannerMessage(result.summaryText)
             }
         }
     }
+
+    val effectiveDppDate = household.pregnancyDppDate.ifBlank { customizationConfig.pregnancyDppDate }
+    val showPregnancyCard = customizationConfig.pregnancyEnabled || effectiveDppDate.isNotBlank()
 
     LazyColumn(
         modifier = Modifier
@@ -299,10 +384,192 @@ fun HealthModuleScreen(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 1. Cabeçalho & Filtro de Escopo (Tudo / Individual / Familiar)
+        // 1. CARD DE GESTAÇÃO (DPP) COM COMPARADOR (DOCE / FRUTA / ANIMAL) E PRÓXIMO MARCO (no topo da aba Saúde)
+        if (showPregnancyCard) {
+            item {
+                var newPregNote by remember { mutableStateOf("") }
+                var showPrenatalChecklist by rememberSaveable { mutableStateOf(false) }
+
+                OmniPregnancyHeroCard(
+                    dppDateRaw = effectiveDppDate,
+                    comparisonMode = customizationConfig.pregnancyComparisonMode.ifBlank {
+                        household.pregnancyComparisonMode.ifBlank { "TODOS" }
+                    },
+                    accentColor = Color(customizationConfig.healthColorHex),
+                    onSelectComparisonMode = { mode ->
+                        customizationRepo.updatePregnancyComparisonMode(mode)
+                        onSyncPregnancyConfigToCloud(effectiveDppDate, mode)
+                    },
+                    onOpenEditDpp = { showEditDppDialog = true },
+                    extraFooterContent = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                TextButton(
+                                    onClick = { showPrenatalChecklist = !showPrenatalChecklist },
+                                    modifier = Modifier.testTag("toggle_prenatal_checklist_btn")
+                                ) {
+                                    Text(
+                                        text = if (showPrenatalChecklist) "Ocultar Checklist Pré-Natal ▲" else "Checklist Pré-Natal & Evolução ▼",
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            AnimatedVisibility(visible = showPrenatalChecklist) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    healthState.pregnancyChecklist.forEach { item ->
+                                        Surface(
+                                            shape = RoundedCornerShape(14.dp),
+                                            color = if (item.completed) {
+                                                IncomeEmerald.copy(alpha = 0.10f)
+                                            } else {
+                                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                            },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(14.dp))
+                                                .clickable { healthRepo.togglePregnancyChecklistItem(item.id) }
+                                                .testTag("pregnancy_check_item_${item.id}")
+                                        ) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Checkbox(
+                                                    checked = item.completed,
+                                                    onCheckedChange = { healthRepo.togglePregnancyChecklistItem(item.id) }
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = "${item.title} (Sem. ${item.recommendedWeek})",
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.Bold,
+                                                        textDecoration = if (item.completed) TextDecoration.LineThrough else TextDecoration.None
+                                                    )
+                                                    Text(
+                                                        text = item.notes,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                                if (item.estimatedCostBrl > 0.0) {
+                                                    FilledTonalButton(
+                                                        onClick = {
+                                                            onCreateHealthFinanceExpense(
+                                                                item.title,
+                                                                item.estimatedCostBrl,
+                                                                item.suggestedFinanceCategory,
+                                                                PrivacyScope.FAMILY
+                                                            )
+                                                            onShowBannerMessage("💰 Lançado no Financeiro (${item.suggestedFinanceCategory}): ${item.title} - ${formatCurrencyBrl(item.estimatedCostBrl)}")
+                                                        },
+                                                        shape = RoundedCornerShape(50),
+                                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "Lançar ${formatCurrencyBrl(item.estimatedCostBrl)}",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        OutlinedTextField(
+                                            value = newPregNote,
+                                            onValueChange = { newPregNote = it },
+                                            label = { Text("Registrar sintoma, ultrassom ou marco") },
+                                            singleLine = true,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        FilledTonalButton(
+                                            onClick = {
+                                                if (newPregNote.isNotBlank()) {
+                                                    healthRepo.addPregnancyNote(newPregNote)
+                                                    newPregNote = ""
+                                                }
+                                            },
+                                            shape = RoundedCornerShape(50)
+                                        ) {
+                                            Text("Salvar")
+                                        }
+                                    }
+
+                                    healthState.pregnancyNotesLog.take(3).forEach { note ->
+                                        Text(
+                                            text = "• $note",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+            }
+        }
+
+        // 2. CARD ÚNICO CONSOLIDADO: MONITORAMENTO DE GLICEMIA (mg/dL), INSULINA, RODÍZIO, INSUMOS E TIMER 1H
         item {
+            val recordsOnSelectedDate = remember(filteredGlucose, activeDateEpochDay, selectedDateIso) {
+                filteredGlucose.filter { rec ->
+                    rec.dateEpochDay == activeDateEpochDay || rec.dateIso == selectedDateIso
+                }
+            }
+            val latestBySlotOnDate = remember(recordsOnSelectedDate) {
+                val map = mutableMapOf<String, GlucoseRecord>()
+                for (slot in DiabetesSlotCatalog.allSlots) {
+                    val match = recordsOnSelectedDate
+                        .filter { DiabetesSlotCatalog.normalizeSlot(it.slot) == slot }
+                        .maxByOrNull { it.timestampEpochMillis }
+                    if (match != null) {
+                        map[slot] = match
+                    }
+                }
+                map
+            }
+            val measuredCountOnDate = latestBySlotOnDate.size
+            val dayValues = remember(recordsOnSelectedDate) {
+                recordsOnSelectedDate.map { it.valueMgDl }.filter { it > 0 }
+            }
+            val dayMin = remember(dayValues) { dayValues.minOrNull() ?: 0 }
+            val dayMax = remember(dayValues) { dayValues.maxOrNull() ?: 0 }
+            val dayAvg = remember(dayValues) {
+                if (dayValues.isNotEmpty()) dayValues.average().roundToInt() else 0
+            }
+
+            val latestInsulinBanner = remember(healthState.insulinRecords, activeMember, selectedDateIso) {
+                healthState.formatLatestInsulinBanner(
+                    memberId = activeMember.userId,
+                    memberName = activeMember.displayName,
+                    todayIso = DateCalendarUtils.todayIsoDate()
+                )
+            }
+
+            val isTodaySelected = activeDateEpochDay == todayEpochDay
+            val dateDisplayLabel = remember(activeDateEpochDay, isTodaySelected) {
+                val formatted = DateCalendarUtils.formatEpochDayPt(activeDateEpochDay)
+                if (isTodaySelected) "Hoje • $formatted" else formatted
+            }
+
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("clinical_measurements_card"),
                 shape = RoundedCornerShape(cardRadius),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
@@ -310,17 +577,10 @@ fun HealthModuleScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                                    MaterialTheme.colorScheme.surface
-                                )
-                            )
-                        )
-                        .padding(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
+                    // Título + Botão rápido de PDF
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -328,53 +588,36 @@ fun HealthModuleScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Saúde, Inegociáveis & Relatório PDF",
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold
+                                text = "🩸 Monitoramento de Glicemia (mg/dL)",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.ExtraBold
                             )
-                            val activeSpecificModules = buildList {
-                                add("Trackers diários")
-                                if (customizationConfig.diabetesEnabled) add("Monitoramento de Glicemia & Timer")
-                                if (customizationConfig.bloodPressureEnabled) add("Pressão Arterial")
-                                if (customizationConfig.pregnancyEnabled) add("Gestação Familiar")
-                            }.joinToString(", ")
                             Text(
-                                text = activeSpecificModules,
+                                text = "6 períodos oficiais • Insulina & Rodízio • Cronômetro 1h",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         FilledTonalButton(
-                            onClick = {
-                                val localResult = MedicalReportPdfGenerator.exportToLocalAppFile(
-                                    context = context,
-                                    profileName = activeMember.displayName,
-                                    periodDays = pdfPeriodDays,
-                                    customizationConfig = customizationConfig,
-                                    healthState = memberFilteredHealthState
-                                )
-                                if (localResult.success) {
-                                    healthRepo.recordGeneratedPdfInfo(localResult.filePath, localResult.summaryText)
-                                    onShowBannerMessage("📄 PDF Médico de ${activeMember.displayName} gerado! ${localResult.summaryText}")
-                                }
-                            },
+                            onClick = { showUnifiedHistoryModal = true },
                             shape = RoundedCornerShape(50),
-                            modifier = Modifier.testTag("quick_generate_pdf_header_btn")
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("top_open_glucose_history_btn")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.PictureAsPdf,
+                                imageVector = Icons.Default.History,
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Gerar PDF", fontWeight = FontWeight.Bold)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Histórico", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                         }
                     }
 
-                    // Seletor Rápido de Membro da Família (ex.: Marcus / Nathalia) para separar histórico clínico
+                    // Seletor rápido de membro ("Marcus" | "Nathalia")
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            text = "Paciente / Membro Selecionado:",
+                            text = "Membro da Família:",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
@@ -384,7 +627,8 @@ fun HealthModuleScreen(
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             familyMembers.forEach { member ->
-                                val isSelected = activeMember.userId == member.userId
+                                val isSelected = activeMember.userId == member.userId ||
+                                    activeMember.displayName.equals(member.displayName, ignoreCase = true)
                                 val memberColor = Color(member.colorHex.toInt())
                                 FilterChip(
                                     selected = isSelected,
@@ -392,7 +636,7 @@ fun HealthModuleScreen(
                                     leadingIcon = {
                                         Box(
                                             modifier = Modifier
-                                                .size(12.dp)
+                                                .size(10.dp)
                                                 .clip(CircleShape)
                                                 .background(memberColor)
                                         )
@@ -400,13 +644,564 @@ fun HealthModuleScreen(
                                     label = {
                                         Text(
                                             text = "${member.avatarEmoji} ${member.displayName}",
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
                                         )
                                     },
                                     shape = RoundedCornerShape(50),
                                     modifier = Modifier.testTag("health_member_chip_${member.userId}")
                                 )
                             }
+                        }
+                    }
+
+                    // Navegação de data (< Hoje >) + Contador "X de 6 períodos medidos na data selecionada"
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.32f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(
+                                    onClick = { activeDateEpochDay -= 1L },
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .testTag("glucose_prev_date_btn")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                                        contentDescription = "Dia anterior"
+                                    )
+                                }
+
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable { activeDateEpochDay = todayEpochDay }
+                                        .padding(horizontal = 8.dp)
+                                ) {
+                                    Text(
+                                        text = dateDisplayLabel,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "$measuredCountOnDate de 6 períodos medidos na data selecionada",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = { activeDateEpochDay += 1L },
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .testTag("glucose_next_date_btn")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                        contentDescription = "Próximo dia"
+                                    )
+                                }
+                            }
+
+                            // 6 Chips dos Períodos Oficiais com o valor medido diretamente dentro do chip
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                DiabetesSlotCatalog.allSlots.forEach { slotName ->
+                                    val recForSlot = latestBySlotOnDate[slotName]
+                                    val isMeasured = recForSlot != null
+                                    val isAlert = recForSlot?.isAlert() == true
+                                    val chipAccent = when {
+                                        !isMeasured -> MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                                        isAlert -> ExpenseCoral
+                                        else -> IncomeEmerald
+                                    }
+                                    val chipBg = when {
+                                        !isMeasured -> MaterialTheme.colorScheme.surface
+                                        isAlert -> ExpenseCoral.copy(alpha = 0.16f)
+                                        else -> IncomeEmerald.copy(alpha = 0.18f)
+                                    }
+                                    val chipLabel = if (recForSlot != null) {
+                                        "$slotName • ${recForSlot.valueMgDl} mg/dL"
+                                    } else {
+                                        slotName
+                                    }
+
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = chipBg,
+                                        modifier = Modifier
+                                            .border(
+                                                width = 1.dp,
+                                                color = chipAccent,
+                                                shape = RoundedCornerShape(50)
+                                            )
+                                            .clip(RoundedCornerShape(50))
+                                            .clickable {
+                                                presetGlucoseSlot = slotName
+                                                glucoseToEdit = recForSlot
+                                                showAddGlucoseDialog = true
+                                            }
+                                            .testTag("glucose_slot_chip_$slotName")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                        ) {
+                                            if (isMeasured) {
+                                                Icon(
+                                                    imageVector = Icons.Default.CheckCircle,
+                                                    contentDescription = "Medido",
+                                                    tint = chipAccent,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                            Text(
+                                                text = chipLabel,
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = if (isMeasured) FontWeight.ExtraBold else FontWeight.Medium,
+                                                color = if (isMeasured) chipAccent else MaterialTheme.colorScheme.onSurface
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Resumo rápido do dia (menor, maior e média do dia)
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                if (dayValues.isNotEmpty()) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text(
+                                                text = "Menor do dia",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = "$dayMin mg/dL",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontFamily = JetBrainsMonoFontFamily,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                        }
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text(
+                                                text = "Média do dia",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = "$dayAvg mg/dL",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontFamily = JetBrainsMonoFontFamily,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text(
+                                                text = "Maior do dia",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = "$dayMax mg/dL",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontFamily = JetBrainsMonoFontFamily,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = if (dayMax > 140) ExpenseCoral else IncomeEmerald
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    Text(
+                                        text = "Nenhuma medição registrada para ${activeMember.displayName} nesta data. Toque em um dos 6 períodos acima ou em '+ Medir'.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Botões de ação rápida: "+ Medir", "+ Insulina" e "Histórico"
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                val nextMissingSlot = DiabetesSlotCatalog.allSlots.firstOrNull { it !in latestBySlotOnDate }
+                                    ?: DiabetesSlotCatalog.JEJUM
+                                presetGlucoseSlot = nextMissingSlot
+                                glucoseToEdit = null
+                                showAddGlucoseDialog = true
+                            },
+                            shape = RoundedCornerShape(50),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("open_add_glucose_btn")
+                        ) {
+                            Icon(imageVector = Icons.Default.WaterDrop, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("+ Medir", fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
+                        }
+
+                        FilledTonalButton(
+                            onClick = {
+                                insulinToEdit = null
+                                showAddInsulinDialog = true
+                            },
+                            shape = RoundedCornerShape(50),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("open_add_insulin_btn")
+                        ) {
+                            Icon(imageVector = Icons.Default.Medication, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("+ Insulina", fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
+                        }
+
+                        OutlinedButton(
+                            onClick = { showUnifiedHistoryModal = true },
+                            shape = RoundedCornerShape(50),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("open_unified_history_btn")
+                        ) {
+                            Icon(imageVector = Icons.Default.History, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Histórico", fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                        }
+                    }
+
+                    // Resumo de Insulina + Configuração de Horários Fixos + Repor Insumos em 1 toque
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("insulin_summary_banner")
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "💉 $latestInsulinBanner",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(
+                                    onClick = { showInsulinSchedulesDialog = true },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.testTag("open_insulin_schedules_btn")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Alarm,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Doses & Alarmes",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                }
+                            }
+
+                            // Atalho "Repor insumos" -> envia em 1 toque para o checklist de Compras do Mural da Família
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ShoppingCart,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = "Repor insumos (envia em 1 toque para Compras no Mural):",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    SupplyReplenishCatalog.items.forEach { supplyItem ->
+                                        Surface(
+                                            shape = RoundedCornerShape(50),
+                                            color = MaterialTheme.colorScheme.surface,
+                                            modifier = Modifier
+                                                .border(
+                                                    width = 1.dp,
+                                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                                                    shape = RoundedCornerShape(50)
+                                                )
+                                                .clip(RoundedCornerShape(50))
+                                                .clickable {
+                                                    onAddSupplyToMural(supplyItem)
+                                                    triggerFeedback("🛒 \"$supplyItem\" enviado para a lista de Compras do Mural da Família!")
+                                                }
+                                                .testTag("replenish_supply_chip_$supplyItem")
+                                        ) {
+                                            Text(
+                                                text = "+ $supplyItem",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Registros do dia selecionado (Glicemia + Insulina) com edição/exclusão rápidas
+                    if (recordsOnSelectedDate.isNotEmpty() || filteredInsulin.any { it.dateIso == selectedDateIso }) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "Registros de ${activeMember.displayName} em ${DateCalendarUtils.formatEpochDayPt(activeDateEpochDay)}:",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            recordsOnSelectedDate.take(6).forEach { record ->
+                                GlucoseRecordRowCard(
+                                    record = record,
+                                    fallbackMemberName = activeMember.displayName,
+                                    onEdit = { glucoseToEdit = record },
+                                    onDelete = { glucoseToDelete = record }
+                                )
+                            }
+                            filteredInsulin.filter { it.dateIso == selectedDateIso }.take(4).forEach { insRec ->
+                                InsulinRecordRowCard(
+                                    record = insRec,
+                                    onEdit = { insulinToEdit = insRec },
+                                    onDelete = { insulinToDelete = insRec }
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+
+                    // Na base do mesmo card: Cronômetro Pós-Refeição fixo em 1h (60:00) integrado ao AlarmManager
+                    IntegratedOneHourPostMealTimerSection(
+                        timerState = timerState,
+                        liveRemainingSeconds = liveRemainingSeconds,
+                        selectedMealSlot = selectedMealForTimer,
+                        onSelectMealSlot = { slot ->
+                            selectedMealForTimer = slot
+                            if (!timerState.isRunning) {
+                                healthRepo.resetPostMealTimer(slot)
+                            }
+                        },
+                        onStartTimer = {
+                            healthRepo.startPostMealTimer(selectedMealForTimer, 3600)
+                            val triggerAt = System.currentTimeMillis() + 3600_000L
+                            AlarmScheduler.schedulePostMealGlucoseAlarm(
+                                context = context,
+                                triggerAtMillis = triggerAt,
+                                mealLabel = selectedMealForTimer
+                            )
+                            triggerFeedback("⏱️ Cronômetro de 1h ($selectedMealForTimer) iniciado com alarme exato!")
+                        },
+                        onPauseResumeTimer = {
+                            healthRepo.pauseOrResumePostMealTimer()
+                            val updated = healthRepo.stateFlow.value.postMealTimer
+                            if (updated.isPaused) {
+                                AlarmScheduler.cancelPostMealGlucoseAlarm(context)
+                            } else if (updated.isRunning && updated.targetEndEpochMillis > System.currentTimeMillis()) {
+                                AlarmScheduler.schedulePostMealGlucoseAlarm(
+                                    context = context,
+                                    triggerAtMillis = updated.targetEndEpochMillis,
+                                    mealLabel = updated.mealLabel
+                                )
+                            }
+                        },
+                        onResetTimer = {
+                            healthRepo.resetPostMealTimer(selectedMealForTimer)
+                            AlarmScheduler.cancelPostMealGlucoseAlarm(context)
+                        },
+                        onLogPostMealGlucoseNow = {
+                            healthRepo.dismissPostMealTimerAlert()
+                            AlarmScheduler.cancelPostMealGlucoseAlarm(context)
+                            presetGlucoseSlot = DiabetesSlotCatalog.normalizeSlot(selectedMealForTimer)
+                            glucoseToEdit = null
+                            showAddGlucoseDialog = true
+                        }
+                    )
+                }
+            }
+        }
+
+        // 3. MONITORAMENTO DE PRESSÃO ARTERIAL (mmHg) — exibido quando ativo ou se houver registros
+        if (customizationConfig.bloodPressureEnabled || filteredBp.isNotEmpty()) {
+            item {
+                val avgSys = remember(filteredBp) {
+                    if (filteredBp.isNotEmpty()) filteredBp.map { it.systolic }.average().roundToInt() else 0
+                }
+                val avgDia = remember(filteredBp) {
+                    if (filteredBp.isNotEmpty()) filteredBp.map { it.diastolic }.average().roundToInt() else 0
+                }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("bp_measurements_card"),
+                    shape = RoundedCornerShape(cardRadius),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "❤️ Pressão Arterial (mmHg) • ${activeMember.displayName}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (avgSys > 0) "Média: $avgSys/$avgDia mmHg • Lembrete: ${customizationConfig.bloodPressureReminderTime}"
+                                    else "Lembrete diário: ${customizationConfig.bloodPressureReminderTime}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Button(
+                                onClick = {
+                                    bpToEdit = null
+                                    showAddBpDialog = true
+                                },
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier.testTag("open_add_bp_btn")
+                            ) {
+                                Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Pressão", fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        filteredBp.take(5).forEach { record ->
+                            BloodPressureRecordRowCard(
+                                record = record,
+                                fallbackMemberName = activeMember.displayName,
+                                onEdit = { bpToEdit = record },
+                                onDelete = { bpToDelete = record }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. INEGOCIÁVEIS PERSONALIZÁVEIS (TRACKERS DIÁRIOS: ÁGUA, VITAMINAS, ETC.)
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("daily_trackers_section_card"),
+                shape = RoundedCornerShape(cardRadius),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "💧 Inegociáveis do Dia (Trackers Diários)",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            val doneCount = healthState.completedTrackersCount(selectedDateIso, scopeFilter)
+                            Text(
+                                text = "Data: ${DateCalendarUtils.formatEpochDayPt(activeDateEpochDay)} • $doneCount/${filteredTrackers.size} metas batidas",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        Button(
+                            onClick = { showAddTrackerDialog = true },
+                            shape = RoundedCornerShape(50),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                            modifier = Modifier.testTag("add_custom_tracker_btn")
+                        ) {
+                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Novo Tracker", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                         }
                     }
 
@@ -445,62 +1240,10 @@ fun HealthModuleScreen(
                                     modifier = Modifier.size(15.dp)
                                 )
                             },
-                            label = {
-                                Text(if (customizationConfig.pregnancyEnabled) "Familiar & Gestação" else "Familiar")
-                            },
+                            label = { Text("Familiar") },
                             shape = RoundedCornerShape(50),
                             modifier = Modifier.testTag("health_scope_family")
                         )
-                    }
-                }
-            }
-        }
-
-        // 2. INEGOCIÁVEIS PERSONALIZÁVEIS (TRACKERS DIÁRIOS: ÁGUA, VITAMINAS, ETC.)
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("daily_trackers_section_card"),
-                shape = RoundedCornerShape(cardRadius),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "💧 Inegociáveis do Dia (Trackers Diários)",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            val doneCount = healthState.completedTrackersCount(selectedDateIso, scopeFilter)
-                            Text(
-                                text = "Data: $selectedDateIso • $doneCount/${filteredTrackers.size} metas batidas hoje",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                        Button(
-                            onClick = { showAddTrackerDialog = true },
-                            shape = RoundedCornerShape(50),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                            modifier = Modifier.testTag("add_custom_tracker_btn")
-                        ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Novo Tracker", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                        }
                     }
 
                     filteredTrackers.forEach { habit ->
@@ -518,619 +1261,27 @@ fun HealthModuleScreen(
                                 healthRepo.completeTrackerForDay(selectedDateIso, habit.id)
                                 triggerFeedback("Meta de ${habit.title} concluída hoje!")
                             },
-                            onEdit = {
-                                trackerToEdit = habit
-                            },
-                            onDelete = {
-                                trackerToDelete = habit
-                            }
+                            onEdit = { trackerToEdit = habit },
+                            onDelete = { trackerToDelete = habit }
                         )
                     }
                 }
             }
         }
 
-        // 3. CRONÔMETRO / TIMER PÓS-REFEIÇÃO (SOMENTE SE DIABETES / GLICEMIA ESTIVER MARCADO)
-        if (customizationConfig.diabetesEnabled) {
-            item {
-                PostMealOneHourTimerCard(
-                    timerState = timerState,
-                    liveRemainingSeconds = liveRemainingSeconds,
-                    selectedMeal = selectedMealForTimer,
-                    selectedDurationSeconds = selectedDurationSeconds,
-                    onSelectMeal = { selectedMealForTimer = it },
-                    onSelectDuration = { secs -> selectedDurationSeconds = secs },
-                    onStartTimer = {
-                        val dur = selectedDurationSeconds.coerceAtLeast(60)
-                        healthRepo.startPostMealTimer(selectedMealForTimer, dur)
-                        val triggerAt = System.currentTimeMillis() + dur * 1000L
-                        AlarmScheduler.schedulePostMealGlucoseAlarm(
-                            context = context,
-                            triggerAtMillis = triggerAt,
-                            mealLabel = selectedMealForTimer
-                        )
-                        triggerFeedback("Cronômetro pós-$selectedMealForTimer iniciado com alarme!")
-                    },
-                    onPauseResumeTimer = {
-                        healthRepo.pauseOrResumePostMealTimer()
-                        val updated = healthRepo.stateFlow.value.postMealTimer
-                        if (updated.isPaused) {
-                            AlarmScheduler.cancelPostMealGlucoseAlarm(context)
-                        } else if (updated.isRunning && updated.targetEndEpochMillis > System.currentTimeMillis()) {
-                            AlarmScheduler.schedulePostMealGlucoseAlarm(
-                                context = context,
-                                triggerAtMillis = updated.targetEndEpochMillis,
-                                mealLabel = updated.mealLabel
-                            )
-                        }
-                    },
-                    onResetTimer = {
-                        healthRepo.resetPostMealTimer(selectedMealForTimer)
-                        AlarmScheduler.cancelPostMealGlucoseAlarm(context)
-                    },
-                    onTriggerAlertNow = {
-                        // Abre o modal de registro de glicemia já com a refeição e o intervalo selecionados no timer
-                        healthRepo.dismissPostMealTimerAlert()
-                        AlarmScheduler.cancelPostMealGlucoseAlarm(context)
-                        presetGlucoseSlot = DiabetesSlotCatalog.slotForPostMealTimer(
-                            mealLabel = selectedMealForTimer,
-                            durationSeconds = selectedDurationSeconds
-                        )
-                        glucoseToEdit = null
-                        showAddGlucoseDialog = true
-                    },
-                    onLogPostMealGlucoseNow = {
-                        healthRepo.dismissPostMealTimerAlert()
-                        presetGlucoseSlot = DiabetesSlotCatalog.slotForPostMealTimer(
-                            mealLabel = selectedMealForTimer,
-                            durationSeconds = selectedDurationSeconds
-                        )
-                        glucoseToEdit = null
-                        showAddGlucoseDialog = true
-                    }
-                )
-            }
-        }
-
-        // 4. MÓDULOS ESPECÍFICOS DE SAÚDE: MONITORAMENTO DE GLICEMIA (mg/dL) E/OU PRESSÃO ARTERIAL (mmHg)
-        if (customizationConfig.diabetesEnabled || customizationConfig.bloodPressureEnabled) {
-            item {
-                val activeClinicalMode = when {
-                    customizationConfig.diabetesEnabled && customizationConfig.bloodPressureEnabled -> clinicalTab
-                    customizationConfig.diabetesEnabled -> "GLUCOSE"
-                    else -> "BP"
-                }
-                val cardTitle = when {
-                    customizationConfig.diabetesEnabled && customizationConfig.bloodPressureEnabled ->
-                        "🩺 Monitoramento de Glicemia & Pressão (${activeMember.displayName})"
-                    customizationConfig.diabetesEnabled ->
-                        "🩸 Monitoramento de Glicemia (mg/dL) • ${activeMember.displayName}"
-                    else ->
-                        "❤️ Monitoramento de Pressão Arterial (mmHg) • ${activeMember.displayName}"
-                }
-
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("clinical_measurements_card"),
-                    shape = RoundedCornerShape(cardRadius),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = cardTitle,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "Histórico individual de ${activeMember.displayName} • Toque em um período para registrar",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-
-                        if (customizationConfig.diabetesEnabled && customizationConfig.bloodPressureEnabled) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                FilterChip(
-                                    selected = activeClinicalMode == "GLUCOSE",
-                                    onClick = { clinicalTab = "GLUCOSE" },
-                                    leadingIcon = {
-                                        Icon(
-                                            imageVector = Icons.Default.WaterDrop,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    },
-                                    label = {
-                                        Text(
-                                            text = "🩸 Glicemia (${filteredGlucose.size})",
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("clinical_tab_glucose")
-                                )
-
-                                FilterChip(
-                                    selected = activeClinicalMode == "BP",
-                                    onClick = { clinicalTab = "BP" },
-                                    leadingIcon = {
-                                        Icon(
-                                            imageVector = Icons.Default.MonitorHeart,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    },
-                                    label = {
-                                        Text(
-                                            text = "❤️ Pressão (${filteredBp.size})",
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("clinical_tab_bp")
-                                )
-                            }
-                        }
-
-                        if (activeClinicalMode == "GLUCOSE") {
-                            // Resumo + Botão Registrar Glicemia + Grade Interativa dos 10 Slots Diários (sem texto cortado)
-                            val avgGlucose = remember(filteredGlucose) {
-                                if (filteredGlucose.isNotEmpty()) {
-                                    filteredGlucose.map { it.valueMgDl }.average().roundToInt()
-                                } else 0
-                            }
-                            val measuredSlotsToday = remember(filteredGlucose, selectedEpochDay) {
-                                filteredGlucose
-                                    .filter { it.dateEpochDay == selectedEpochDay }
-                                    .map { DiabetesSlotCatalog.normalizeSlot(it.slot) }
-                                    .toSet()
-                            }
-
-                            Surface(
-                                shape = RoundedCornerShape(18.dp),
-                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = if (avgGlucose > 0) "Média (${activeMember.displayName}): $avgGlucose mg/dL" else "Sem medições de ${activeMember.displayName}",
-                                                style = MaterialTheme.typography.titleSmall,
-                                                fontFamily = JetBrainsMonoFontFamily,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
-                                            Text(
-                                                text = "${measuredSlotsToday.size} de ${DiabetesSlotCatalog.allSlots.size} períodos medidos na data selecionada",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Button(
-                                            onClick = {
-                                                presetGlucoseSlot = DiabetesSlotCatalog.JEJUM
-                                                glucoseToEdit = null
-                                                showAddGlucoseDialog = true
-                                            },
-                                            shape = RoundedCornerShape(50),
-                                            modifier = Modifier.testTag("open_add_glucose_btn")
-                                        ) {
-                                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Text("Glicemia", fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-
-                                    Text(
-                                        text = "Períodos Diários (toque em um período para registrar):",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-
-                                    FlowRow(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        DiabetesSlotCatalog.allSlots.forEach { slotName ->
-                                            val isDoneToday = measuredSlotsToday.contains(slotName)
-                                            Surface(
-                                                shape = RoundedCornerShape(50),
-                                                color = if (isDoneToday) {
-                                                    IncomeEmerald.copy(alpha = 0.20f)
-                                                } else {
-                                                    MaterialTheme.colorScheme.surface
-                                                },
-                                                modifier = Modifier
-                                                    .border(
-                                                        width = 1.dp,
-                                                        color = if (isDoneToday) IncomeEmerald else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
-                                                        shape = RoundedCornerShape(50)
-                                                    )
-                                                    .clip(RoundedCornerShape(50))
-                                                    .clickable {
-                                                        presetGlucoseSlot = slotName
-                                                        glucoseToEdit = null
-                                                        showAddGlucoseDialog = true
-                                                    }
-                                                    .testTag("glucose_slot_chip_$slotName")
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                                ) {
-                                                    if (isDoneToday) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.CheckCircle,
-                                                            contentDescription = "Medido hoje",
-                                                            tint = IncomeEmerald,
-                                                            modifier = Modifier.size(14.dp)
-                                                        )
-                                                    }
-                                                    Text(
-                                                        text = slotName,
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        fontWeight = if (isDoneToday) FontWeight.Bold else FontWeight.Medium,
-                                                        color = if (isDoneToday) IncomeEmerald else MaterialTheme.colorScheme.onSurface
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            filteredGlucose.take(15).forEach { record ->
-                                GlucoseRecordRowCard(
-                                    record = record,
-                                    fallbackMemberName = activeMember.displayName,
-                                    onEdit = { glucoseToEdit = record },
-                                    onDelete = { glucoseToDelete = record }
-                                )
-                            }
-                        } else {
-                            // Resumo + Botão Registrar Pressão Arterial
-                            val avgSys = remember(filteredBp) {
-                                if (filteredBp.isNotEmpty()) filteredBp.map { it.systolic }.average().roundToInt() else 0
-                            }
-                            val avgDia = remember(filteredBp) {
-                                if (filteredBp.isNotEmpty()) filteredBp.map { it.diastolic }.average().roundToInt() else 0
-                            }
-
-                            Surface(
-                                shape = RoundedCornerShape(18.dp),
-                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(14.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = if (avgSys > 0) "Média (${activeMember.displayName}): $avgSys/$avgDia mmHg" else "Sem aferições de ${activeMember.displayName}",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontFamily = JetBrainsMonoFontFamily,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Text(
-                                            text = "Lembrete configurado: ${customizationConfig.bloodPressureReminderTime}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Button(
-                                        onClick = {
-                                            bpToEdit = null
-                                            showAddBpDialog = true
-                                        },
-                                        shape = RoundedCornerShape(50),
-                                        modifier = Modifier.testTag("open_add_bp_btn")
-                                    ) {
-                                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Pressão", fontWeight = FontWeight.Bold)
-                                    }
-                                }
-                            }
-
-                            filteredBp.take(15).forEach { record ->
-                                BloodPressureRecordRowCard(
-                                    record = record,
-                                    fallbackMemberName = activeMember.displayName,
-                                    onEdit = { bpToEdit = record },
-                                    onDelete = { bpToDelete = record }
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 5. ESCOPO FAMILIAR: MÓDULO DE ACOMPANHAMENTO GESTACIONAL (Somente quando Gestação estiver marcado no questionário)
-        if (customizationConfig.pregnancyEnabled) {
-            item {
-                val pregProgress = remember(customizationConfig.pregnancyDppDate) {
-                    PregnancyCalculator.calculateFromDpp(customizationConfig.pregnancyDppDate)
-                }
-                var newPregNote by remember { mutableStateOf("") }
-
-                AuraExpandableSectionCard(
-                    title = "🤰 Acompanhamento Gestacional (Familiar)",
-                    subtitle = "DPP: ${pregProgress.dppFormatted} • Semana ${pregProgress.currentWeek}+${pregProgress.currentDaysRemainder}d (${pregProgress.trimester}º Trim.)",
-                    icon = Icons.Default.FamilyRestroom,
-                    accentColor = Color(customizationConfig.healthColorHex),
-                    badgeText = "${pregProgress.currentWeek} sem",
-                    initiallyExpanded = false,
-                    testTag = "family_pregnancy_module_card"
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Tamanho aprox.: ${pregProgress.babySizeComparison} • Faltam ${pregProgress.daysRemainingToDpp} dias",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.weight(1f)
-                        )
-                        OutlinedButton(
-                            onClick = { showEditDppDialog = true },
-                            shape = RoundedCornerShape(50),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.testTag("edit_dpp_date_btn")
-                        ) {
-                            Text("Ajustar DPP", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                        }
-                    }
-
-                    Text(
-                        text = "Checklist Pré-Natal & Exames da Família",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    healthState.pregnancyChecklist.forEach { item ->
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = if (item.completed) {
-                                IncomeEmerald.copy(alpha = 0.10f)
-                            } else {
-                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable { healthRepo.togglePregnancyChecklistItem(item.id) }
-                                .testTag("pregnancy_check_item_${item.id}")
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Checkbox(
-                                    checked = item.completed,
-                                    onCheckedChange = { healthRepo.togglePregnancyChecklistItem(item.id) }
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "${item.title} (Sem. ${item.recommendedWeek})",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        textDecoration = if (item.completed) TextDecoration.LineThrough else TextDecoration.None
-                                    )
-                                    Text(
-                                        text = "${item.notes} • Cat. sugerida: ${item.suggestedFinanceCategory}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                if (item.estimatedCostBrl > 0.0) {
-                                    FilledTonalButton(
-                                        onClick = {
-                                            onCreateHealthFinanceExpense(
-                                                item.title,
-                                                item.estimatedCostBrl,
-                                                item.suggestedFinanceCategory,
-                                                PrivacyScope.FAMILY
-                                            )
-                                            onShowBannerMessage("💰 Lançado no Financeiro (${item.suggestedFinanceCategory}): ${item.title} - ${formatCurrencyBrl(item.estimatedCostBrl)}")
-                                        },
-                                        shape = RoundedCornerShape(50),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                    ) {
-                                        Text(
-                                            text = "Lançar ${formatCurrencyBrl(item.estimatedCostBrl)}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = newPregNote,
-                            onValueChange = { newPregNote = it },
-                            label = { Text("Registrar sintoma, consulta ou evolução do bebê") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f)
-                        )
-                        FilledTonalButton(
-                            onClick = {
-                                if (newPregNote.isNotBlank()) {
-                                    healthRepo.addPregnancyNote(newPregNote)
-                                    newPregNote = ""
-                                }
-                            },
-                            shape = RoundedCornerShape(50)
-                        ) {
-                            Text("Salvar")
-                        }
-                    }
-
-                    healthState.pregnancyNotesLog.take(3).forEach { note ->
-                        Text(
-                            text = "• $note",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-
-        // 6. INTEGRAÇÃO FINANCEIRA: SUGESTÕES AUTOMÁTICAS DE CATEGORIAS DE SAÚDE (Menu Expansível)
-        item {
-            val activeFinanceSuggestions = remember(customizationConfig.pregnancyEnabled) {
-                HealthCatalog.financeSuggestionsFor(customizationConfig)
-            }
-            val suggestionsSubtitle = if (customizationConfig.pregnancyEnabled) {
-                "Farmácia, Exames, Consultas & Pré-Natal integrados ao Financeiro e Agenda"
-            } else {
-                "Farmácia, Exames & Consultas integrados ao Financeiro e Agenda"
-            }
-            AuraExpandableSectionCard(
-                title = "💊 Sugestões Financeiras de Saúde",
-                subtitle = suggestionsSubtitle,
-                icon = Icons.Default.AccountBalanceWallet,
-                accentColor = MaterialTheme.colorScheme.primary,
-                badgeText = "${activeFinanceSuggestions.size} opções",
-                initiallyExpanded = false,
-                testTag = "health_finance_suggestions_card"
-            ) {
-                activeFinanceSuggestions.forEach { suggestion ->
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("health_finance_suggestion_${suggestion.id}")
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(text = suggestion.emoji, style = MaterialTheme.typography.titleLarge)
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = suggestion.title,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Surface(
-                                            shape = RoundedCornerShape(50),
-                                            color = MaterialTheme.colorScheme.primaryContainer
-                                        ) {
-                                            Text(
-                                                text = suggestion.category,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                            )
-                                        }
-                                    }
-                                    Text(
-                                        text = suggestion.description,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.width(8.dp))
-
-                            Button(
-                                onClick = { financeSuggestionToConfirm = suggestion },
-                                shape = RoundedCornerShape(50),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                                modifier = Modifier.testTag("launch_health_expense_btn_${suggestion.id}")
-                            ) {
-                                Text(
-                                    text = "Lançar",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 7. RELATÓRIO MÉDICO EM PDF (NATIVO ANDROID - Menu Expansível)
+        // 5. RELATÓRIO MÉDICO CONSOLIDADO EM PDF (CONFIRMAÇÃO LIMPA + BOTÃO "ABRIR / COMPARTILHAR PDF")
         item {
             AuraExpandableSectionCard(
                 title = "📄 Relatório Médico Consolidado em PDF",
-                subtitle = "Exportar histórico de Glicemia, Pressão, Inegociáveis e Gestação",
+                subtitle = "Glicemia (6 períodos + contexto), Insulina (doses e locais), Pressão e Gestação",
                 icon = Icons.Default.PictureAsPdf,
                 accentColor = ExpenseCoral,
-                badgeText = "PDF Nativo",
-                initiallyExpanded = false,
+                badgeText = "PDF Limpo",
+                initiallyExpanded = true,
                 testTag = "medical_pdf_report_card"
             ) {
                 Text(
-                    text = "Selecione o Período do Relatório:",
+                    text = "Paciente selecionado: ${activeMember.displayName} • Escolha o período:",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -1162,66 +1313,109 @@ fun HealthModuleScreen(
                         onClick = {
                             val localResult = MedicalReportPdfGenerator.exportToLocalAppFile(
                                 context = context,
-                                profileName = customizationConfig.profileName,
+                                profileName = activeMember.displayName,
                                 periodDays = pdfPeriodDays,
                                 customizationConfig = customizationConfig,
-                                healthState = healthState
+                                healthState = memberFilteredHealthState
                             )
                             if (localResult.success) {
                                 healthRepo.recordGeneratedPdfInfo(localResult.filePath, localResult.summaryText)
-                                onShowBannerMessage("📄 Relatório Médico em PDF gerado com sucesso! ${localResult.summaryText}")
+                                MedicalReportPdfGenerator.openOrSharePdf(
+                                    context = context,
+                                    pdfFilePath = localResult.filePath,
+                                    profileName = activeMember.displayName
+                                )
                             } else {
                                 onShowBannerMessage(localResult.summaryText)
                             }
                         },
                         shape = RoundedCornerShape(50),
                         modifier = Modifier
-                            .weight(1f)
+                            .weight(1.2f)
                             .testTag("generate_medical_pdf_now_btn")
                     ) {
-                        Icon(imageVector = Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Gerar PDF Agora", fontWeight = FontWeight.Bold)
+                        Text("Gerar & Compartilhar PDF", fontWeight = FontWeight.ExtraBold)
                     }
 
                     OutlinedButton(
                         onClick = {
-                            val fileName = "Relatorio_Medico_${customizationConfig.profileName.replace(" ", "_")}_${selectedDateIso}.pdf"
+                            val fileName = "Relatorio_Medico_${activeMember.displayName.replace(" ", "_")}_${selectedDateIso}.pdf"
                             createPdfDocumentLauncher.launch(fileName)
                         },
                         shape = RoundedCornerShape(50),
                         modifier = Modifier
-                            .weight(1f)
+                            .weight(0.9f)
                             .testTag("export_medical_pdf_file_btn")
                     ) {
-                        Text("Salvar PDF em Pasta...", fontWeight = FontWeight.Bold)
+                        Text("Salvar no Aparelho", fontWeight = FontWeight.Bold)
                     }
                 }
 
                 if (healthState.lastGeneratedPdfSummary.isNotBlank()) {
+                    val hasValidLocalFile = remember(healthState.lastGeneratedPdfPath) {
+                        val path = healthState.lastGeneratedPdfPath
+                        path.isNotBlank() && !path.startsWith("content://") && java.io.File(path).exists()
+                    }
                     Surface(
-                        shape = RoundedCornerShape(14.dp),
+                        shape = RoundedCornerShape(16.dp),
                         color = IncomeEmerald.copy(alpha = 0.12f),
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, IncomeEmerald.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
                     ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             Text(
-                                text = "✓ Último Relatório PDF Consolidado:",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
+                                text = "✓ Relatório Médico Consolidado Pronto",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.ExtraBold,
                                 color = IncomeEmerald
                             )
                             Text(
                                 text = healthState.lastGeneratedPdfSummary,
-                                style = MaterialTheme.typography.bodySmall
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
                             )
-                            if (healthState.lastGeneratedPdfPath.isNotBlank()) {
-                                Text(
-                                    text = "Arquivo: ${healthState.lastGeneratedPdfPath}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                            Button(
+                                onClick = {
+                                    val pathToShare = if (hasValidLocalFile) {
+                                        healthState.lastGeneratedPdfPath
+                                    } else {
+                                        val regenerated = MedicalReportPdfGenerator.exportToLocalAppFile(
+                                            context = context,
+                                            profileName = activeMember.displayName,
+                                            periodDays = pdfPeriodDays,
+                                            customizationConfig = customizationConfig,
+                                            healthState = memberFilteredHealthState
+                                        )
+                                        if (regenerated.success) {
+                                            healthRepo.recordGeneratedPdfInfo(regenerated.filePath, regenerated.summaryText)
+                                        }
+                                        regenerated.filePath
+                                    }
+                                    if (pathToShare.isNotBlank()) {
+                                        MedicalReportPdfGenerator.openOrSharePdf(
+                                            context = context,
+                                            pdfFilePath = pathToShare,
+                                            profileName = activeMember.displayName
+                                        )
+                                    }
+                                },
+                                shape = RoundedCornerShape(50),
+                                colors = ButtonDefaults.buttonColors(containerColor = IncomeEmerald),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("open_or_share_clean_pdf_btn")
+                            ) {
+                                Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Abrir / Compartilhar PDF", fontWeight = FontWeight.ExtraBold)
                             }
                         }
                     }
@@ -1231,7 +1425,7 @@ fun HealthModuleScreen(
     }
 
     // =========================================================================
-    // MODAIS DE CRIAÇÃO E REGISTRO
+    // MODAIS DE CRIAÇÃO, EDIÇÃO, INSULINA, HISTÓRICO E DPP
     // =========================================================================
 
     if (showAddTrackerDialog || trackerToEdit != null) {
@@ -1274,16 +1468,16 @@ fun HealthModuleScreen(
         val editing = glucoseToEdit
         AddGlucoseRecordDialog(
             initialRecord = editing,
-            initialEpochDay = editing?.dateEpochDay ?: selectedEpochDay,
+            initialEpochDay = editing?.dateEpochDay ?: activeDateEpochDay,
             initialSlot = editing?.slot ?: presetGlucoseSlot,
             availableSlots = DiabetesSlotCatalog.allSlots,
-            defaultScope = editing?.privacyScope ?: (if (scopeFilter == PrivacyScope.FAMILY) PrivacyScope.FAMILY else PrivacyScope.PERSONAL),
+            defaultScope = editing?.privacyScope ?: PrivacyScope.FAMILY,
             memberName = activeMember.displayName,
             onDismiss = {
                 showAddGlucoseDialog = false
                 glucoseToEdit = null
             },
-            onSave = { epochDay, timeHHmm, slot, valMgDl, notes, scope ->
+            onSave = { epochDay, timeHHmm, slot, valMgDl, notes, scope, startOneHourAlarm ->
                 if (editing != null) {
                     healthRepo.updateGlucoseRecord(
                         recordId = editing.id,
@@ -1296,7 +1490,6 @@ fun HealthModuleScreen(
                         memberId = activeMember.userId,
                         memberName = activeMember.displayName
                     )
-                    triggerFeedback("🩸 Glicemia de ${activeMember.displayName} atualizada: $valMgDl mg/dL ($slot)")
                 } else {
                     healthRepo.addGlucoseRecord(
                         dateEpochDay = epochDay,
@@ -1308,8 +1501,23 @@ fun HealthModuleScreen(
                         memberId = activeMember.userId,
                         memberName = activeMember.displayName
                     )
-                    triggerFeedback("🩸 Glicemia de ${activeMember.displayName} registrada: $valMgDl mg/dL ($slot)")
                 }
+
+                val postMealTargetSlot = DiabetesSlotCatalog.postMealSlotAfterPreMeal(slot)
+                if (startOneHourAlarm && postMealTargetSlot != null) {
+                    selectedMealForTimer = postMealTargetSlot
+                    healthRepo.startPostMealTimer(postMealTargetSlot, 3600)
+                    val triggerAt = System.currentTimeMillis() + 3600_000L
+                    AlarmScheduler.schedulePostMealGlucoseAlarm(
+                        context = context,
+                        triggerAtMillis = triggerAt,
+                        mealLabel = postMealTargetSlot
+                    )
+                    triggerFeedback("🩸 Glicemia ($valMgDl mg/dL • $slot) salva e alarme de 1h ($postMealTargetSlot) iniciado!")
+                } else {
+                    triggerFeedback("🩸 Glicemia de ${activeMember.displayName} salva: $valMgDl mg/dL ($slot)")
+                }
+
                 showAddGlucoseDialog = false
                 glucoseToEdit = null
             }
@@ -1329,12 +1537,121 @@ fun HealthModuleScreen(
         )
     }
 
+    if (showAddInsulinDialog || insulinToEdit != null) {
+        val editing = insulinToEdit
+        AddInsulinRecordDialog(
+            initialRecord = editing,
+            initialEpochDay = activeDateEpochDay,
+            activeMember = activeMember,
+            familyMembers = familyMembers,
+            healthState = healthState,
+            onOpenSchedulesConfig = {
+                showAddInsulinDialog = false
+                showInsulinSchedulesDialog = true
+            },
+            onDismiss = {
+                showAddInsulinDialog = false
+                insulinToEdit = null
+            },
+            onSave = { epochDay, timeHHmm, insulinType, units, injectionSite, memberBadge, notes ->
+                if (editing != null) {
+                    healthRepo.updateInsulinRecord(
+                        recordId = editing.id,
+                        dateEpochDay = epochDay,
+                        timeHHmm = timeHHmm,
+                        insulinType = insulinType,
+                        units = units,
+                        injectionSite = injectionSite,
+                        memberId = memberBadge.displayName,
+                        notes = notes
+                    )
+                    triggerFeedback("💉 Insulina de ${memberBadge.displayName} atualizada: $insulinType ${units} UI ($injectionSite)")
+                } else {
+                    healthRepo.addInsulinRecord(
+                        dateEpochDay = epochDay,
+                        timeHHmm = timeHHmm,
+                        insulinType = insulinType,
+                        units = units,
+                        injectionSite = injectionSite,
+                        memberId = memberBadge.displayName,
+                        notes = notes
+                    )
+                    triggerFeedback("💉 Insulina registrada: $insulinType ${units} UI em $injectionSite (${memberBadge.displayName})")
+                }
+                showAddInsulinDialog = false
+                insulinToEdit = null
+            }
+        )
+    }
+
+    insulinToDelete?.let { rec ->
+        OmniConfirmDeleteDialog(
+            title = "Excluir Aplicação de Insulina?",
+            message = "Deseja remover o registro de ${rec.insulinType} (${rec.units} UI • ${rec.injectionSite})?",
+            onConfirm = {
+                healthRepo.deleteInsulinRecord(rec.id)
+                triggerFeedback("Registro de insulina removido.")
+                insulinToDelete = null
+            },
+            onDismiss = { insulinToDelete = null }
+        )
+    }
+
+    if (showInsulinSchedulesDialog) {
+        InsulinSchedulesConfigDialog(
+            configs = healthState.insulinConfigs,
+            activeMemberName = activeMember.displayName,
+            onSaveConfig = { cfg ->
+                healthRepo.saveInsulinScheduleConfig(
+                    configId = cfg.id,
+                    memberId = cfg.memberId.ifBlank { activeMember.displayName },
+                    insulinType = cfg.insulinType,
+                    defaultUnits = cfg.defaultUnits,
+                    alarmHour = cfg.alarmHour,
+                    alarmMinute = cfg.alarmMinute,
+                    alarmEnabled = cfg.alarmEnabled
+                )
+                triggerFeedback("⏰ Horário de insulina (${cfg.insulinType} • ${cfg.defaultUnits} UI) salvo e alarme sincronizado!")
+            },
+            onDeleteConfig = { cfgId ->
+                healthRepo.deleteInsulinScheduleConfig(cfgId)
+                triggerFeedback("Horário de insulina removido.")
+            },
+            onDismiss = { showInsulinSchedulesDialog = false }
+        )
+    }
+
+    if (showUnifiedHistoryModal) {
+        UnifiedGlucoseAndInsulinHistoryDialog(
+            familyMembers = familyMembers,
+            initialMemberFilter = "ALL",
+            glucoseRecords = healthState.glucoseRecords,
+            insulinRecords = healthState.insulinRecords,
+            defaultMember = defaultMember,
+            onEditGlucose = { rec ->
+                showUnifiedHistoryModal = false
+                glucoseToEdit = rec
+            },
+            onDeleteGlucose = { rec ->
+                glucoseToDelete = rec
+            },
+            onEditInsulin = { rec ->
+                showUnifiedHistoryModal = false
+                insulinToEdit = rec
+            },
+            onDeleteInsulin = { rec ->
+                insulinToDelete = rec
+            },
+            onDismiss = { showUnifiedHistoryModal = false }
+        )
+    }
+
     if (showAddBpDialog || bpToEdit != null) {
         val editing = bpToEdit
         AddBloodPressureRecordDialog(
             initialRecord = editing,
-            initialEpochDay = editing?.dateEpochDay ?: selectedEpochDay,
-            defaultScope = editing?.privacyScope ?: (if (scopeFilter == PrivacyScope.FAMILY) PrivacyScope.FAMILY else PrivacyScope.PERSONAL),
+            initialEpochDay = editing?.dateEpochDay ?: activeDateEpochDay,
+            defaultScope = editing?.privacyScope ?: PrivacyScope.PERSONAL,
             onDismiss = {
                 showAddBpDialog = false
                 bpToEdit = null
@@ -1388,21 +1705,303 @@ fun HealthModuleScreen(
     }
 
     if (showEditDppDialog) {
-        var dppInput by remember { mutableStateOf(customizationConfig.pregnancyDppDate.ifBlank { "15/03/2027" }) }
-        var pregEnabled by remember { mutableStateOf(true) }
-        AlertDialog(
-            onDismissRequest = { showEditDppDialog = false },
-            title = { Text("Acompanhamento Gestacional (Família)", fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Módulo de Gestação Ativo", fontWeight = FontWeight.SemiBold)
-                        Switch(checked = pregEnabled, onCheckedChange = { pregEnabled = it })
+        EditDppAndUltrasoundDialog(
+            initialDppDate = effectiveDppDate,
+            initialPregnancyEnabled = customizationConfig.pregnancyEnabled || effectiveDppDate.isNotBlank(),
+            onDismiss = { showEditDppDialog = false },
+            onSave = { enabled, finalDpp ->
+                val mode = customizationConfig.pregnancyComparisonMode.ifBlank { "TODOS" }
+                customizationRepo.updatePregnancyModule(
+                    enabled = enabled,
+                    dppDate = finalDpp,
+                    notes = customizationConfig.pregnancyNotes,
+                    comparisonMode = mode
+                )
+                onSyncPregnancyConfigToCloud(finalDpp, mode)
+                triggerFeedback("🤰 DPP ($finalDpp) sincronizada no Hub, Saúde e Nuvem!")
+                showEditDppDialog = false
+            }
+        )
+    }
+}
+
+// =============================================================================
+// CARD DE GESTAÇÃO (DPP) COM COMPARADOR (DOCE / FRUTA / ANIMAL) E PRÓXIMO MARCO
+// Reutilizado tanto no topo da aba "Saúde & Glicemia" quanto no "Hub da Família"
+// =============================================================================
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun OmniPregnancyHeroCard(
+    dppDateRaw: String,
+    comparisonMode: String,
+    accentColor: Color,
+    onSelectComparisonMode: (String) -> Unit,
+    onOpenEditDpp: () -> Unit,
+    modifier: Modifier = Modifier,
+    extraFooterContent: (@Composable () -> Unit)? = null
+) {
+    val cardRadius = LocalOrganicCardRadius.current
+    val pregProgress = remember(dppDateRaw) {
+        PregnancyCalculator.calculateFromDpp(dppDateRaw)
+    }
+    val activeMode = remember(comparisonMode) {
+        when (comparisonMode.trim().uppercase(Locale.ROOT)) {
+            "DOCE", "FRUTA", "ANIMAL", "TODOS" -> comparisonMode.trim().uppercase(Locale.ROOT)
+            else -> "TODOS"
+        }
+    }
+
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("family_pregnancy_module_card"),
+        shape = RoundedCornerShape(cardRadius),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            accentColor.copy(alpha = 0.14f),
+                            MaterialTheme.colorScheme.surface
+                        )
+                    )
+                )
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "🤰 Gestação da Família • ${pregProgress.gestationalAgeLabelPt}",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Text(
+                        text = "DPP: ${pregProgress.dppFormatted} • ${pregProgress.trimester}º Trimestre • Faltam ${pregProgress.daysRemainingToDpp} dias",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                OutlinedButton(
+                    onClick = onOpenEditDpp,
+                    shape = RoundedCornerShape(50),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.testTag("edit_dpp_date_btn")
+                ) {
+                    Text("DPP / Ultrassom", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            // Barra de progresso das 40 semanas + contagem regressiva
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Progresso das 40 semanas (${(pregProgress.progressFraction40Weeks * 100).roundToInt()}%)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = accentColor
+                    )
+                    Text(
+                        text = "Tamanho aprox.: ${String.format(Locale.forLanguageTag("pt-BR"), "%.1f cm", pregProgress.approxLengthCm)} • Peso: ${pregProgress.approxWeightGrams} g",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                LinearProgressIndicator(
+                    progress = { pregProgress.progressFraction40Weeks },
+                    color = accentColor,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(9.dp)
+                        .clip(RoundedCornerShape(50))
+                )
+            }
+
+            // Chips de modo de comparação ("Doce" | "Fruta" | "Animal" | "Todos")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                listOf(
+                    "DOCE" to "🧁 Doce",
+                    "FRUTA" to "🍓 Fruta",
+                    "ANIMAL" to "🐾 Animal",
+                    "TODOS" to "✨ Todos"
+                ).forEach { (modeKey, modeLabel) ->
+                    val selected = activeMode == modeKey
+                    FilterChip(
+                        selected = selected,
+                        onClick = { onSelectComparisonMode(modeKey) },
+                        label = {
+                            Text(
+                                text = modeLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium
+                            )
+                        },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.testTag("pregnancy_mode_chip_$modeKey")
+                    )
+                }
+            }
+
+            // Card visual do Comparador da Semana Atual
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = accentColor.copy(alpha = 0.10f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, accentColor.copy(alpha = 0.30f), RoundedCornerShape(16.dp))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "Na semana ${pregProgress.currentWeek}, o bebê tem o tamanho aproximado de:",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    when (activeMode) {
+                        "DOCE" -> Text(
+                            text = "🧁 Doce: ${pregProgress.sweetComparison}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        "FRUTA" -> Text(
+                            text = "🍓 Fruta: ${pregProgress.fruitComparison}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        "ANIMAL" -> Text(
+                            text = "🐾 Animal: ${pregProgress.animalComparison}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        else -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = "🧁 Doce: ${pregProgress.sweetComparison}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = "🍓 Fruta: ${pregProgress.fruitComparison}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = "🐾 Animal: ${pregProgress.animalComparison}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
                     }
+
+                    HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
+
+                    // Próximo marco (dias para a próxima semana e próximo trimestre)
+                    val nextWeekText = if (pregProgress.currentWeek < 42) {
+                        "⏳ Faltam ${pregProgress.daysToNextWeek} dia(s) para completar a ${pregProgress.currentWeek + 1}ª semana"
+                    } else {
+                        "🎉 Reta final da gestação!"
+                    }
+                    val nextTrimesterText = when {
+                        pregProgress.trimester == 1 && pregProgress.daysToNextTrimester > 0 ->
+                            " • ${pregProgress.daysToNextTrimester} dia(s) para entrar no 2º trimestre (14ª sem.)"
+                        pregProgress.trimester == 2 && pregProgress.daysToNextTrimester > 0 ->
+                            " • ${pregProgress.daysToNextTrimester} dia(s) para entrar no 3º trimestre (28ª sem.)"
+                        else ->
+                            " • 3º Trimestre em andamento (${pregProgress.daysRemainingToDpp} dias até a DPP)"
+                    }
+                    Text(
+                        text = nextWeekText + nextTrimesterText,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            extraFooterContent?.invoke()
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun EditDppAndUltrasoundDialog(
+    initialDppDate: String,
+    initialPregnancyEnabled: Boolean = true,
+    onDismiss: () -> Unit,
+    onSave: (enabled: Boolean, dppDateBr: String) -> Unit
+) {
+    var pregEnabled by remember { mutableStateOf(initialPregnancyEnabled) }
+    var dppInput by remember { mutableStateOf(initialDppDate.ifBlank { "15/03/2027" }) }
+    var useUltrasoundCalculator by remember { mutableStateOf(false) }
+    var examDateInput by remember {
+        mutableStateOf(OmniDateMaskUtils.epochDayToBrDate(DateCalendarUtils.todayEpochDay()))
+    }
+    var weeksAtExamText by remember { mutableStateOf("12") }
+    var daysAtExamText by remember { mutableStateOf("0") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "🤰 Configurar DPP ou Calcular pelo Ultrassom",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.ExtraBold
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Exibir Card de Gestação no Hub e Saúde", fontWeight = FontWeight.SemiBold)
+                    Switch(checked = pregEnabled, onCheckedChange = { pregEnabled = it })
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = !useUltrasoundCalculator,
+                        onClick = { useUltrasoundCalculator = false },
+                        label = { Text("Informar DPP Direta", fontWeight = FontWeight.Bold) }
+                    )
+                    FilterChip(
+                        selected = useUltrasoundCalculator,
+                        onClick = { useUltrasoundCalculator = true },
+                        label = { Text("Calcular por Ultrassom", fontWeight = FontWeight.Bold) }
+                    )
+                }
+
+                if (!useUltrasoundCalculator) {
                     MaskedDateTextField(
                         dateValue = dppInput,
                         onDateValueChange = { formatted, _ -> dppInput = formatted },
@@ -1411,95 +2010,287 @@ fun HealthModuleScreen(
                         modifier = Modifier.fillMaxWidth(),
                         testTag = "edit_dpp_masked_input"
                     )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        customizationRepo.updatePregnancyModule(pregEnabled, dppInput.trim())
-                        triggerFeedback("DPP salva com sucesso!")
-                        showEditDppDialog = false
-                    }
-                ) {
-                    Text("Salvar DPP")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showEditDppDialog = false }) {
-                    Text("Cancelar")
-                }
-            }
-        )
-    }
-
-    financeSuggestionToConfirm?.let { suggestion ->
-        var titleInput by remember(suggestion) { mutableStateOf(suggestion.title) }
-        var amountInput by remember(suggestion) { mutableStateOf(suggestion.defaultAmountBrl.toString()) }
-        var scopeInput by remember(suggestion) { mutableStateOf(suggestion.privacyScope) }
-
-        AlertDialog(
-            onDismissRequest = { financeSuggestionToConfirm = null },
-            title = {
-                Text(
-                    text = "${suggestion.emoji} Lançar em ${suggestion.category}",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = titleInput,
-                        onValueChange = { titleInput = it },
-                        label = { Text("Descrição da Despesa de Saúde") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                } else {
+                    Text(
+                        text = "Informe a data em que o ultrassom foi feito e com quantas semanas/dias o bebê estava:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    OutlinedTextField(
-                        value = amountInput,
-                        onValueChange = { amountInput = it },
-                        label = { Text("Valor (R$)") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                    MaskedDateTextField(
+                        dateValue = examDateInput,
+                        onDateValueChange = { formatted, _ -> examDateInput = formatted },
+                        label = "Data do Ultrassom (DD/MM/AAAA)",
+                        modifier = Modifier.fillMaxWidth(),
+                        testTag = "ultrasound_date_input"
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = scopeInput == PrivacyScope.FAMILY,
-                            onClick = { scopeInput = PrivacyScope.FAMILY },
-                            label = { Text("👨‍👩‍👧‍👦 Familiar") }
+                        OutlinedTextField(
+                            value = weeksAtExamText,
+                            onValueChange = { weeksAtExamText = it.filter { c -> c.isDigit() }.take(2) },
+                            label = { Text("Semanas no exame") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
                         )
-                        FilterChip(
-                            selected = scopeInput == PrivacyScope.PERSONAL,
-                            onClick = { scopeInput = PrivacyScope.PERSONAL },
-                            label = { Text("🔒 Individual") }
+                        OutlinedTextField(
+                            value = daysAtExamText,
+                            onValueChange = { daysAtExamText = it.filter { c -> c.isDigit() }.take(1) },
+                            label = { Text("Dias (0 a 6)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
                         )
                     }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val parsed = amountInput.replace(",", ".").toDoubleOrNull() ?: suggestion.defaultAmountBrl
-                        onCreateHealthFinanceExpense(
-                            titleInput.ifBlank { suggestion.title },
-                            parsed,
-                            suggestion.category,
-                            scopeInput
+                    val calculatedDpp = remember(examDateInput, weeksAtExamText, daysAtExamText) {
+                        PregnancyCalculator.calculateDppFromUltrasound(
+                            examDateBr = examDateInput,
+                            weeksAtExam = weeksAtExamText.toIntOrNull() ?: 0,
+                            daysAtExam = daysAtExamText.toIntOrNull() ?: 0
                         )
-                        financeSuggestionToConfirm = null
-                        onShowBannerMessage("💰 Despesa de saúde (${suggestion.category}) criada nas Finanças e na Agenda!")
                     }
-                ) {
-                    Text("Lançar nas Finanças + Agenda")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { financeSuggestionToConfirm = null }) {
-                    Text("Cancelar")
+                    if (calculatedDpp != null) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = IncomeEmerald.copy(alpha = 0.14f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "✓ DPP calculada pelo ultrassom: $calculatedDpp",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = IncomeEmerald,
+                                modifier = Modifier.padding(10.dp)
+                            )
+                        }
+                    }
                 }
             }
-        )
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val resolvedDpp = if (useUltrasoundCalculator) {
+                        PregnancyCalculator.calculateDppFromUltrasound(
+                            examDateBr = examDateInput,
+                            weeksAtExam = weeksAtExamText.toIntOrNull() ?: 0,
+                            daysAtExam = daysAtExamText.toIntOrNull() ?: 0
+                        ) ?: dppInput.trim()
+                    } else {
+                        dppInput.trim()
+                    }
+                    onSave(pregEnabled, resolvedDpp)
+                }
+            ) {
+                Text("Salvar DPP")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar")
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun IntegratedOneHourPostMealTimerSection(
+    timerState: com.example.data.PostMealTimerState,
+    liveRemainingSeconds: Int,
+    selectedMealSlot: String,
+    onSelectMealSlot: (String) -> Unit,
+    onStartTimer: () -> Unit,
+    onPauseResumeTimer: () -> Unit,
+    onResetTimer: () -> Unit,
+    onLogPostMealGlucoseNow: () -> Unit
+) {
+    val minutes = liveRemainingSeconds / 60
+    val seconds = liveRemainingSeconds % 60
+    val formattedCountdown = String.format(Locale.ROOT, "%02d:%02d", minutes, seconds)
+    val progressRatio = (liveRemainingSeconds.toFloat() / 3600f).coerceIn(0f, 1f)
+
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = if (timerState.completedAlertPending) {
+            SavingsGold.copy(alpha = 0.22f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("post_meal_1h_timer_card")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier.size(44.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            val stroke = 4.dp.toPx()
+                            drawArc(
+                                color = Color(0xFF0077B6).copy(alpha = 0.18f),
+                                startAngle = 0f,
+                                sweepAngle = 360f,
+                                useCenter = false,
+                                style = Stroke(width = stroke, cap = StrokeCap.Round)
+                            )
+                            drawArc(
+                                color = if (timerState.completedAlertPending) IncomeEmerald else Color(0xFF0077B6),
+                                startAngle = -90f,
+                                sweepAngle = 360f * (if (timerState.isRunning) progressRatio else 1f),
+                                useCenter = false,
+                                style = Stroke(width = stroke, cap = StrokeCap.Round)
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.Timer,
+                            contentDescription = null,
+                            tint = Color(0xFF0077B6),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(10.dp))
+
+                    Column {
+                        Text(
+                            text = "⏱️ Cronômetro Pós-Refeição (1h • 60:00)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = when {
+                                timerState.isRunning ->
+                                    "Contando 1h para $selectedMealSlot (iniciado às ${timerState.startedAtHHmm})"
+                                timerState.completedAlertPending ->
+                                    "🔔 1h concluída! Hora de medir $selectedMealSlot"
+                                else ->
+                                    "Alarme exato de 1h pós-refeição integrado ao celular"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Text(
+                    text = formattedCountdown,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontFamily = JetBrainsMonoFontFamily,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = if (timerState.completedAlertPending) IncomeEmerald else Color(0xFF0077B6),
+                    modifier = Modifier.testTag("post_meal_timer_display")
+                )
+            }
+
+            // Seletor dos 3 períodos pós-refeição de 1h ("1h Pós-Café", "1h Pós-Almoço", "1h Pós-Janta")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                DiabetesSlotCatalog.postMealTimerSlots.forEach { slot ->
+                    val selected = selectedMealSlot == slot
+                    FilterChip(
+                        selected = selected,
+                        onClick = { onSelectMealSlot(slot) },
+                        label = {
+                            Text(
+                                text = slot,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (!timerState.isRunning) {
+                    Button(
+                        onClick = onStartTimer,
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("start_1h_post_meal_timer_btn")
+                    ) {
+                        Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Iniciar 1h",
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                } else {
+                    FilledTonalButton(
+                        onClick = onPauseResumeTimer,
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("pause_resume_1h_timer_btn")
+                    ) {
+                        Icon(
+                            imageVector = if (timerState.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (timerState.isPaused) "Retomar" else "Pausar",
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onResetTimer,
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.testTag("reset_1h_timer_btn")
+                    ) {
+                        Icon(imageVector = Icons.Default.Refresh, contentDescription = "Zerar", modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Zerar", maxLines = 1, softWrap = false)
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = onLogPostMealGlucoseNow,
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.testTag("test_1h_timer_alert_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.WaterDrop,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Registrar", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
     }
 }
 
@@ -1661,255 +2452,6 @@ private fun DailyTrackerItemCard(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun PostMealOneHourTimerCard(
-    timerState: com.example.data.PostMealTimerState,
-    liveRemainingSeconds: Int,
-    selectedMeal: String,
-    selectedDurationSeconds: Int,
-    onSelectMeal: (String) -> Unit,
-    onSelectDuration: (Int) -> Unit,
-    onStartTimer: () -> Unit,
-    onPauseResumeTimer: () -> Unit,
-    onResetTimer: () -> Unit,
-    onTriggerAlertNow: () -> Unit,
-    onLogPostMealGlucoseNow: () -> Unit
-) {
-    val cardRadius = LocalOrganicCardRadius.current
-    val minutes = liveRemainingSeconds / 60
-    val seconds = liveRemainingSeconds % 60
-    val formattedCountdown = String.format(Locale.ROOT, "%02d:%02d", minutes, seconds)
-    val progressRatio = (liveRemainingSeconds.toFloat() / timerState.totalDurationSeconds.coerceAtLeast(1).toFloat())
-        .coerceIn(0f, 1f)
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("post_meal_1h_timer_card"),
-        shape = RoundedCornerShape(cardRadius),
-        colors = CardDefaults.cardColors(
-            containerColor = if (timerState.completedAlertPending) {
-                SavingsGold.copy(alpha = 0.22f)
-            } else {
-                MaterialTheme.colorScheme.surface
-            }
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Box(
-                        modifier = Modifier.size(54.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val stroke = 5.dp.toPx()
-                            drawArc(
-                                color = Color(0xFF0077B6).copy(alpha = 0.18f),
-                                startAngle = 0f,
-                                sweepAngle = 360f,
-                                useCenter = false,
-                                style = Stroke(width = stroke, cap = StrokeCap.Round)
-                            )
-                            drawArc(
-                                color = if (timerState.completedAlertPending) IncomeEmerald else Color(0xFF0077B6),
-                                startAngle = -90f,
-                                sweepAngle = 360f * (if (timerState.isRunning) progressRatio else 1f),
-                                useCenter = false,
-                                style = Stroke(width = stroke, cap = StrokeCap.Round)
-                            )
-                        }
-                        Icon(
-                            imageVector = Icons.Default.Timer,
-                            contentDescription = null,
-                            tint = Color(0xFF0077B6),
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(12.dp))
-
-                    Column {
-                        Text(
-                            text = "⏱️ Cronômetro Pós-Refeição com Alarme",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = if (timerState.isRunning) {
-                                "Contagem pós-$selectedMeal (Iniciado às ${timerState.startedAtHHmm})"
-                            } else if (timerState.completedAlertPending) {
-                                "🔔 Tempo concluído! Hora de medir sua glicemia pós-$selectedMeal"
-                            } else {
-                                "Escolha o tempo e a refeição para despertar o alarme exato de medição"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                Text(
-                    text = formattedCountdown,
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontFamily = JetBrainsMonoFontFamily,
-                    fontWeight = FontWeight.Bold,
-                    color = if (timerState.completedAlertPending) IncomeEmerald else Color(0xFF0077B6),
-                    modifier = Modifier.testTag("post_meal_timer_display")
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf(
-                    3600 to "1h (60 min)",
-                    5400 to "1h30 (90 min)",
-                    7200 to "2h (120 min)"
-                ).forEach { (secs, label) ->
-                    FilterChip(
-                        selected = selectedDurationSeconds == secs,
-                        onClick = { onSelectDuration(secs) },
-                        label = { Text(label, fontWeight = FontWeight.Bold) },
-                        shape = RoundedCornerShape(50)
-                    )
-                }
-            }
-
-            // Grade uniforme 2x2 para as 4 refeições (Café da Manhã, Almoço, Lanche da Tarde, Jantar)
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                HealthCatalog.mealOptions.chunked(2).forEach { rowMeals ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        rowMeals.forEach { meal ->
-                            FilterChip(
-                                selected = selectedMeal == meal,
-                                onClick = { onSelectMeal(meal) },
-                                label = {
-                                    Text(
-                                        text = meal,
-                                        fontWeight = if (selectedMeal == meal) FontWeight.Bold else FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                },
-                                shape = RoundedCornerShape(50),
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (!timerState.isRunning) {
-                    Button(
-                        onClick = onStartTimer,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("start_1h_post_meal_timer_btn")
-                    ) {
-                        Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Iniciar Cronômetro",
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                } else {
-                    FilledTonalButton(
-                        onClick = onPauseResumeTimer,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("pause_resume_1h_timer_btn")
-                    ) {
-                        Icon(
-                            imageVector = if (timerState.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = if (timerState.isPaused) "Retomar" else "Pausar",
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-
-                    OutlinedButton(
-                        onClick = onResetTimer,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier.testTag("reset_1h_timer_btn")
-                    ) {
-                        Icon(imageVector = Icons.Default.Refresh, contentDescription = "Zerar", modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Zerar", maxLines = 1, softWrap = false)
-                    }
-                }
-
-                OutlinedButton(
-                    onClick = onTriggerAlertNow,
-                    shape = RoundedCornerShape(50),
-                    modifier = Modifier.testTag("test_1h_timer_alert_btn")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.WaterDrop,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Medir Agora", fontWeight = FontWeight.Bold)
-                }
-            }
-
-            AnimatedVisibility(visible = timerState.completedAlertPending || timerState.isRunning) {
-                Button(
-                    onClick = onLogPostMealGlucoseNow,
-                    shape = RoundedCornerShape(50),
-                    colors = ButtonDefaults.buttonColors(containerColor = IncomeEmerald),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("log_post_meal_glucose_cta_btn")
-                ) {
-                    Text(
-                        text = "🩸 Registrar Glicemia Pós-$selectedMeal Agora",
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-    }
-}
-
 @Composable
 private fun GlucoseRecordRowCard(
     record: GlucoseRecord,
@@ -1919,20 +2461,22 @@ private fun GlucoseRecordRowCard(
 ) {
     val isAlert = record.isAlert()
     val statusColor = if (isAlert) ExpenseCoral else IncomeEmerald
-    val displayMember = record.memberName.ifBlank { fallbackMemberName }
+    val displayMember = record.memberName.takeIf {
+        it.isNotBlank() && !it.equals("Você", true) && !it.equals("VO", true)
+    } ?: fallbackMemberName
 
     Surface(
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(14.dp),
         color = statusColor.copy(alpha = 0.10f),
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, statusColor.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+            .border(1.dp, statusColor.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
             .testTag("glucose_record_${record.id}")
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
+                .padding(10.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -1943,9 +2487,9 @@ private fun GlucoseRecordRowCard(
                 ) {
                     Text(
                         text = "${record.valueMgDl} mg/dL",
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.titleSmall,
                         fontFamily = JetBrainsMonoFontFamily,
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.ExtraBold,
                         color = statusColor
                     )
                     Surface(
@@ -1953,7 +2497,7 @@ private fun GlucoseRecordRowCard(
                         color = MaterialTheme.colorScheme.surface
                     ) {
                         Text(
-                            text = record.slot,
+                            text = DiabetesSlotCatalog.normalizeSlot(record.slot),
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
@@ -1974,7 +2518,7 @@ private fun GlucoseRecordRowCard(
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = "${record.statusLabel()} • ${DateCalendarUtils.formatEpochDayPt(record.dateEpochDay)} às ${record.timeHHmm}" +
                         if (record.notes.isNotBlank()) " • ${record.notes}" else "",
@@ -2006,6 +2550,87 @@ private fun GlucoseRecordRowCard(
                     Icon(
                         imageVector = Icons.Default.DeleteOutline,
                         contentDescription = "Excluir medição",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InsulinRecordRowCard(
+    record: InsulinRecord,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = accent.copy(alpha = 0.10f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, accent.copy(alpha = 0.30f), RoundedCornerShape(14.dp))
+            .testTag("insulin_record_${record.id}")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "💉 ${record.insulinType} • ${record.units} UI",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = accent
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.surface
+                    ) {
+                        Text(
+                            text = record.injectionSite,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "${record.memberId} • ${record.dateIso} às ${record.timeFormatted}" +
+                        if (record.notes.isNotBlank()) " • ${record.notes}" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onEdit,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Editar insulina",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = "Excluir insulina",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp)
                     )
@@ -2272,12 +2897,12 @@ private fun AddCustomTrackerDialog(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AddGlucoseRecordDialog(
+fun AddGlucoseRecordDialog(
     initialRecord: GlucoseRecord? = null,
     initialEpochDay: Long,
     initialSlot: String,
-    availableSlots: List<String>,
-    defaultScope: String,
+    availableSlots: List<String> = DiabetesSlotCatalog.allSlots,
+    defaultScope: String = PrivacyScope.FAMILY,
     memberName: String = "",
     onDismiss: () -> Unit,
     onSave: (
@@ -2286,7 +2911,8 @@ private fun AddGlucoseRecordDialog(
         slot: String,
         valueMgDl: Int,
         notes: String,
-        privacyScope: String
+        privacyScope: String,
+        startOneHourAlarm: Boolean
     ) -> Unit
 ) {
     var dateDigitsOrFormatted by remember(initialRecord, initialEpochDay) {
@@ -2303,8 +2929,11 @@ private fun AddGlucoseRecordDialog(
     var notes by remember(initialRecord) { mutableStateOf(initialRecord?.notes ?: "") }
     var privacyScope by remember(initialRecord, defaultScope) { mutableStateOf(initialRecord?.privacyScope ?: defaultScope) }
 
-    val allSlots = remember(availableSlots) {
-        (DiabetesSlotCatalog.allSlots + availableSlots).map { DiabetesSlotCatalog.normalizeSlot(it) }.distinct()
+    val postMealTargetSlot = remember(selectedSlot) {
+        DiabetesSlotCatalog.postMealSlotAfterPreMeal(selectedSlot)
+    }
+    var startOneHourAlarm by remember(selectedSlot) {
+        mutableStateOf(postMealTargetSlot != null && initialRecord == null)
     }
 
     AlertDialog(
@@ -2314,7 +2943,7 @@ private fun AddGlucoseRecordDialog(
                 Text(
                     text = if (initialRecord != null) "🩸 Editar Medição de Glicemia" else "🩸 Registrar Medição de Glicemia",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.ExtraBold
                 )
                 if (memberName.isNotBlank()) {
                     Text(
@@ -2363,34 +2992,95 @@ private fun AddGlucoseRecordDialog(
                     )
                 }
 
-                Text("Momento / Slot da Medição:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    allSlots.forEach { slot ->
+                Text("Período Oficial (6 Períodos):", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    DiabetesSlotCatalog.allSlots.forEach { slot ->
                         FilterChip(
                             selected = selectedSlot == slot,
                             onClick = { selectedSlot = slot },
-                            label = { Text(slot) }
+                            label = { Text(slot, fontWeight = if (selectedSlot == slot) FontWeight.ExtraBold else FontWeight.Medium) }
                         )
                     }
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = privacyScope == PrivacyScope.PERSONAL,
-                        onClick = { privacyScope = PrivacyScope.PERSONAL },
-                        label = { Text("🔒 Individual") }
-                    )
-                    FilterChip(
-                        selected = privacyScope == PrivacyScope.FAMILY,
-                        onClick = { privacyScope = PrivacyScope.FAMILY },
-                        label = { Text("👨‍👩‍👧‍👦 Familiar") }
-                    )
+                // Switch opcional "Iniciar alarme de 1h ao salvar" ao selecionar "Almoço" ou "Janta"
+                if (postMealTargetSlot != null) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "⏱️ Iniciar alarme de 1h ao salvar",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                                Text(
+                                    text = "Dispara o cronômetro de 60 min para medir '$postMealTargetSlot'",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = startOneHourAlarm,
+                                onCheckedChange = { startOneHourAlarm = it },
+                                modifier = Modifier.testTag("start_1h_alarm_on_save_switch")
+                            )
+                        }
+                    }
+                }
+
+                // Chips rápidos de contexto clínico
+                Text(
+                    text = "Contexto Rápido (toque para adicionar):",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    GlucoseContextCatalog.quickTags.forEach { tag ->
+                        val isTagPresent = notes.contains(tag, ignoreCase = true)
+                        FilterChip(
+                            selected = isTagPresent,
+                            onClick = {
+                                notes = if (isTagPresent) {
+                                    notes.replace(tag, "", ignoreCase = true)
+                                        .replace(" •  • ", " • ")
+                                        .trim(' ', '•', ',')
+                                } else if (notes.isBlank()) {
+                                    tag
+                                } else {
+                                    "${notes.trim()} • $tag"
+                                }
+                            },
+                            label = {
+                                Text(
+                                    text = tag,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = if (isTagPresent) FontWeight.ExtraBold else FontWeight.Medium
+                                )
+                            }
+                        )
+                    }
                 }
 
                 OutlinedTextField(
                     value = notes,
                     onValueChange = { notes = it },
-                    label = { Text("Observações (refeição, sintomas, insulina)") },
+                    label = { Text("Observações / Contexto (refeição, sintomas)") },
                     maxLines = 3,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2404,7 +3094,15 @@ private fun AddGlucoseRecordDialog(
                 onClick = {
                     if (parsedVal > 0) {
                         val finalEpoch = OmniDateMaskUtils.parseBrDateToEpochDay(dateDigitsOrFormatted) ?: selectedEpochDay
-                        onSave(finalEpoch, timeText, selectedSlot, parsedVal, notes, privacyScope)
+                        onSave(
+                            finalEpoch,
+                            timeText,
+                            selectedSlot,
+                            parsedVal,
+                            notes,
+                            privacyScope,
+                            startOneHourAlarm && postMealTargetSlot != null
+                        )
                     }
                 },
                 enabled = parsedVal > 0,
@@ -2416,6 +3114,683 @@ private fun AddGlucoseRecordDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Cancelar")
+            }
+        }
+    )
+}
+
+// =============================================================================
+// MODAL 1-TOQUE DE REGISTRO DE INSULINA E RODÍZIO INTELIGENTE DE LOCAL
+// Reutilizado tanto na aba "Saúde & Glicemia" quanto no card expansível do "Hub"
+// =============================================================================
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun AddInsulinRecordDialog(
+    initialRecord: InsulinRecord? = null,
+    initialEpochDay: Long = DateCalendarUtils.todayEpochDay(),
+    activeMember: FamilyMemberBadge,
+    familyMembers: List<FamilyMemberBadge>,
+    healthState: com.example.data.HealthModuleState,
+    onOpenSchedulesConfig: (() -> Unit)? = null,
+    onDismiss: () -> Unit,
+    onSave: (
+        dateEpochDay: Long,
+        timeHHmm: String,
+        insulinType: String,
+        units: Int,
+        injectionSite: String,
+        memberBadge: FamilyMemberBadge,
+        notes: String
+    ) -> Unit
+) {
+    var selectedMember by remember(activeMember) { mutableStateOf(activeMember) }
+    val latestForMember = remember(healthState.insulinRecords, selectedMember) {
+        healthState.latestInsulinForMember(selectedMember.userId, selectedMember.displayName)
+    }
+    val lastSiteUsed = latestForMember?.injectionSite
+    val suggestedNextSite = remember(lastSiteUsed) {
+        InsulinSiteCatalog.suggestNextSite(lastSiteUsed)
+    }
+    val siteHistoryMap = remember(healthState.insulinRecords, selectedMember) {
+        healthState.lastApplicationBySiteForMember(selectedMember.userId, selectedMember.displayName)
+    }
+
+    val configuredTypes = remember(healthState.insulinConfigs) {
+        (healthState.insulinConfigs.map { it.insulinType } + InsulinTypeCatalog.presets)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+    }
+
+    val initialType = initialRecord?.insulinType
+        ?: healthState.insulinConfigs.firstOrNull()?.insulinType
+        ?: latestForMember?.insulinType
+        ?: InsulinTypeCatalog.presets.first()
+
+    val defaultDoseForType = remember(initialType, healthState.insulinConfigs) {
+        healthState.insulinConfigs.firstOrNull { it.insulinType.equals(initialType, ignoreCase = true) }?.defaultUnits
+            ?: latestForMember?.units
+            ?: 10
+    }
+
+    var selectedType by remember(initialRecord, initialType) { mutableStateOf(initialType) }
+    var unitsText by remember(initialRecord, defaultDoseForType) {
+        mutableStateOf((initialRecord?.units ?: defaultDoseForType).toString())
+    }
+    var selectedSite by remember(initialRecord, suggestedNextSite) {
+        mutableStateOf(initialRecord?.injectionSite?.ifBlank { suggestedNextSite } ?: suggestedNextSite)
+    }
+    var dateDigitsOrFormatted by remember(initialRecord, initialEpochDay) {
+        val epoch = initialRecord?.dateIso?.let {
+            runCatching { java.time.LocalDate.parse(it).toEpochDay() }.getOrNull()
+        } ?: initialEpochDay
+        mutableStateOf(OmniDateMaskUtils.epochDayToBrDate(epoch))
+    }
+    var selectedEpochDay by remember(initialRecord, initialEpochDay) {
+        val epoch = initialRecord?.dateIso?.let {
+            runCatching { java.time.LocalDate.parse(it).toEpochDay() }.getOrNull()
+        } ?: initialEpochDay
+        mutableLongStateOf(epoch)
+    }
+    var timeText by remember(initialRecord) {
+        mutableStateOf(initialRecord?.timeFormatted?.ifBlank { DateCalendarUtils.currentTimeHHmm() } ?: DateCalendarUtils.currentTimeHHmm())
+    }
+    var notes by remember(initialRecord) { mutableStateOf(initialRecord?.notes ?: "") }
+
+    val todayIso = remember { DateCalendarUtils.todayIsoDate() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (initialRecord != null) "💉 Editar Aplicação de Insulina" else "💉 Registrar Insulina & Rodízio",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Text(
+                        text = "Paciente: ${selectedMember.displayName}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                if (onOpenSchedulesConfig != null) {
+                    TextButton(onClick = onOpenSchedulesConfig) {
+                        Icon(imageVector = Icons.Default.Alarm, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Alarmes", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (familyMembers.size > 1) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        familyMembers.forEach { member ->
+                            val isSelected = selectedMember.userId == member.userId ||
+                                selectedMember.displayName.equals(member.displayName, ignoreCase = true)
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { selectedMember = member },
+                                label = {
+                                    Text(
+                                        text = "${member.avatarEmoji} ${member.displayName}",
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                    )
+                                },
+                                shape = RoundedCornerShape(50)
+                            )
+                        }
+                    }
+                }
+
+                Text("Tipo de Insulina:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    configuredTypes.forEach { type ->
+                        val isSel = selectedType == type
+                        FilterChip(
+                            selected = isSel,
+                            onClick = {
+                                selectedType = type
+                                val cfgUnits = healthState.insulinConfigs
+                                    .firstOrNull { it.insulinType.equals(type, ignoreCase = true) }
+                                    ?.defaultUnits
+                                if (cfgUnits != null && initialRecord == null) {
+                                    unitsText = cfgUnits.toString()
+                                }
+                            },
+                            label = {
+                                Text(
+                                    text = type,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = if (isSel) FontWeight.ExtraBold else FontWeight.Medium
+                                )
+                            }
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = unitsText,
+                        onValueChange = { unitsText = it.filter { ch -> ch.isDigit() }.take(3) },
+                        label = { Text("Dose (UI)") },
+                        placeholder = { Text("Ex: 12") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("insulin_units_input")
+                    )
+                    OutlinedTextField(
+                        value = timeText,
+                        onValueChange = { timeText = it },
+                        label = { Text("Hora (HH:mm)") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                MaskedDateTextField(
+                    dateValue = dateDigitsOrFormatted,
+                    onDateValueChange = { formatted, parsedEpoch ->
+                        dateDigitsOrFormatted = formatted
+                        if (parsedEpoch != null) selectedEpochDay = parsedEpoch
+                    },
+                    label = "Data da Aplicação (DD/MM/AAAA)",
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Destaque do último local utilizado e sugestão automática do próximo local no rodízio
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = IncomeEmerald.copy(alpha = 0.12f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, IncomeEmerald.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = "🔄 Rodízio de Local Sugerido: $suggestedNextSite",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = IncomeEmerald
+                        )
+                        Text(
+                            text = if (!lastSiteUsed.isNullOrBlank()) {
+                                "Último local utilizado: $lastSiteUsed (${latestForMember?.timeFormatted.orEmpty()})"
+                            } else {
+                                "Primeira aplicação registrada • Recomendado iniciar por $suggestedNextSite"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Text(
+                    text = "Local de Aplicação (com histórico visual por local):",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    InsulinSiteCatalog.allSites.forEach { site ->
+                        val isSelected = selectedSite == site
+                        val isLastUsed = site == lastSiteUsed
+                        val isSuggested = site == suggestedNextSite
+                        val lastRecAtSite = siteHistoryMap[site]
+                        val lastWhenText = when {
+                            lastRecAtSite == null -> "Livre"
+                            lastRecAtSite.dateIso == todayIso -> "Hoje ${lastRecAtSite.timeFormatted}"
+                            else -> lastRecAtSite.dateIso.takeLast(5).replace("-", "/")
+                        }
+
+                        val borderCol = when {
+                            isSelected -> MaterialTheme.colorScheme.primary
+                            isSuggested -> IncomeEmerald
+                            isLastUsed -> SavingsGold
+                            else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                        }
+                        val bgCol = when {
+                            isSelected -> MaterialTheme.colorScheme.primaryContainer
+                            isSuggested -> IncomeEmerald.copy(alpha = 0.14f)
+                            isLastUsed -> SavingsGold.copy(alpha = 0.16f)
+                            else -> MaterialTheme.colorScheme.surface
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = bgCol,
+                            modifier = Modifier
+                                .border(
+                                    width = if (isSelected || isSuggested) 1.5.dp else 1.dp,
+                                    color = borderCol,
+                                    shape = RoundedCornerShape(14.dp)
+                                )
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { selectedSite = site }
+                                .testTag("insulin_site_chip_$site")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = site,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = if (isSelected || isSuggested) FontWeight.ExtraBold else FontWeight.SemiBold
+                                    )
+                                    if (isSuggested) {
+                                        Text(
+                                            text = "• Sugerido",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = IncomeEmerald
+                                        )
+                                    } else if (isLastUsed) {
+                                        Text(
+                                            text = "• Último",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFB45309)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = "Última vez: $lastWhenText",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = notes,
+                    onValueChange = { notes = it },
+                    label = { Text("Observações opcionais") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            val parsedUnits = unitsText.toIntOrNull() ?: 0
+            Button(
+                onClick = {
+                    if (parsedUnits > 0) {
+                        val finalEpoch = OmniDateMaskUtils.parseBrDateToEpochDay(dateDigitsOrFormatted) ?: selectedEpochDay
+                        onSave(
+                            finalEpoch,
+                            timeText,
+                            selectedType,
+                            parsedUnits,
+                            selectedSite,
+                            selectedMember,
+                            notes
+                        )
+                    }
+                },
+                enabled = parsedUnits > 0,
+                modifier = Modifier.testTag("confirm_save_insulin_btn")
+            ) {
+                Text(if (initialRecord != null) "Atualizar Insulina" else "Registrar Insulina")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar")
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun InsulinSchedulesConfigDialog(
+    configs: List<InsulinScheduleConfig>,
+    activeMemberName: String,
+    onSaveConfig: (InsulinScheduleConfig) -> Unit,
+    onDeleteConfig: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedType by remember { mutableStateOf(InsulinTypeCatalog.presets.first()) }
+    var unitsText by remember { mutableStateOf("10") }
+    var hourText by remember { mutableStateOf("08") }
+    var minuteText by remember { mutableStateOf("00") }
+    var alarmEnabled by remember { mutableStateOf(true) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "⏰ Tipos, Doses Habituais & Alarmes de Insulina",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.ExtraBold
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Configure os tipos de insulina, doses habituais em UI e horários fixos vinculados ao AlarmManager.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (configs.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        configs.forEach { cfg ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "💉 ${cfg.insulinType} • ${cfg.defaultUnits} UI",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                        Text(
+                                            text = "Horário: ${DateCalendarUtils.formatTime(cfg.alarmHour, cfg.alarmMinute)} • ${if (cfg.alarmEnabled) "Alarme Ativo 🔔" else "Sem alarme"}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = cfg.alarmEnabled,
+                                        onCheckedChange = { enabled ->
+                                            onSaveConfig(cfg.copy(alarmEnabled = enabled))
+                                        }
+                                    )
+                                    IconButton(onClick = { onDeleteConfig(cfg.id) }) {
+                                        Icon(
+                                            imageVector = Icons.Default.DeleteOutline,
+                                            contentDescription = "Remover horário"
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    HorizontalDivider()
+                }
+
+                Text("Adicionar Novo Horário / Dose Habitual:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    InsulinTypeCatalog.presets.forEach { preset ->
+                        FilterChip(
+                            selected = selectedType == preset,
+                            onClick = { selectedType = preset },
+                            label = { Text(preset, style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = unitsText,
+                        onValueChange = { unitsText = it.filter { c -> c.isDigit() }.take(3) },
+                        label = { Text("Dose (UI)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = hourText,
+                        onValueChange = { hourText = it.filter { c -> c.isDigit() }.take(2) },
+                        label = { Text("Hora (0-23)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = minuteText,
+                        onValueChange = { minuteText = it.filter { c -> c.isDigit() }.take(2) },
+                        label = { Text("Min (0-59)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Despertar alarme diário neste horário", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                    Switch(checked = alarmEnabled, onCheckedChange = { alarmEnabled = it })
+                }
+
+                Button(
+                    onClick = {
+                        val units = (unitsText.toIntOrNull() ?: 10).coerceIn(1, 300)
+                        val hour = (hourText.toIntOrNull() ?: 8).coerceIn(0, 23)
+                        val minute = (minuteText.toIntOrNull() ?: 0).coerceIn(0, 59)
+                        onSaveConfig(
+                            InsulinScheduleConfig(
+                                memberId = activeMemberName,
+                                insulinType = selectedType,
+                                defaultUnits = units,
+                                alarmHour = hour,
+                                alarmMinute = minute,
+                                alarmEnabled = alarmEnabled
+                            )
+                        )
+                    },
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Adicionar Horário de Insulina", fontWeight = FontWeight.ExtraBold)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Concluir", fontWeight = FontWeight.Bold)
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun UnifiedGlucoseAndInsulinHistoryDialog(
+    familyMembers: List<FamilyMemberBadge>,
+    initialMemberFilter: String = "ALL",
+    glucoseRecords: List<GlucoseRecord>,
+    insulinRecords: List<InsulinRecord>,
+    defaultMember: FamilyMemberBadge,
+    onEditGlucose: (GlucoseRecord) -> Unit,
+    onDeleteGlucose: (GlucoseRecord) -> Unit,
+    onEditInsulin: (InsulinRecord) -> Unit,
+    onDeleteInsulin: (InsulinRecord) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var memberFilter by remember { mutableStateOf(initialMemberFilter) }
+
+    fun recordMatchesFilter(memberId: String, memberName: String): Boolean {
+        if (memberFilter == "ALL") return true
+        val targetMember = familyMembers.firstOrNull {
+            it.userId == memberFilter || it.displayName.equals(memberFilter, ignoreCase = true)
+        } ?: return true
+        val isPrimary = targetMember.userId == defaultMember.userId ||
+            targetMember.displayName.equals(defaultMember.displayName, ignoreCase = true)
+
+        val cleanId = memberId.trim()
+        val cleanName = memberName.trim()
+        if ((cleanId.isBlank() || cleanId.equals("Você", true) || cleanId.equals("VO", true)) &&
+            (cleanName.isBlank() || cleanName.equals("Você", true) || cleanName.equals("VO", true))
+        ) {
+            return isPrimary
+        }
+        return cleanId.equals(targetMember.userId, ignoreCase = true) ||
+            cleanId.equals(targetMember.displayName, ignoreCase = true) ||
+            cleanName.equals(targetMember.displayName, ignoreCase = true) ||
+            cleanName.equals(targetMember.userId, ignoreCase = true)
+    }
+
+    val filteredGlucose = remember(glucoseRecords, memberFilter, familyMembers) {
+        glucoseRecords.filter { recordMatchesFilter(it.memberId, it.memberName) }
+    }
+    val filteredInsulin = remember(insulinRecords, memberFilter, familyMembers) {
+        insulinRecords.filter { recordMatchesFilter(it.memberId, it.memberId) }
+    }
+
+    val allDatesDesc = remember(filteredGlucose, filteredInsulin) {
+        (filteredGlucose.map { it.dateIso } + filteredInsulin.map { it.dateIso })
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sortedDescending()
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text(
+                    text = "📋 Histórico de Glicemia & Insulina",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.ExtraBold
+                )
+                Text(
+                    text = "Agrupado por dia • Edição e exclusão sincronizadas em tempo real",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Filtro por membro ("Todos", "Marcus", "Nathalia")
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FilterChip(
+                        selected = memberFilter == "ALL",
+                        onClick = { memberFilter = "ALL" },
+                        label = { Text("Todos", fontWeight = FontWeight.Bold) },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.testTag("history_filter_all")
+                    )
+                    familyMembers.forEach { member ->
+                        val isSel = memberFilter == member.userId || memberFilter.equals(member.displayName, ignoreCase = true)
+                        FilterChip(
+                            selected = isSel,
+                            onClick = { memberFilter = member.userId },
+                            label = {
+                                Text(
+                                    text = "${member.avatarEmoji} ${member.displayName}",
+                                    fontWeight = if (isSel) FontWeight.ExtraBold else FontWeight.Medium
+                                )
+                            },
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier.testTag("history_filter_${member.displayName}")
+                        )
+                    }
+                }
+
+                if (allDatesDesc.isEmpty()) {
+                    Text(
+                        text = "Nenhum registro encontrado para o filtro selecionado.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    allDatesDesc.take(30).forEach { dateIso ->
+                        val dayEpoch = runCatching { java.time.LocalDate.parse(dateIso).toEpochDay() }.getOrNull()
+                        val dateTitle = if (dayEpoch != null) DateCalendarUtils.formatEpochDayPt(dayEpoch) else dateIso
+                        val dayGlu = filteredGlucose.filter { it.dateIso == dateIso }
+                        val dayIns = filteredInsulin.filter { it.dateIso == dateIso }
+
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "📅 $dateTitle (${dayGlu.size} glicemia • ${dayIns.size} insulina)",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                )
+                            }
+                            dayGlu.forEach { rec ->
+                                GlucoseRecordRowCard(
+                                    record = rec,
+                                    fallbackMemberName = defaultMember.displayName,
+                                    onEdit = { onEditGlucose(rec) },
+                                    onDelete = { onDeleteGlucose(rec) }
+                                )
+                            }
+                            dayIns.forEach { ins ->
+                                InsulinRecordRowCard(
+                                    record = ins,
+                                    onEdit = { onEditInsulin(ins) },
+                                    onDelete = { onDeleteInsulin(ins) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Fechar", fontWeight = FontWeight.Bold)
             }
         }
     )

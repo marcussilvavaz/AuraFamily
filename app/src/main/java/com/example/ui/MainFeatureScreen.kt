@@ -109,7 +109,9 @@ fun MainFeatureScreen(
     onSignOut: () -> Unit,
     sharedUpdateManager: AppUpdateManager? = null,
     pendingWidgetAction: String? = null,
-    onConsumeWidgetAction: () -> Unit = {}
+    onConsumeWidgetAction: () -> Unit = {},
+    pendingGlucoseSlot: String? = null,
+    onConsumeGlucoseSlot: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -175,6 +177,12 @@ fun MainFeatureScreen(
         }
     }
 
+    LaunchedEffect(pendingGlucoseSlot) {
+        if (!pendingGlucoseSlot.isNullOrBlank()) {
+            currentTab = 5
+        }
+    }
+
     // Mandatory BackHandler for secondary screens and manual onboarding modal
     if (showModularOnboardingModal) {
         BackHandler {
@@ -226,6 +234,38 @@ fun MainFeatureScreen(
         val remoteAvatar = userProfile?.avatarBase64.orEmpty()
         if (remoteAvatar.isNotBlank() && remoteAvatar != customizationConfig.profileAvatarBase64) {
             customizationRepo.updateProfileAvatarBase64(remoteAvatar)
+        }
+        val activeHouseId = loadedHousehold?.householdId?.takeIf { it.isNotBlank() }
+            ?: userProfile?.householdId.orEmpty()
+        val resolvedMemberName = remoteName.ifBlank { customizationConfig.profileName }
+        if (activeHouseId.isNotBlank()) {
+            healthRepo.attachHouseholdRealtimeSync(
+                householdId = activeHouseId,
+                loggedUserId = userProfile?.uid.orEmpty(),
+                loggedUserName = resolvedMemberName
+            )
+        }
+    }
+
+    LaunchedEffect(loadedHousehold?.insulinConfigs) {
+        val remoteConfigs = loadedHousehold?.insulinConfigs.orEmpty()
+        if (remoteConfigs.isNotEmpty()) {
+            healthRepo.syncInsulinConfigsFromRemoteHousehold(remoteConfigs)
+        }
+    }
+
+    LaunchedEffect(loadedHousehold?.pregnancyDppDate, loadedHousehold?.pregnancyComparisonMode) {
+        val remoteDpp = loadedHousehold?.pregnancyDppDate?.trim().orEmpty()
+        val remoteMode = loadedHousehold?.pregnancyComparisonMode?.trim().orEmpty()
+        if (remoteDpp.isNotBlank() && remoteDpp != customizationConfig.pregnancyDppDate) {
+            customizationRepo.updatePregnancyModule(
+                enabled = true,
+                dppDate = remoteDpp,
+                notes = customizationConfig.pregnancyNotes,
+                comparisonMode = remoteMode.ifBlank { customizationConfig.pregnancyComparisonMode }
+            )
+        } else if (remoteMode.isNotBlank() && remoteMode != customizationConfig.pregnancyComparisonMode) {
+            customizationRepo.updatePregnancyComparisonMode(remoteMode)
         }
     }
 
@@ -884,6 +924,10 @@ fun MainFeatureScreen(
                                         addedBy = customizationConfig.profileName.ifBlank { "Família" },
                                         addedByColorHex = customizationConfig.profileColorHex
                                     )
+                                },
+                                customizationRepo = customizationRepo,
+                                onSyncPregnancyConfigToCloud = { dpp, mode ->
+                                    viewModel.updateHouseholdPregnancyConfig(dpp, mode)
                                 }
                             )
 
@@ -1245,7 +1289,7 @@ fun MainFeatureScreen(
                                 onShowMessage = { localStudioBanner = it }
                             )
 
-                            // 5: PASSO 3 — SAÚDE, INEGOCIÁVEIS, GESTAÇÃO, SUGESTÕES FINANCEIRAS E RELATÓRIO PDF NATIVO
+                            // 5: PASSO 3 — SAÚDE, GLICEMIA (6 PERÍODOS OFICIAIS + TIMER 1H), INSULINA (RODÍZIO DE LOCAL), GESTAÇÃO (DPP + COMPARADOR) E PDF MÉDICO
                             5 -> HealthModuleScreen(
                                 selectedEpochDay = selectedEpochDay,
                                 customizationConfig = customizationConfig,
@@ -1267,7 +1311,21 @@ fun MainFeatureScreen(
                                 },
                                 onShowBannerMessage = { localStudioBanner = it },
                                 household = household,
-                                userProfile = userProfile
+                                userProfile = userProfile,
+                                pendingGlucoseSlotFromNotification = pendingGlucoseSlot,
+                                onConsumePendingGlucoseSlot = onConsumeGlucoseSlot,
+                                onAddSupplyToMural = { supplyTitle ->
+                                    viewModel.addMuralItem(
+                                        context = context,
+                                        title = supplyTitle,
+                                        category = "Compras",
+                                        addedBy = customizationConfig.profileName.ifBlank { userProfile?.displayName ?: "Família" },
+                                        addedByColorHex = customizationConfig.profileColorHex
+                                    )
+                                },
+                                onSyncPregnancyConfigToCloud = { dpp, mode ->
+                                    viewModel.updateHouseholdPregnancyConfig(dpp, mode)
+                                }
                             )
 
                             // 6: PASSO 4 — DIÁRIO PRIVADO (BLOQUEADO) & MURAL DA FAMÍLIA (COMPARTILHADO)

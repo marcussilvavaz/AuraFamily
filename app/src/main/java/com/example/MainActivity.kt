@@ -58,10 +58,12 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 
 import android.content.Intent
+import com.example.alarm.TaskAndBillAlarmReceiver
 import com.example.widget.OmniHomeWidgetProvider
 
 class MainActivity : ComponentActivity() {
     private val pendingWidgetActionState = mutableStateOf<String?>(null)
+    private val pendingGlucoseSlotState = mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,7 +73,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             AuraAppRoot(
                 pendingWidgetAction = pendingWidgetActionState.value,
-                onConsumeWidgetAction = { pendingWidgetActionState.value = null }
+                onConsumeWidgetAction = { pendingWidgetActionState.value = null },
+                pendingGlucoseSlot = pendingGlucoseSlotState.value,
+                onConsumeGlucoseSlot = { pendingGlucoseSlotState.value = null }
             )
         }
     }
@@ -88,13 +92,23 @@ class MainActivity : ComponentActivity() {
             pendingWidgetActionState.value = action
             intent.removeExtra(OmniHomeWidgetProvider.EXTRA_WIDGET_ACTION)
         }
+        val glucoseSlot = intent?.getStringExtra(TaskAndBillAlarmReceiver.EXTRA_OPEN_GLUCOSE_SLOT)
+        if (!glucoseSlot.isNullOrBlank()) {
+            pendingGlucoseSlotState.value = glucoseSlot
+            if (pendingWidgetActionState.value.isNullOrBlank()) {
+                pendingWidgetActionState.value = OmniHomeWidgetProvider.WIDGET_ACTION_OPEN_GLUCOSE
+            }
+            intent.removeExtra(TaskAndBillAlarmReceiver.EXTRA_OPEN_GLUCOSE_SLOT)
+        }
     }
 }
 
 @Composable
 fun AuraAppRoot(
     pendingWidgetAction: String? = null,
-    onConsumeWidgetAction: () -> Unit = {}
+    onConsumeWidgetAction: () -> Unit = {},
+    pendingGlucoseSlot: String? = null,
+    onConsumeGlucoseSlot: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -104,11 +118,13 @@ fun AuraAppRoot(
     val updateManager = remember(context) { AppUpdateManager(context.applicationContext) }
     val updateState by updateManager.uiState.collectAsStateWithLifecycle()
 
-    var showSplash by rememberSaveable { mutableStateOf(pendingWidgetAction.isNullOrBlank()) }
+    var showSplash by rememberSaveable {
+        mutableStateOf(pendingWidgetAction.isNullOrBlank() && pendingGlucoseSlot.isNullOrBlank())
+    }
     var hasRequestedInitialPermissions by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(pendingWidgetAction) {
-        if (!pendingWidgetAction.isNullOrBlank()) {
+    LaunchedEffect(pendingWidgetAction, pendingGlucoseSlot) {
+        if (!pendingWidgetAction.isNullOrBlank() || !pendingGlucoseSlot.isNullOrBlank()) {
             showSplash = false
         }
     }
@@ -170,7 +186,8 @@ fun AuraAppRoot(
     val user = currentUser
     val shouldShowAuthScreen = user == null &&
         (!hasSkippedGoogleLogin || showOptionalLoginScreen) &&
-        pendingWidgetAction.isNullOrBlank()
+        pendingWidgetAction.isNullOrBlank() &&
+        pendingGlucoseSlot.isNullOrBlank()
 
     if (shouldShowAuthScreen) {
         BackHandler {
@@ -279,7 +296,9 @@ fun AuraAppRoot(
                     },
                     sharedUpdateManager = updateManager,
                     pendingWidgetAction = pendingWidgetAction,
-                    onConsumeWidgetAction = onConsumeWidgetAction
+                    onConsumeWidgetAction = onConsumeWidgetAction,
+                    pendingGlucoseSlot = pendingGlucoseSlot,
+                    onConsumeGlucoseSlot = onConsumeGlucoseSlot
                 )
             }
         }

@@ -226,6 +226,7 @@ service cloud.firestore {
                          'needsPercentage', 'wantsPercentage', 'savingsPercentage',
                          'memberIds', 'members', 'membersMap', 'bankAccounts',
                          'categoryBudgetsBrl', 'customCategories', 'muralItems',
+                         'insulinConfigs', 'pregnancyDppDate', 'pregnancyComparisonMode',
                          'defaultSplitMode', 'createdAt', 'updatedAt'
                        ]) &&
                        isValidHousehold(incoming());
@@ -246,6 +247,7 @@ service cloud.firestore {
                              'needsPercentage', 'wantsPercentage', 'savingsPercentage',
                              'memberIds', 'members', 'membersMap', 'bankAccounts',
                              'categoryBudgetsBrl', 'customCategories', 'muralItems',
+                             'insulinConfigs', 'pregnancyDppDate', 'pregnancyComparisonMode',
                              'defaultSplitMode', 'updatedAt'
                            ])
                          ) ||
@@ -444,6 +446,12 @@ service cloud.firestore {
       match /health_logs/{logId} {
         allow get, list: if isSignedIn() && isHouseholdMember(householdId);
         allow create, update, delete: if isSignedIn() && isValidId(logId) && isHouseholdMember(householdId);
+      }
+
+      // Subcollection: InsulinRecords
+      match /insulin_records/{recordId} {
+        allow get, list: if isSignedIn() && isHouseholdMember(householdId);
+        allow create, update, delete: if isSignedIn() && isValidId(recordId) && isHouseholdMember(householdId);
       }
 
       // Subcollection: DiaryEntries

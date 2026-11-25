@@ -129,18 +129,28 @@ class QuickGlucoseWidgetDialogActivity : ComponentActivity() {
                             initialSlot = initialSlot,
                             familyMembers = familyMembers,
                             onDismiss = { finish() },
-                            onSaveGlucose = { mgDl, slot, notes, memberId, memberName ->
+                            onSaveGlucose = { mgDl, slot, contextTag, notes, memberId, memberName, start1hTimer ->
                                 healthRepo.addGlucoseRecord(
                                     dateEpochDay = com.example.data.DateCalendarUtils.todayEpochDay(),
                                     timeHHmm = com.example.data.DateCalendarUtils.currentTimeHHmm(),
                                     slot = slot,
                                     valueMgDl = mgDl,
+                                    contextTag = contextTag,
                                     notes = notes,
                                     privacyScope = com.example.data.PrivacyScope.FAMILY,
                                     memberId = memberId,
                                     memberName = memberName
                                 )
                                 healthRepo.dismissPostMealTimerAlert()
+                                if (start1hTimer) {
+                                    val postSlot = DiabetesSlotCatalog.postMealSlotForPreMeal(slot)
+                                    healthRepo.startPostMealTimer(postSlot, 3600)
+                                    com.example.alarm.AlarmScheduler.schedulePostMealGlucoseAlarm(
+                                        context = appContext,
+                                        triggerAtMillis = System.currentTimeMillis() + 3600_000L,
+                                        mealLabel = postSlot
+                                    )
+                                }
                                 OmniHomeWidgetProvider.requestUpdate(appContext)
                                 Toast.makeText(
                                     appContext,
@@ -170,19 +180,23 @@ private fun QuickGlucoseFloatingCard(
     initialSlot: String,
     familyMembers: List<com.example.data.FamilyMemberBadge>,
     onDismiss: () -> Unit,
-    onSaveGlucose: (mgDl: Int, slot: String, notes: String, memberId: String, memberName: String) -> Unit
+    onSaveGlucose: (mgDl: Int, slot: String, contextTag: String, notes: String, memberId: String, memberName: String, start1hTimer: Boolean) -> Unit
 ) {
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
 
     var mgDlText by remember { mutableStateOf("") }
     var selectedSlot by remember { mutableStateOf(initialSlot) }
+    var selectedContextTag by remember { mutableStateOf("") }
     var notesText by remember { mutableStateOf("") }
+    var start1hTimerSwitch by remember(selectedSlot) {
+        mutableStateOf(DiabetesSlotCatalog.canTrigger1hTimerFromSlot(selectedSlot))
+    }
     var selectedMember by remember {
         mutableStateOf(
             familyMembers.firstOrNull() ?: com.example.data.FamilyMemberBadge(
-                userId = "LOCAL_TEST_USER",
-                displayName = "Você",
+                userId = "marcus",
+                displayName = "Marcus",
                 colorHex = 0xFF0E7C5B
             )
         )
@@ -275,9 +289,11 @@ private fun QuickGlucoseFloatingCard(
                             onSaveGlucose(
                                 parsed,
                                 selectedSlot,
+                                selectedContextTag,
                                 notesText.trim(),
                                 selectedMember.userId,
-                                selectedMember.displayName
+                                selectedMember.displayName,
+                                DiabetesSlotCatalog.canTrigger1hTimerFromSlot(selectedSlot) && start1hTimerSwitch
                             )
                         }
                     }
@@ -287,9 +303,9 @@ private fun QuickGlucoseFloatingCard(
                     .focusRequester(focusRequester)
             )
 
-            // Seletor compacto dos 10 períodos do dia
+            // Seletor compacto dos 6 períodos oficiais do dia
             Text(
-                text = "Período da Medição:",
+                text = "Período Oficial (1 de 6):",
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -308,6 +324,41 @@ private fun QuickGlucoseFloatingCard(
                                 style = MaterialTheme.typography.labelSmall
                             )
                         }
+                    )
+                }
+            }
+
+            if (DiabetesSlotCatalog.canTrigger1hTimerFromSlot(selectedSlot)) {
+                val targetPostSlot = DiabetesSlotCatalog.postMealSlotForPreMeal(selectedSlot)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "⏱️ Iniciar alarme de 1h ($targetPostSlot) ao salvar",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    androidx.compose.material3.Switch(
+                        checked = start1hTimerSwitch,
+                        onCheckedChange = { start1hTimerSwitch = it }
+                    )
+                }
+            }
+
+            // Chips rápidos de contexto
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                com.example.data.GlucoseContextCatalog.quickContexts.forEach { ctx ->
+                    val isSel = selectedContextTag == ctx
+                    FilterChip(
+                        selected = isSel,
+                        onClick = { selectedContextTag = if (isSel) "" else ctx },
+                        label = { Text(ctx, style = MaterialTheme.typography.labelSmall) }
                     )
                 }
             }
@@ -336,9 +387,11 @@ private fun QuickGlucoseFloatingCard(
                             onSaveGlucose(
                                 parsedVal,
                                 selectedSlot,
+                                selectedContextTag,
                                 notesText.trim(),
                                 selectedMember.userId,
-                                selectedMember.displayName
+                                selectedMember.displayName,
+                                DiabetesSlotCatalog.canTrigger1hTimerFromSlot(selectedSlot) && start1hTimerSwitch
                             )
                         }
                     },

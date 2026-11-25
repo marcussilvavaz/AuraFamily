@@ -19,8 +19,11 @@ import com.example.MainActivity
 import com.example.R
 import com.example.data.CustomizationRepository
 import com.example.data.DateCalendarUtils
+import com.example.data.DiabetesSlotCatalog
 import com.example.data.HealthRepository
+import com.example.data.InsulinScheduleConfig
 import com.example.data.LocalOfflineStore
+import com.example.widget.OmniHomeWidgetProvider
 import java.util.Locale
 
 class OmniBootCompletedReceiver : BroadcastReceiver() {
@@ -56,6 +59,7 @@ class TaskAndBillAlarmReceiver : BroadcastReceiver() {
             val soundUriStr = intent.getStringExtra(EXTRA_SOUND_URI) ?: ""
             val vibrateEnabled = intent.getBooleanExtra(EXTRA_VIBRATE, true)
             val isBillReminder = intent.getBooleanExtra(EXTRA_IS_BILL, false)
+            val openGlucoseSlot = intent.getStringExtra(EXTRA_OPEN_GLUCOSE_SLOT).orEmpty()
 
             TaskTonePreviewPlayer.stopAllAudio(context, dismissRingingNotification = true)
             runCatching {
@@ -69,7 +73,8 @@ class TaskAndBillAlarmReceiver : BroadcastReceiver() {
                 soundUriString = soundUriStr,
                 vibrate = vibrateEnabled,
                 isBillReminder = isBillReminder,
-                snoozeMinutes = 5
+                snoozeMinutes = 5,
+                openGlucoseSlot = openGlucoseSlot
             )
             return
         }
@@ -77,6 +82,9 @@ class TaskAndBillAlarmReceiver : BroadcastReceiver() {
         val title = intent.getStringExtra(EXTRA_TITLE) ?: "Lembrete Omni"
         val message = intent.getStringExtra(EXTRA_MESSAGE) ?: "Você tem uma tarefa, conta ou medição agendada para agora."
         val isBillReminder = intent.getBooleanExtra(EXTRA_IS_BILL, false)
+        val openGlucoseSlot = intent.getStringExtra(EXTRA_OPEN_GLUCOSE_SLOT).orEmpty()
+        val isInsulinAlarm = intent.getBooleanExtra(EXTRA_IS_INSULIN_ALARM, false)
+        val insulinConfigId = intent.getStringExtra(EXTRA_INSULIN_CONFIG_ID).orEmpty()
 
         val customRepo = CustomizationRepository(context)
         val config = customRepo.configFlow.value
@@ -86,6 +94,12 @@ class TaskAndBillAlarmReceiver : BroadcastReceiver() {
             EXTRA_VIBRATE,
             if (isBillReminder) config.billVibrateEnabled else config.taskVibrateEnabled
         )
+
+        if (notificationId == 7701) {
+            runCatching {
+                HealthRepository(context.applicationContext).markPostMealTimerFinished()
+            }
+        }
 
         AlarmScheduler.playCustomRingtoneAndVibrate(
             context = context,
@@ -103,7 +117,8 @@ class TaskAndBillAlarmReceiver : BroadcastReceiver() {
             message = message,
             soundUriString = soundUriStr,
             vibrate = vibrateEnabled,
-            isBillReminder = isBillReminder
+            isBillReminder = isBillReminder,
+            openGlucoseSlot = openGlucoseSlot
         )
 
         // Automatically re-schedule recurring daily reminders for the next day
@@ -123,6 +138,14 @@ class TaskAndBillAlarmReceiver : BroadcastReceiver() {
                     reminderTimeRaw = config.bloodPressureReminderTime
                 )
             }
+        } else if (isInsulinAlarm && insulinConfigId.isNotBlank()) {
+            runCatching {
+                val healthRepo = HealthRepository(context.applicationContext)
+                val cfg = healthRepo.stateFlow.value.insulinConfigs.firstOrNull { it.id == insulinConfigId }
+                if (cfg != null && cfg.alarmEnabled) {
+                    AlarmScheduler.scheduleSingleInsulinAlarm(context.applicationContext, cfg)
+                }
+            }
         }
     }
 
@@ -135,6 +158,9 @@ class TaskAndBillAlarmReceiver : BroadcastReceiver() {
         const val EXTRA_SOUND_URI = "extra_sound_uri"
         const val EXTRA_VIBRATE = "extra_vibrate"
         const val EXTRA_IS_BILL = "extra_is_bill"
+        const val EXTRA_OPEN_GLUCOSE_SLOT = "extra_open_glucose_slot"
+        const val EXTRA_IS_INSULIN_ALARM = "extra_is_insulin_alarm"
+        const val EXTRA_INSULIN_CONFIG_ID = "extra_insulin_config_id"
         const val CHANNEL_ID = "aura_financas_alarms_channel"
     }
 }
@@ -254,7 +280,8 @@ object AlarmScheduler {
         soundUriString: String,
         vibrate: Boolean,
         isBillReminder: Boolean,
-        snoozeMinutes: Int = 5
+        snoozeMinutes: Int = 5,
+        openGlucoseSlot: String = ""
     ): Boolean {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return false
         val triggerAtMillis = System.currentTimeMillis() + (snoozeMinutes * 60_000L)
@@ -265,6 +292,9 @@ object AlarmScheduler {
             putExtra(TaskAndBillAlarmReceiver.EXTRA_SOUND_URI, soundUriString)
             putExtra(TaskAndBillAlarmReceiver.EXTRA_VIBRATE, vibrate)
             putExtra(TaskAndBillAlarmReceiver.EXTRA_IS_BILL, isBillReminder)
+            if (openGlucoseSlot.isNotBlank()) {
+                putExtra(TaskAndBillAlarmReceiver.EXTRA_OPEN_GLUCOSE_SLOT, openGlucoseSlot)
+            }
         }
         val pendingIntent = PendingIntent.getBroadcast(
             context,
@@ -356,16 +386,18 @@ object AlarmScheduler {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return false
         val config = CustomizationRepository(context).configFlow.value
         val notificationId = 7701
+        val normalizedSlot = DiabetesSlotCatalog.slotForPostMealTimer(mealLabel, 3600)
         val intent = Intent(context, TaskAndBillAlarmReceiver::class.java).apply {
-            putExtra(TaskAndBillAlarmReceiver.EXTRA_TITLE, "🩸 Omni • Hora de Medir sua Glicemia!")
+            putExtra(TaskAndBillAlarmReceiver.EXTRA_TITLE, "🩸 Omni • Hora de Medir sua Glicemia ($normalizedSlot)!")
             putExtra(
                 TaskAndBillAlarmReceiver.EXTRA_MESSAGE,
-                "O cronômetro pós-$mealLabel terminou. Registre sua glicemia agora no Omni."
+                "Completou 1h pós-refeição ($normalizedSlot). Toque para registrar sua medição de glicemia agora."
             )
             putExtra(TaskAndBillAlarmReceiver.EXTRA_NOTIFICATION_ID, notificationId)
             putExtra(TaskAndBillAlarmReceiver.EXTRA_SOUND_URI, config.taskAlarmSoundUri)
             putExtra(TaskAndBillAlarmReceiver.EXTRA_VIBRATE, true)
             putExtra(TaskAndBillAlarmReceiver.EXTRA_IS_BILL, false)
+            putExtra(TaskAndBillAlarmReceiver.EXTRA_OPEN_GLUCOSE_SLOT, normalizedSlot)
         }
         val pendingIntent = PendingIntent.getBroadcast(
             context,
@@ -384,6 +416,85 @@ object AlarmScheduler {
     fun cancelPostMealGlucoseAlarm(context: Context) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
         val notificationId = 7701
+        val intent = Intent(context, TaskAndBillAlarmReceiver::class.java)
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            notificationId,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        alarmManager.cancel(pendingIntent)
+    }
+
+    fun syncInsulinScheduleAlarms(
+        context: Context,
+        configs: List<InsulinScheduleConfig>
+    ) {
+        for (cfg in configs) {
+            if (cfg.alarmEnabled) {
+                scheduleSingleInsulinAlarm(context, cfg)
+            } else {
+                cancelInsulinScheduleAlarm(context, cfg.id)
+            }
+        }
+    }
+
+    fun scheduleSingleInsulinAlarm(
+        context: Context,
+        config: InsulinScheduleConfig
+    ): Boolean {
+        if (!config.alarmEnabled) {
+            cancelInsulinScheduleAlarm(context, config.id)
+            return false
+        }
+        ensureNotificationChannel(context)
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return false
+        val appConfig = CustomizationRepository(context).configFlow.value
+        val notificationId = ("insulin_${config.id}").hashCode()
+
+        val todayEpoch = DateCalendarUtils.todayEpochDay()
+        val hour = config.alarmHour.coerceIn(0, 23)
+        val minute = config.alarmMinute.coerceIn(0, 59)
+        var triggerAtMillis = DateCalendarUtils.epochMillisForAlarm(todayEpoch, hour, minute)
+        if (triggerAtMillis <= System.currentTimeMillis()) {
+            triggerAtMillis = DateCalendarUtils.epochMillisForAlarm(todayEpoch + 1L, hour, minute)
+        }
+
+        val timeFormatted = DateCalendarUtils.formatTime(hour, minute)
+        val memberPart = config.memberId.takeIf { it.isNotBlank() }?.let { " • $it" }.orEmpty()
+        val intent = Intent(context, TaskAndBillAlarmReceiver::class.java).apply {
+            putExtra(
+                TaskAndBillAlarmReceiver.EXTRA_TITLE,
+                "💉 Omni • Hora da Insulina: ${config.insulinType} (${config.defaultUnits} UI)"
+            )
+            putExtra(
+                TaskAndBillAlarmReceiver.EXTRA_MESSAGE,
+                "Horário programado: $timeFormatted$memberPart. Lembre-se de alternar o local de aplicação."
+            )
+            putExtra(TaskAndBillAlarmReceiver.EXTRA_NOTIFICATION_ID, notificationId)
+            putExtra(TaskAndBillAlarmReceiver.EXTRA_SOUND_URI, appConfig.taskAlarmSoundUri)
+            putExtra(TaskAndBillAlarmReceiver.EXTRA_VIBRATE, true)
+            putExtra(TaskAndBillAlarmReceiver.EXTRA_IS_BILL, false)
+            putExtra(TaskAndBillAlarmReceiver.EXTRA_IS_INSULIN_ALARM, true)
+            putExtra(TaskAndBillAlarmReceiver.EXTRA_INSULIN_CONFIG_ID, config.id)
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            notificationId,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return try {
+            scheduleExactOrFallback(alarmManager, triggerAtMillis, pendingIntent)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun cancelInsulinScheduleAlarm(context: Context, configId: String) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        val notificationId = ("insulin_$configId").hashCode()
         val intent = Intent(context, TaskAndBillAlarmReceiver::class.java)
         val pendingIntent = PendingIntent.getBroadcast(
             context,
@@ -591,7 +702,8 @@ object AlarmScheduler {
             reminderTimeRaw = config.bloodPressureReminderTime
         )
 
-        val timer = healthRepo.stateFlow.value.postMealTimer
+        val healthState = healthRepo.stateFlow.value
+        val timer = healthState.postMealTimer
         if (timer.isRunning && !timer.isPaused && timer.targetEndEpochMillis > nowMs) {
             schedulePostMealGlucoseAlarm(
                 context = appContext,
@@ -599,6 +711,7 @@ object AlarmScheduler {
                 mealLabel = timer.mealLabel
             )
         }
+        syncInsulinScheduleAlarms(appContext, healthState.insulinConfigs)
     }
 
     fun scheduleMorningSummary(
@@ -672,7 +785,8 @@ object AlarmScheduler {
         message: String,
         soundUriString: String = "",
         vibrate: Boolean = true,
-        isBillReminder: Boolean = false
+        isBillReminder: Boolean = false,
+        openGlucoseSlot: String = ""
     ) {
         val channelId = ensureNotificationChannel(context)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -685,6 +799,10 @@ object AlarmScheduler {
 
         val openAppIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            if (openGlucoseSlot.isNotBlank()) {
+                putExtra(OmniHomeWidgetProvider.EXTRA_WIDGET_ACTION, OmniHomeWidgetProvider.WIDGET_ACTION_OPEN_GLUCOSE)
+                putExtra(TaskAndBillAlarmReceiver.EXTRA_OPEN_GLUCOSE_SLOT, openGlucoseSlot)
+            }
         }
         val contentPendingIntent = PendingIntent.getActivity(
             context,
@@ -712,6 +830,9 @@ object AlarmScheduler {
             putExtra(TaskAndBillAlarmReceiver.EXTRA_SOUND_URI, soundUriString)
             putExtra(TaskAndBillAlarmReceiver.EXTRA_VIBRATE, vibrate)
             putExtra(TaskAndBillAlarmReceiver.EXTRA_IS_BILL, isBillReminder)
+            if (openGlucoseSlot.isNotBlank()) {
+                putExtra(TaskAndBillAlarmReceiver.EXTRA_OPEN_GLUCOSE_SLOT, openGlucoseSlot)
+            }
         }
         val snoozePendingIntent = PendingIntent.getBroadcast(
             context,
@@ -730,6 +851,16 @@ object AlarmScheduler {
             .setAutoCancel(true)
             .setContentIntent(contentPendingIntent)
             .setDeleteIntent(stopPendingIntent)
+
+        if (openGlucoseSlot.isNotBlank()) {
+            builder.addAction(
+                android.R.drawable.ic_input_add,
+                "Registrar Glicemia",
+                contentPendingIntent
+            )
+        }
+
+        builder
             .addAction(
                 android.R.drawable.ic_media_pause,
                 "Parar Alarme",

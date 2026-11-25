@@ -6,6 +6,7 @@ import com.google.firebase.firestore.DocumentId
 import com.google.firebase.firestore.IgnoreExtraProperties
 import com.google.firebase.firestore.ServerTimestamp
 import java.util.Locale
+import java.util.UUID
 
 /**
  * Escopos de privacidade para tarefas da agenda e transações financeiras.
@@ -101,36 +102,41 @@ object EnergyLevel {
 }
 
 /**
- * Slots padrão de medição de Monitoramento de Glicemia (10 períodos diários completos)
+ * Slots oficiais de medição de Monitoramento de Glicemia (6 períodos diários oficiais)
  */
 object DiabetesSlotCatalog {
     const val JEJUM = "Jejum"
-    const val PRE_REFEICAO = "Pré-Refeição"
     const val POS_CAFE_1H = "1h Pós-Café"
-    const val POS_CAFE_2H = "2h Pós-Café"
+    const val ALMOCO = "Almoço"
     const val POS_ALMOCO_1H = "1h Pós-Almoço"
-    const val POS_ALMOCO_2H = "2h Pós-Almoço"
-    const val POS_LANCHE_1H = "1h Pós-Lanche"
-    const val POS_JANTAR_1H = "1h Pós-Jantar"
-    const val POS_JANTAR_2H = "2h Pós-Jantar"
-    const val AO_DEITAR = "Ao Deitar"
+    const val JANTA = "Janta"
+    const val POS_JANTA_1H = "1h Pós-Janta"
 
-    // Aliases legados para compatibilidade
-    const val PRE_ALMOCO = PRE_REFEICAO
-    const val PRE_JANTAR_1H = PRE_REFEICAO
-    const val ANTES_DORMIR = AO_DEITAR
+    // Aliases legados mantidos apontando para os 6 períodos oficiais
+    const val PRE_REFEICAO = ALMOCO
+    const val POS_CAFE_2H = POS_CAFE_1H
+    const val POS_ALMOCO_2H = POS_ALMOCO_1H
+    const val POS_LANCHE_1H = POS_ALMOCO_1H
+    const val POS_JANTAR_1H = POS_JANTA_1H
+    const val POS_JANTAR_2H = POS_JANTA_1H
+    const val AO_DEITAR = POS_JANTA_1H
+    const val PRE_ALMOCO = ALMOCO
+    const val PRE_JANTAR_1H = JANTA
+    const val ANTES_DORMIR = POS_JANTA_1H
 
     val allSlots: List<String> = listOf(
         JEJUM,
-        PRE_REFEICAO,
         POS_CAFE_1H,
-        POS_CAFE_2H,
+        ALMOCO,
         POS_ALMOCO_1H,
-        POS_ALMOCO_2H,
-        POS_LANCHE_1H,
-        POS_JANTAR_1H,
-        POS_JANTAR_2H,
-        AO_DEITAR
+        JANTA,
+        POS_JANTA_1H
+    )
+
+    val postMealTimerSlots: List<String> = listOf(
+        POS_CAFE_1H,
+        POS_ALMOCO_1H,
+        POS_JANTA_1H
     )
 
     val defaultSelectedSlots: Set<String> = allSlots.toSet()
@@ -139,34 +145,214 @@ object DiabetesSlotCatalog {
         val clean = rawSlot.trim().lowercase(Locale.ROOT)
         return when {
             clean == "jejum" -> JEJUM
-            clean.contains("pré") || clean.contains("pre") -> PRE_REFEICAO
-            clean.contains("2h") && (clean.contains("café") || clean.contains("cafe")) -> POS_CAFE_2H
             clean.contains("café") || clean.contains("cafe") -> POS_CAFE_1H
-            clean.contains("2h") && (clean.contains("almoço") || clean.contains("almoco")) -> POS_ALMOCO_2H
-            clean.contains("almoço") || clean.contains("almoco") -> POS_ALMOCO_1H
-            clean.contains("lanche") -> POS_LANCHE_1H
-            clean.contains("2h") && clean.contains("jantar") -> POS_JANTAR_2H
-            clean.contains("jantar") -> POS_JANTAR_1H
-            clean.contains("dormir") || clean.contains("deitar") || clean.contains("madrugada") -> AO_DEITAR
-            else -> rawSlot.ifBlank { JEJUM }
+            (clean.contains("pós") || clean.contains("pos") || clean.contains("1h") || clean.contains("2h")) &&
+                (clean.contains("almoço") || clean.contains("almoco") || clean.contains("lanche")) -> POS_ALMOCO_1H
+            clean.contains("almoço") || clean.contains("almoco") || clean == "pré-refeição" || clean == "pre-refeicao" -> ALMOCO
+            (clean.contains("pós") || clean.contains("pos") || clean.contains("1h") || clean.contains("2h")) &&
+                (clean.contains("janta") || clean.contains("jantar")) -> POS_JANTA_1H
+            clean.contains("dormir") || clean.contains("deitar") || clean.contains("madrugada") -> POS_JANTA_1H
+            clean.contains("janta") || clean.contains("jantar") -> JANTA
+            else -> JEJUM
         }
     }
 
-    fun slotForPostMealTimer(mealLabel: String, durationSeconds: Int): String {
-        val isTwoHours = durationSeconds >= 5400 // >= 90 min maps to 2h slot if 2h exists
+    fun slotForPostMealTimer(mealLabel: String, durationSeconds: Int = 3600): String {
         val cleanMeal = mealLabel.lowercase(Locale.ROOT)
         return when {
-            cleanMeal.contains("café") || cleanMeal.contains("cafe") ->
-                if (isTwoHours) POS_CAFE_2H else POS_CAFE_1H
-            cleanMeal.contains("almoço") || cleanMeal.contains("almoco") ->
-                if (isTwoHours) POS_ALMOCO_2H else POS_ALMOCO_1H
-            cleanMeal.contains("lanche") ->
-                POS_LANCHE_1H
-            cleanMeal.contains("jantar") ->
-                if (isTwoHours) POS_JANTAR_2H else POS_JANTAR_1H
+            cleanMeal.contains("café") || cleanMeal.contains("cafe") -> POS_CAFE_1H
+            cleanMeal.contains("janta") || cleanMeal.contains("jantar") -> POS_JANTA_1H
             else -> POS_ALMOCO_1H
         }
     }
+
+    fun postMealSlotAfterPreMeal(slot: String): String? {
+        return when (normalizeSlot(slot)) {
+            ALMOCO -> POS_ALMOCO_1H
+            JANTA -> POS_JANTA_1H
+            else -> null
+        }
+    }
+
+    fun canTrigger1hTimerFromSlot(slot: String): Boolean {
+        val norm = normalizeSlot(slot)
+        return norm == ALMOCO || norm == JANTA
+    }
+
+    fun postMealSlotForPreMeal(slot: String): String {
+        return postMealSlotAfterPreMeal(slot) ?: POS_ALMOCO_1H
+    }
+}
+
+object GlucoseContextCatalog {
+    val quickContextChips: List<String> = listOf(
+        "Tontura / Suor (Hipo)",
+        "Atrasou refeição",
+        "Doce / Fruta extra",
+        "Estresse / Mal-estar"
+    )
+    val quickTags: List<String> = quickContextChips
+    val quickContexts: List<String> = quickContextChips
+}
+
+object InsulinSiteCatalog {
+    const val ABDOMEN_ESQ = "Abdômen Esq."
+    const val ABDOMEN_DIR = "Abdômen Dir."
+    const val COXA_ESQ = "Coxa Esq."
+    const val COXA_DIR = "Coxa Dir."
+    const val BRACO_ESQ = "Braço Esq."
+    const val BRACO_DIR = "Braço Dir."
+    const val GLUTEO_ESQ = "Glúteo Esq."
+    const val GLUTEO_DIR = "Glúteo Dir."
+
+    val allSites: List<String> = listOf(
+        ABDOMEN_ESQ,
+        ABDOMEN_DIR,
+        COXA_ESQ,
+        COXA_DIR,
+        BRACO_ESQ,
+        BRACO_DIR,
+        GLUTEO_ESQ,
+        GLUTEO_DIR
+    )
+
+    fun normalizeSite(raw: String): String {
+        val clean = raw.trim()
+        return allSites.firstOrNull { it.equals(clean, ignoreCase = true) } ?: ABDOMEN_ESQ
+    }
+
+    fun suggestNextSite(lastSite: String?): String {
+        if (lastSite.isNullOrBlank()) return ABDOMEN_ESQ
+        val idx = allSites.indexOfFirst { it.equals(lastSite.trim(), ignoreCase = true) }
+        if (idx < 0) return ABDOMEN_ESQ
+        return allSites[(idx + 1) % allSites.size]
+    }
+}
+
+object InsulinTypeCatalog {
+    const val BASAL = "Basal (NPH / Glargina)"
+    const val RAPIDA = "Rápida (Regular / Humalog)"
+    const val NPH = "NPH"
+    const val REGULAR = "Regular"
+    const val GLARGINA = "Glargina (Lantus / Basaglar)"
+    const val HUMALOG = "Humalog (Lispro)"
+    const val NOVORAPID = "NovoRapid (Asparte)"
+    const val TRESIBA = "Tresiba (Degludeca)"
+
+    val presetTypes: List<String> = listOf(
+        BASAL,
+        RAPIDA,
+        NPH,
+        REGULAR,
+        GLARGINA,
+        HUMALOG,
+        NOVORAPID,
+        TRESIBA
+    )
+    val presets: List<String> = presetTypes
+}
+
+object SupplyReplenishCatalog {
+    val items: List<String> = listOf(
+        "Agulhas de insulina",
+        "Fitas de glicemia",
+        "Lancetas"
+    )
+}
+
+@Keep
+@IgnoreExtraProperties
+data class InsulinRecord(
+    @DocumentId val id: String = "ins_" + UUID.randomUUID().toString().take(8),
+    val householdId: String = "",
+    val dateIso: String = "",
+    val dateEpochDay: Long = 0L,
+    val timeHHmm: String = "08:00",
+    val insulinType: String = InsulinTypeCatalog.BASAL,
+    val doseUnits: Int = 10,
+    val site: String = InsulinSiteCatalog.ABDOMEN_ESQ,
+    val notes: String = "",
+    val memberId: String = "",
+    val memberName: String = "",
+    val createdAtMillis: Long = System.currentTimeMillis()
+) {
+    val units: Int
+        get() = doseUnits
+
+    val injectionSite: String
+        get() = site
+
+    val timeFormatted: String
+        get() = timeHHmm
+
+    val timestampEpochMillis: Long
+        get() = createdAtMillis
+
+    constructor(
+        id: String = "ins_" + UUID.randomUUID().toString().take(8),
+        dateIso: String,
+        timeFormatted: String,
+        insulinType: String,
+        units: Int,
+        injectionSite: String,
+        memberId: String = "",
+        memberName: String = "",
+        notes: String = "",
+        timestampEpochMillis: Long = System.currentTimeMillis()
+    ) : this(
+        id = id,
+        householdId = "",
+        dateIso = dateIso,
+        dateEpochDay = runCatching { java.time.LocalDate.parse(dateIso).toEpochDay() }.getOrDefault(DateCalendarUtils.todayEpochDay()),
+        timeHHmm = timeFormatted,
+        insulinType = insulinType,
+        doseUnits = units,
+        site = InsulinSiteCatalog.normalizeSite(injectionSite),
+        notes = notes,
+        memberId = memberId,
+        memberName = memberName,
+        createdAtMillis = timestampEpochMillis
+    )
+}
+
+@Keep
+@IgnoreExtraProperties
+data class InsulinScheduleConfig(
+    val id: String = "inscfg_" + UUID.randomUUID().toString().take(8),
+    val insulinType: String = InsulinTypeCatalog.BASAL,
+    val defaultDoseUnits: Int = 10,
+    val fixedTimeHHmm: String = "08:00",
+    val alarmEnabled: Boolean = true,
+    val memberId: String = "",
+    val memberName: String = ""
+) {
+    val defaultUnits: Int
+        get() = defaultDoseUnits
+
+    val alarmHour: Int
+        get() = fixedTimeHHmm.substringBefore(":").toIntOrNull()?.coerceIn(0, 23) ?: 8
+
+    val alarmMinute: Int
+        get() = fixedTimeHHmm.substringAfter(":", "0").toIntOrNull()?.coerceIn(0, 59) ?: 0
+
+    constructor(
+        id: String = "inscfg_" + UUID.randomUUID().toString().take(8),
+        insulinType: String,
+        defaultUnits: Int,
+        alarmHour: Int,
+        alarmMinute: Int,
+        alarmEnabled: Boolean = true,
+        memberId: String = "",
+        memberName: String = ""
+    ) : this(
+        id = id,
+        insulinType = insulinType,
+        defaultDoseUnits = defaultUnits,
+        fixedTimeHHmm = String.format(Locale.ROOT, "%02d:%02d", alarmHour.coerceIn(0, 23), alarmMinute.coerceIn(0, 59)),
+        alarmEnabled = alarmEnabled,
+        memberId = memberId,
+        memberName = memberName
+    )
 }
 
 /**
@@ -422,6 +608,9 @@ data class Household(
     val categoryBudgetsBrl: Map<String, Double> = emptyMap(),
     val customCategories: List<String> = emptyList(),
     val muralItems: List<FamilyMuralItem> = emptyList(),
+    val insulinConfigs: List<InsulinScheduleConfig> = emptyList(),
+    val pregnancyDppDate: String = "",
+    val pregnancyComparisonMode: String = "TODOS",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
