@@ -82,6 +82,124 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
+import android.content.ContextWrapper
+import android.content.pm.PackageManager
+import android.os.Build
+import android.widget.Toast
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.credentials.exceptions.GetCredentialException
+import com.google.android.gms.common.api.ApiException
+import com.google.firebase.auth.FirebaseAuthException
+import java.security.MessageDigest
+
+private const val FALLBACK_WEB_CLIENT_ID =
+    "725763199828-ianl05t6nnsprgotnvt896cmgvcq7kb7.apps.googleusercontent.com"
+
+private fun Context.findActivity(): Activity? {
+    var current: Context? = this
+    while (current is ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return current as? Activity
+}
+
+private fun resolveServerClientId(context: Context): String {
+    val fromRes = runCatching {
+        context.getString(R.string.default_web_client_id).trim()
+    }.getOrDefault("")
+    return if (fromRes.isNotBlank() && fromRes.endsWith(".apps.googleusercontent.com")) {
+        fromRes
+    } else {
+        FALLBACK_WEB_CLIENT_ID
+    }
+}
+
+@Suppress("DEPRECATION")
+fun getCurrentApkSha1Fingerprint(context: Context): String {
+    return runCatching {
+        val pm = context.packageManager
+        val pkgName = context.packageName
+        val certBytes: ByteArray? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val info = pm.getPackageInfo(pkgName, PackageManager.GET_SIGNING_CERTIFICATES)
+            val signingInfo = info.signingInfo
+            val signatures = if (signingInfo != null) {
+                if (signingInfo.hasMultipleSigners()) {
+                    signingInfo.apkContentsSigners
+                } else {
+                    signingInfo.signingCertificateHistory
+                }
+            } else null
+            signatures?.firstOrNull()?.toByteArray()
+        } else {
+            val info = pm.getPackageInfo(pkgName, PackageManager.GET_SIGNATURES)
+            info.signatures?.firstOrNull()?.toByteArray()
+        }
+        if (certBytes == null) return@runCatching "Indisponível"
+        val md = MessageDigest.getInstance("SHA-1")
+        val digest = md.digest(certBytes)
+        digest.joinToString(":") { b -> String.format("%02X", b) }
+    }.getOrDefault("Indisponível")
+}
+
+private fun buildDetailedAuthErrorMessage(
+    context: Context,
+    error: Throwable,
+    clientIdUsed: String,
+    wasCancellationException: Boolean = false
+): String {
+    val sha1 = getCurrentApkSha1Fingerprint(context)
+    val className = error::class.java.simpleName
+    val credType = (error as? GetCredentialException)?.type.orEmpty()
+    val credErrMsg = (error as? GetCredentialException)?.errorMessage?.toString().orEmpty()
+
+    var apiStatusCode: Int? = null
+    var firebaseErrorCode: String? = null
+    var causeCursor: Throwable? = error
+    while (causeCursor != null) {
+        if (causeCursor is ApiException && apiStatusCode == null) {
+            apiStatusCode = causeCursor.statusCode
+        }
+        if (causeCursor is FirebaseAuthException && firebaseErrorCode == null) {
+            firebaseErrorCode = causeCursor.errorCode
+        }
+        causeCursor = causeCursor.cause
+    }
+
+    val rawMessage = credErrMsg.ifBlank {
+        error.localizedMessage ?: error.message ?: "Sem mensagem adicional"
+    }
+
+    val codeParts = mutableListOf<String>()
+    codeParts.add(className)
+    if (credType.isNotBlank()) codeParts.add("type=$credType")
+    if (apiStatusCode != null) codeParts.add("ApiException statusCode=$apiStatusCode")
+    if (!firebaseErrorCode.isNullOrBlank()) codeParts.add("FirebaseAuth=$firebaseErrorCode")
+
+    val header = if (wasCancellationException) {
+        "⚠️ O seletor do Google foi fechado ou recusou o token (${codeParts.joinToString(" • ")})."
+    } else {
+        "❌ Falha no Login com Google (${codeParts.joinToString(" • ")})."
+    }
+
+    val clientIdSuffix = clientIdUsed.takeLast(34)
+    return buildString {
+        appendLine(header)
+        appendLine("Detalhe: $rawMessage")
+        appendLine("SHA-1 deste APK: $sha1")
+        appendLine("Web Client ID: ...$clientIdSuffix")
+        append(
+            "Dica: Se o seletor fecha após escolher o e-mail, confira se o SHA-1 acima está cadastrado no Firebase Console (Configurações do Projeto -> app Android com.auramanager.app)."
+        )
+    }
+}
+
 fun attemptAutoSignIn(
     context: Context,
     credentialManager: CredentialManager,
@@ -93,12 +211,7 @@ fun attemptAutoSignIn(
         onAuthSuccess()
         return
     }
-    val clientId = try {
-        context.getString(R.string.default_web_client_id).trim()
-    } catch (_: Exception) {
-        onUnauthenticated()
-        return
-    }
+    val clientId = resolveServerClientId(context)
     if (clientId.isBlank()) {
         onUnauthenticated()
         return
@@ -113,7 +226,8 @@ fun attemptAutoSignIn(
         .build()
     scope.launch {
         try {
-            val cred = credentialManager.getCredential(context, request).credential
+            val activityContext = context.findActivity() ?: context
+            val cred = credentialManager.getCredential(activityContext, request).credential
             if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
                 Firebase.auth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
@@ -121,7 +235,8 @@ fun attemptAutoSignIn(
             } else {
                 onUnauthenticated()
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("Auth", "Auto sign-in skipped: ${e::class.java.simpleName}: ${e.message}")
             onUnauthenticated()
         }
     }
@@ -135,40 +250,79 @@ fun onGoogleSignInClicked(
     scope: CoroutineScope,
     onAuthCancelled: () -> Unit = {}
 ) {
-    val clientId = try {
-        context.getString(R.string.default_web_client_id).trim()
-    } catch (_: Exception) {
-        onAuthError("Configuração Google Sign-In ausente (default_web_client_id)")
-        return
-    }
+    val clientId = resolveServerClientId(context)
     if (clientId.isBlank()) {
-        onAuthError("Web Client ID ausente no google-services.json. Você pode entrar agora tocando em 'Fazer login depois' abaixo.")
+        onAuthError("Web Client ID ausente no google-services.json (default_web_client_id).")
         return
     }
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
-    val request = GetCredentialRequest.Builder()
+    val primaryRequest = GetCredentialRequest.Builder()
         .addCredentialOption(signInOption)
         .build()
+
     scope.launch {
+        val activity = context.findActivity()
+        if (activity == null) {
+            onAuthError("Contexto de Activity indisponível para abrir o seletor de contas Google.")
+            return@launch
+        }
+
         try {
-            val activity = context as? Activity ?: run {
-                onAuthError("Contexto de Activity indisponível para login")
-                return@launch
+            val cred = try {
+                credentialManager.getCredential(activity, primaryRequest).credential
+            } catch (primaryEx: Exception) {
+                Log.w(
+                    "Auth",
+                    "GetSignInWithGoogleOption falhou (${primaryEx::class.java.simpleName}: ${primaryEx.message}); tentando fallback GetGoogleIdOption...",
+                    primaryEx
+                )
+                // Se o primeiro método falhar (ex: incompatibilidade do provedor), tenta GetGoogleIdOption com filterByAuthorizedAccounts = false
+                val fallbackOption = GetGoogleIdOption.Builder()
+                    .setFilterByAuthorizedAccounts(false)
+                    .setServerClientId(clientId)
+                    .setAutoSelectEnabled(false)
+                    .build()
+                val fallbackRequest = GetCredentialRequest.Builder()
+                    .addCredentialOption(fallbackOption)
+                    .build()
+                try {
+                    credentialManager.getCredential(activity, fallbackRequest).credential
+                } catch (_: Exception) {
+                    throw primaryEx
+                }
             }
-            val cred = credentialManager.getCredential(activity, request).credential
+
             if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
+                val googleIdTokenCred = GoogleIdTokenCredential.createFrom(cred.data)
+                val token = googleIdTokenCred.idToken
+                if (token.isBlank()) {
+                    onAuthError("O Google retornou um ID Token vazio. Verifique o Web Client ID e o SHA-1 no Firebase.")
+                    return@launch
+                }
                 Firebase.auth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
                 onAuthSuccess()
             } else {
-                onAuthError("Tipo de credencial inesperado")
+                onAuthError("Tipo de credencial inesperado retornado pelo Credential Manager: ${cred.type}")
             }
         } catch (e: GetCredentialCancellationException) {
-            Log.w("Auth", "Google Sign-In flow cancelled or dismissed: ${e.message}", e)
+            Log.e("Auth", "Google Sign-In cancelled or rejected by Play Services: ${e.type} / ${e.message}", e)
+            val detailed = buildDetailedAuthErrorMessage(
+                context = context,
+                error = e,
+                clientIdUsed = clientId,
+                wasCancellationException = true
+            )
             onAuthCancelled()
+            onAuthError(detailed)
         } catch (e: Exception) {
-            Log.e("Auth", "Google Sign-In failed", e)
-            onAuthError(e.localizedMessage ?: "Falha ao autenticar com o Google")
+            Log.e("Auth", "Google Sign-In failed: ${e::class.java.simpleName} / ${e.message}", e)
+            val detailed = buildDetailedAuthErrorMessage(
+                context = context,
+                error = e,
+                clientIdUsed = clientId,
+                wasCancellationException = false
+            )
+            onAuthError(detailed)
         }
     }
 }
@@ -198,11 +352,14 @@ fun AuthScreen(
     onSkipLogin: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
+    val snackbarHostState = remember { SnackbarHostState() }
     val cardRadius = LocalOrganicCardRadius.current
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    val apkSha1 = remember(context) { getCurrentApkSha1Fingerprint(context) }
 
     LaunchedEffect(Unit) {
         attemptAutoSignIn(
@@ -214,13 +371,14 @@ fun AuthScreen(
         )
     }
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
-    ) {
+    Scaffold(
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+        containerColor = MaterialTheme.colorScheme.background
+    ) { innerPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .padding(innerPadding)
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
@@ -334,19 +492,49 @@ fun AuthScreen(
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(bottom = 14.dp),
+                            .padding(bottom = 14.dp)
+                            .testTag("google_sign_in_error_card"),
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.errorContainer
                         ),
                         shape = RoundedCornerShape(22.dp)
                     ) {
-                        Text(
-                            text = errorMessage!!,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.padding(14.dp),
-                            textAlign = TextAlign.Center
-                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = errorMessage!!,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                textAlign = TextAlign.Start
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(apkSha1))
+                                        Toast.makeText(context, "SHA-1 copiado: $apkSha1", Toast.LENGTH_LONG).show()
+                                    },
+                                    shape = RoundedCornerShape(50)
+                                ) {
+                                    Text("Copiar SHA-1", style = MaterialTheme.typography.labelSmall)
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        clipboardManager.setText(AnnotatedString(errorMessage.orEmpty()))
+                                        Toast.makeText(context, "Diagnóstico completo copiado!", Toast.LENGTH_SHORT).show()
+                                    },
+                                    shape = RoundedCornerShape(50)
+                                ) {
+                                    Text("Copiar Erro", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -365,6 +553,12 @@ fun AuthScreen(
                             onAuthError = { msg ->
                                 isLoading = false
                                 errorMessage = msg
+                                scope.launch {
+                                    snackbarHostState.showSnackbar(
+                                        message = msg.lines().firstOrNull() ?: "Falha no login Google",
+                                        duration = SnackbarDuration.Long
+                                    )
+                                }
                             },
                             scope = scope,
                             onAuthCancelled = {

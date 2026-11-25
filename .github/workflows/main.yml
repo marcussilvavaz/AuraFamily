@@ -229,6 +229,19 @@ jobs:
           cp "$APK_SOURCE" "${GITHUB_WORKSPACE}/Omni.apk"
           ls -lh "${GITHUB_WORKSPACE}/Omni.apk"
 
+          echo "============================================================"
+          echo "Impressão digital pública (SHA-1 / SHA-256) do Omni.apk:"
+          CERT_OUT=$(keytool -printcert -jarfile "${GITHUB_WORKSPACE}/Omni.apk" 2>/dev/null | grep -iE "SHA1:|SHA-1:|SHA256:" || true)
+          if [ -n "$CERT_OUT" ]; then
+            echo "$CERT_OUT"
+          else
+            APKSIGNER_BIN=$(find "$ANDROID_HOME/build-tools" -name "apksigner" 2>/dev/null | sort -V | tail -n 1 || true)
+            if [ -n "$APKSIGNER_BIN" ]; then
+              "$APKSIGNER_BIN" verify --print-certs "${GITHUB_WORKSPACE}/Omni.apk" | grep -iE "SHA-1|SHA-256" || true
+            fi
+          fi
+          echo "============================================================"
+
       - name: Upload Omni.apk Artifact
         uses: actions/upload-artifact@v4
         with:
