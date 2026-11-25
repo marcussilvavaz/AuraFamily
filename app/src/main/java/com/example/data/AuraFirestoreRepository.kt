@@ -297,21 +297,53 @@ class AuraFirestoreRepository(
                 .ifBlank { "OM" }
             val resolvedAvatarBase64 = avatarBase64Raw.ifBlank { existingUserProfile?.avatarBase64.orEmpty() }
 
-            // 1. Consultar todas as famílias na coleção households para descobrir famílias existentes do usuário
-            // (ignorando documentos que já tenham o campo migratedTo preenchido)
+            // 1. Consultar famílias do usuário usando exclusivamente queries filtradas compatíveis com Security Rules
+            // (NUNCA fazer listagem aberta db.collection("households").get() sem filtro)
             currentPath = "households"
-            val allHouseholdsSnap = runCatching { db.collection("households").get().await() }.getOrNull()
-            val activeHouseholdDocs = allHouseholdsSnap?.documents.orEmpty().filter { doc ->
+            val userGeneratedCode = defaultHouseholdIdForUser(uid)
+            val ownedHouseholdsSnap = runCatching {
+                db.collection("households").whereEqualTo("ownerId", uid).get().await()
+            }.getOrNull()
+            val memberHouseholdsSnap = runCatching {
+                db.collection("households").whereArrayContains("memberUids", uid).get().await()
+            }.getOrNull()
+            val profileHouseholdSnap = existingUserProfile?.householdId?.takeIf { it.isNotBlank() }?.let { savedId ->
+                runCatching { db.collection("households").document(savedId).get().await() }.getOrNull()
+            }
+            val directOfficialSnap = runCatching {
+                db.collection("households").document(OFFICIAL_HOUSEHOLD_ID).get().await()
+            }.getOrNull()
+            val directLegacyDupSnap = runCatching {
+                db.collection("households").document(LEGACY_DUPLICATE_HOUSEHOLD_ID).get().await()
+            }.getOrNull()
+            val directGeneratedSnap = runCatching {
+                db.collection("households").document(userGeneratedCode).get().await()
+            }.getOrNull()
+
+            val discoveredById = linkedMapOf<String, DocumentSnapshot>()
+            fun recordIfValid(doc: DocumentSnapshot?) {
+                if (doc != null && doc.exists()) {
+                    discoveredById[doc.id] = doc
+                }
+            }
+            ownedHouseholdsSnap?.documents?.forEach { recordIfValid(it) }
+            memberHouseholdsSnap?.documents?.forEach { recordIfValid(it) }
+            recordIfValid(profileHouseholdSnap)
+            recordIfValid(directOfficialSnap)
+            recordIfValid(directLegacyDupSnap)
+            recordIfValid(directGeneratedSnap)
+
+            val activeHouseholdDocs = discoveredById.values.filter { doc ->
                 val migratedTo = doc.getString("migratedTo")?.trim().orEmpty()
                 migratedTo.isBlank()
             }
 
-            // Identificar famílias ligadas ao usuário (por ownerId, members, userProfile.householdId ou FAM_OMNI2448 / FAM_SKRKRVKS)
-            val userGeneratedCode = defaultHouseholdIdForUser(uid)
+            // Identificar famílias ligadas ao usuário (por ownerId, memberUids, members, userProfile.householdId ou FAM_OMNI2448 / FAM_SKRKRVKS)
             val candidateDocs = activeHouseholdDocs.filter { doc ->
                 val house = doc.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                 val docId = doc.id
                 val matchesOwner = house?.ownerId == uid
+                val matchesMemberUid = house?.memberUids?.contains(uid) == true
                 val matchesMember = house?.members?.any { m ->
                     m.userId == uid ||
                         (userEmail.isNotBlank() && m.email.equals(userEmail, ignoreCase = true)) ||
@@ -322,18 +354,19 @@ class AuraFirestoreRepository(
                 val matchesKnownOfficialOrDup = docId == OFFICIAL_HOUSEHOLD_ID ||
                     docId == LEGACY_DUPLICATE_HOUSEHOLD_ID ||
                     docId == userGeneratedCode
-                matchesOwner || matchesMember || matchesProfileHouse || matchesKnownOfficialOrDup
+                matchesOwner || matchesMemberUid || matchesMember || matchesProfileHouse || matchesKnownOfficialOrDup
             }
 
             // Determinar a família oficial alvo:
-            // Se FAM_OMNI2448 existir (na lista ativa ou consulta direta), ela é SEMPRE a família oficial alvo.
-            val directOfficialSnap = runCatching {
-                db.collection("households").document(OFFICIAL_HOUSEHOLD_ID).get().await()
-            }.getOrNull()
+            // Se FAM_OMNI2448 estiver acessível para este usuário (ou se veio de FAM_SKRKRVKS), ela é a família oficial alvo.
+            val canUseOfficialHousehold = (directOfficialSnap != null && directOfficialSnap.exists() &&
+                directOfficialSnap.getString("migratedTo").isNullOrBlank()) ||
+                (directLegacyDupSnap != null && directLegacyDupSnap.exists()) ||
+                existingUserProfile?.householdId == OFFICIAL_HOUSEHOLD_ID ||
+                existingUserProfile?.householdId == LEGACY_DUPLICATE_HOUSEHOLD_ID
 
             val primaryHouseholdId: String = when {
-                directOfficialSnap != null && directOfficialSnap.exists() &&
-                    directOfficialSnap.getString("migratedTo").isNullOrBlank() -> OFFICIAL_HOUSEHOLD_ID
+                canUseOfficialHousehold -> OFFICIAL_HOUSEHOLD_ID
                 candidateDocs.any { it.id == OFFICIAL_HOUSEHOLD_ID } -> OFFICIAL_HOUSEHOLD_ID
                 candidateDocs.isNotEmpty() -> {
                     // Priorizar família que não seja o código auto-gerado FAM_<UID> se houver outra, ou a que tiver mais membros
@@ -349,14 +382,18 @@ class AuraFirestoreRepository(
                 existingUserProfile?.householdId?.isNotBlank() == true &&
                     existingUserProfile.householdId != LEGACY_DUPLICATE_HOUSEHOLD_ID -> {
                     val savedId = existingUserProfile.householdId
-                    val savedSnap = runCatching { db.collection("households").document(savedId).get().await() }.getOrNull()
+                    val savedSnap = profileHouseholdSnap
+                        ?: runCatching { db.collection("households").document(savedId).get().await() }.getOrNull()
                     if (savedSnap != null && savedSnap.exists() && !savedSnap.getString("migratedTo").isNullOrBlank()) {
                         savedSnap.getString("migratedTo")!!.trim()
-                    } else {
+                    } else if (savedSnap != null) {
                         savedId
+                    } else {
+                        userGeneratedCode
                     }
                 }
-                else -> OFFICIAL_HOUSEHOLD_ID
+                directOfficialSnap != null && !directOfficialSnap.exists() -> OFFICIAL_HOUSEHOLD_ID
+                else -> userGeneratedCode
             }
 
             // 2. Fusão Segura Automática: se existirem famílias duplicadas (ex.: FAM_SKRKRVKS ou FAM_<UID>) além da oficial
@@ -369,14 +406,12 @@ class AuraFirestoreRepository(
 
             // Garantir verificação direta do documento FAM_SKRKRVKS mesmo que não tenha vindo no filtro
             if (primaryHouseholdId == OFFICIAL_HOUSEHOLD_ID &&
-                duplicateDocsToFuse.none { it.id == LEGACY_DUPLICATE_HOUSEHOLD_ID }
+                duplicateDocsToFuse.none { it.id == LEGACY_DUPLICATE_HOUSEHOLD_ID } &&
+                directLegacyDupSnap != null &&
+                directLegacyDupSnap.exists() &&
+                directLegacyDupSnap.getString("migratedTo").isNullOrBlank()
             ) {
-                val dupSnap = runCatching {
-                    db.collection("households").document(LEGACY_DUPLICATE_HOUSEHOLD_ID).get().await()
-                }.getOrNull()
-                if (dupSnap != null && dupSnap.exists() && dupSnap.getString("migratedTo").isNullOrBlank()) {
-                    duplicateDocsToFuse.add(dupSnap)
-                }
+                duplicateDocsToFuse.add(directLegacyDupSnap)
             }
 
             for (dupDoc in duplicateDocsToFuse) {
@@ -388,7 +423,7 @@ class AuraFirestoreRepository(
                 }
             }
 
-            // 3. Atualizar ou criar o documento users/{uid} apontando para primaryHouseholdId e sem "Você" / "VO"
+            // 3. Atualizar ou criar apenas o documento users/{uid} do próprio usuário autenticado apontando para primaryHouseholdId
             val finalProfile = UserProfile(
                 id = uid,
                 userId = uid,
@@ -427,10 +462,10 @@ class AuraFirestoreRepository(
             }
             userDocRef.set(userPayload, SetOptions.merge()).await()
 
-            // 4. Garantir documento households/{primaryHouseholdId} normalizado (sem "Você"/"VO", sem acc_cash com limite, 60/20/20)
+            // 4. Garantir documento households/{primaryHouseholdId} normalizado com memberUids e inviteOpen
             val houseRef = db.collection("households").document(primaryHouseholdId)
             currentPath = houseRef.path
-            val houseSnap = houseRef.get().await()
+            val houseSnap = runCatching { houseRef.get().await() }.getOrNull()
             val myBadge = FamilyMemberBadge(
                 userId = uid,
                 displayName = finalProfile.displayName,
@@ -442,16 +477,19 @@ class AuraFirestoreRepository(
                 isCurrentUser = true
             )
 
-            if (!houseSnap.exists()) {
+            if (houseSnap == null || !houseSnap.exists()) {
                 val defaultFamilyName = if (primaryHouseholdId == OFFICIAL_HOUSEHOLD_ID) {
                     "Família Vaz"
                 } else {
                     "Família ${finalProfile.displayName.split(" ").firstOrNull() ?: "Omni"}"
                 }
+                val initialMemberUids = extractValidMemberUids(listOf(myBadge), emptyList(), uid)
                 val housePayload = mapOf(
                     "householdId" to primaryHouseholdId,
                     "name" to defaultFamilyName,
                     "ownerId" to uid,
+                    "memberUids" to initialMemberUids,
+                    "inviteOpen" to false,
                     "monthlyIncomeBrl" to 0.0,
                     "needsPercentage" to 60L,
                     "wantsPercentage" to 20L,
@@ -486,9 +524,16 @@ class AuraFirestoreRepository(
                     val needsPct = if (isLegacy503020) 60L else existingHouse.needsPercentage
                     val wantsPct = if (isLegacy503020) 20L else existingHouse.wantsPercentage
                     val savingsPct = if (isLegacy503020) 20L else existingHouse.savingsPercentage
+                    val syncedMemberUids = extractValidMemberUids(
+                        members = normalizedMembers,
+                        existingMemberUids = existingHouse.memberUids,
+                        uid,
+                        existingHouse.ownerId
+                    )
 
                     val updates = mutableMapOf<String, Any>(
                         "householdId" to primaryHouseholdId,
+                        "memberUids" to FieldValue.arrayUnion(*syncedMemberUids.toTypedArray()),
                         "members" to memberBadgesToFirestoreList(normalizedMembers),
                         "bankAccounts" to bankAccountsToFirestoreList(sanitizedAccounts),
                         "muralItems" to muralItemsToFirestoreList(cleanMural),
@@ -497,6 +542,9 @@ class AuraFirestoreRepository(
                         "savingsPercentage" to savingsPct,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
+                    if (!houseSnap.contains("inviteOpen")) {
+                        updates["inviteOpen"] = false
+                    }
                     houseRef.set(updates, SetOptions.merge()).await()
                 }
             }
@@ -645,8 +693,18 @@ class AuraFirestoreRepository(
                 dupHouse.muralItems.filterNot { it.id in existingMuralIds })
                 .filterNot { it.id.startsWith("mural_seed_") }
 
+            val currentUid = auth.currentUser?.uid?.trim().orEmpty()
+            val syncedMemberUids = extractValidMemberUids(
+                members = mergedMembers,
+                existingMemberUids = targetHouse?.memberUids.orEmpty() + dupHouse.memberUids,
+                currentUid,
+                targetHouse?.ownerId.orEmpty(),
+                dupHouse.ownerId
+            )
+
             val mergePayload = mutableMapOf<String, Any>(
                 "householdId" to targetHouseholdId,
+                "memberUids" to FieldValue.arrayUnion(*syncedMemberUids.toTypedArray()),
                 "members" to memberBadgesToFirestoreList(mergedMembers),
                 "bankAccounts" to bankAccountsToFirestoreList(mergedAccounts),
                 "customCategories" to mergedCategories,
@@ -654,19 +712,18 @@ class AuraFirestoreRepository(
                 "muralItems" to muralItemsToFirestoreList(mergedMural),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
+            if (!targetSnap.contains("inviteOpen")) {
+                mergePayload["inviteOpen"] = false
+            }
             if ((targetHouse?.monthlyIncomeBrl ?: 0.0) <= 0.0 && dupHouse.monthlyIncomeBrl > 0.0 && dupHouse.monthlyIncomeBrl != 8500.0) {
                 mergePayload["monthlyIncomeBrl"] = dupHouse.monthlyIncomeBrl
             }
             targetRef.set(mergePayload, SetOptions.merge()).await()
 
-            // Atualizar users/{uid} de membros vinculados à família antiga
-            val memberUids = (dupHouse.members.map { it.userId } + dupHouse.ownerId)
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && !it.startsWith("mem_") && it != LocalOfflineStore.LOCAL_USER_ID }
-                .distinct()
-            for (memberUid in memberUids) {
+            // Atualizar APENAS o documento users/{currentUid} do próprio usuário autenticado (nunca gravar em users/{otherUid} de terceiros)
+            if (currentUid.isNotEmpty()) {
                 runCatching {
-                    db.collection("users").document(memberUid)
+                    db.collection("users").document(currentUid)
                         .set(
                             mapOf(
                                 "householdId" to targetHouseholdId,
@@ -679,13 +736,32 @@ class AuraFirestoreRepository(
         }
 
         // Marcar documento duplicado com migratedTo = targetHouseholdId sem apagá-lo
-        dupRef.set(
-            mapOf(
-                "migratedTo" to targetHouseholdId,
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            SetOptions.merge()
-        ).await()
+        val currentUidForDup = auth.currentUser?.uid?.trim().orEmpty()
+        val dupUpdates = mutableMapOf<String, Any>(
+            "migratedTo" to targetHouseholdId,
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        if (currentUidForDup.isNotEmpty()) {
+            dupUpdates["memberUids"] = FieldValue.arrayUnion(currentUidForDup)
+        }
+        dupRef.set(dupUpdates, SetOptions.merge()).await()
+    }
+
+    private fun extractValidMemberUids(
+        members: List<FamilyMemberBadge>,
+        existingMemberUids: List<String> = emptyList(),
+        vararg extraUids: String
+    ): List<String> {
+        return (extraUids.toList() + existingMemberUids + members.map { it.userId })
+            .map { it.trim() }
+            .filter {
+                it.isNotEmpty() &&
+                    !it.startsWith("mem_") &&
+                    it != LocalOfflineStore.LOCAL_USER_ID &&
+                    it != "local_offline_user" &&
+                    it != "member_admin"
+            }
+            .distinct()
     }
 
     /**
@@ -843,8 +919,15 @@ class AuraFirestoreRepository(
                             m
                         }
                     }
+                    val syncedMemberUids = extractValidMemberUids(
+                        members = updatedMembers,
+                        existingMemberUids = existingHouse.memberUids,
+                        uid,
+                        existingHouse.ownerId
+                    )
                     houseRef.set(
                         mapOf(
+                            "memberUids" to FieldValue.arrayUnion(*syncedMemberUids.toTypedArray()),
                             "members" to memberBadgesToFirestoreList(updatedMembers),
                             "updatedAt" to FieldValue.serverTimestamp()
                         ),
@@ -934,8 +1017,15 @@ class AuraFirestoreRepository(
                         currentEmoji = cleanEmoji,
                         currentRole = validRole
                     )
+                    val syncedMemberUids = extractValidMemberUids(
+                        members = normalized,
+                        existingMemberUids = existingHouse.memberUids,
+                        uid,
+                        existingHouse.ownerId
+                    )
                     houseRef.set(
                         mapOf(
+                            "memberUids" to FieldValue.arrayUnion(*syncedMemberUids.toTypedArray()),
                             "members" to memberBadgesToFirestoreList(normalized),
                             "updatedAt" to FieldValue.serverTimestamp()
                         ),
@@ -979,7 +1069,40 @@ class AuraFirestoreRepository(
         }
     }
 
-    suspend fun switchOrJoinHousehold(newHouseholdCodeRaw: String, familyNameRaw: String): Result<String> {
+    suspend fun updateHouseholdInviteOpen(
+        householdId: String,
+        inviteOpen: Boolean
+    ): Result<Unit> {
+        localStore?.updateHouseholdInviteOpen(inviteOpen)
+        if (isLocalOfflineMode() || householdId.isBlank()) {
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            val uid = requireUserId()
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.update(
+                mapOf(
+                    "inviteOpen" to inviteOpen,
+                    "memberUids" to FieldValue.arrayUnion(uid),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun switchOrJoinHousehold(
+        newHouseholdCodeRaw: String,
+        familyNameRaw: String,
+        isCreatingNewFamily: Boolean = false
+    ): Result<String> {
         if (isLocalOfflineMode()) {
             val targetCode = sanitizeHouseholdCode(newHouseholdCodeRaw)
             val savedCode = localStore!!.switchHousehold(targetCode, familyNameRaw)
@@ -999,15 +1122,6 @@ class AuraFirestoreRepository(
             val userSnap = userRef.get().await()
             val userProf = userSnap.toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
             val cleanMemberName = resolveRealAuthenticatedName(userProf?.displayName)
-            userRef.set(
-                mapOf(
-                    "householdId" to targetHouseholdId,
-                    "displayName" to cleanMemberName,
-                    "email" to userEmail,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                ),
-                SetOptions.merge()
-            ).await()
 
             val myMemberBadge = FamilyMemberBadge(
                 userId = uid,
@@ -1022,12 +1136,29 @@ class AuraFirestoreRepository(
 
             val houseRef = db.collection("households").document(targetHouseholdId)
             currentPath = houseRef.path
-            val snap = houseRef.get().await()
+
+            val closedOrInvalidMessage =
+                "Convite fechado ou código inválido. Peça para um membro da família ativar 'Aceitar novos membros' no Perfil."
+
+            val snap = try {
+                houseRef.get().await()
+            } catch (e: FirebaseFirestoreException) {
+                if (e.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+                    return Result.failure(IllegalStateException(closedOrInvalidMessage))
+                }
+                throw e
+            }
+
             if (!snap.exists()) {
+                if (!isCreatingNewFamily) {
+                    return Result.failure(IllegalStateException(closedOrInvalidMessage))
+                }
                 val housePayload = mapOf(
                     "householdId" to targetHouseholdId,
                     "name" to familyName,
                     "ownerId" to uid,
+                    "memberUids" to listOf(uid),
+                    "inviteOpen" to false,
                     "monthlyIncomeBrl" to 0.0,
                     "needsPercentage" to 60L,
                     "wantsPercentage" to 20L,
@@ -1041,32 +1172,60 @@ class AuraFirestoreRepository(
                 houseRef.set(housePayload, SetOptions.merge()).await()
             } else {
                 val existingHouse = snap.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                if (existingHouse != null) {
-                    val normalized = normalizeHouseholdMembersList(
-                        rawMembers = existingHouse.members,
-                        currentUid = uid,
-                        currentName = cleanMemberName,
-                        currentEmail = userEmail,
-                        currentAvatarBase64 = userProf?.avatarBase64.orEmpty(),
-                        currentColorHex = userProf?.memberColorHex ?: 0xFF0E7C5B,
-                        currentEmoji = userProf?.avatarEmoji?.ifBlank { "🌿" } ?: "🌿",
-                        currentRole = userProf?.memberRole?.ifBlank { "ADMIN" } ?: "ADMIN"
-                    )
-                    runCatching {
-                        houseRef.set(
-                            mapOf(
-                                "members" to memberBadgesToFirestoreList(normalized),
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            ),
-                            SetOptions.merge()
-                        ).await()
+                    ?: return Result.failure(IllegalStateException(closedOrInvalidMessage))
+
+                val isAlreadyMemberOrOwner = existingHouse.ownerId == uid ||
+                    existingHouse.memberUids.contains(uid) ||
+                    existingHouse.members.any { it.userId == uid }
+
+                if (!isAlreadyMemberOrOwner && !existingHouse.inviteOpen) {
+                    return Result.failure(IllegalStateException(closedOrInvalidMessage))
+                }
+
+                val normalized = normalizeHouseholdMembersList(
+                    rawMembers = existingHouse.members,
+                    currentUid = uid,
+                    currentName = cleanMemberName,
+                    currentEmail = userEmail,
+                    currentAvatarBase64 = userProf?.avatarBase64.orEmpty(),
+                    currentColorHex = userProf?.memberColorHex ?: 0xFF0E7C5B,
+                    currentEmoji = userProf?.avatarEmoji?.ifBlank { "🌿" } ?: "🌿",
+                    currentRole = userProf?.memberRole?.ifBlank { "ADMIN" } ?: "ADMIN"
+                )
+                try {
+                    houseRef.update(
+                        mapOf(
+                            "memberUids" to FieldValue.arrayUnion(uid),
+                            "members" to memberBadgesToFirestoreList(normalized),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                } catch (e: FirebaseFirestoreException) {
+                    if (e.code == FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+                        return Result.failure(IllegalStateException(closedOrInvalidMessage))
                     }
+                    throw e
                 }
             }
 
-            if (userProf != null) {
-                pullFullHouseholdSnapshotToLocal(targetHouseholdId, userProf.copy(householdId = targetHouseholdId, displayName = cleanMemberName))
-            }
+            // Gravar householdId em users/{uid} do próprio usuário autenticado após sucesso na família
+            currentPath = userRef.path
+            userRef.set(
+                mapOf(
+                    "householdId" to targetHouseholdId,
+                    "displayName" to cleanMemberName,
+                    "email" to userEmail,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                ),
+                SetOptions.merge()
+            ).await()
+
+            val effectiveProfile = (userProf ?: UserProfile(id = uid, userId = uid)).copy(
+                householdId = targetHouseholdId,
+                displayName = cleanMemberName,
+                email = userEmail
+            )
+            pullFullHouseholdSnapshotToLocal(targetHouseholdId, effectiveProfile)
 
             Result.success(targetHouseholdId)
         } catch (e: CancellationException) {
@@ -1088,7 +1247,7 @@ class AuraFirestoreRepository(
         }
         var docPath = "households/$householdId"
         return try {
-            requireUserId()
+            val uid = requireUserId()
             val cleanId = member.userId.ifBlank { "mem_" + UUID.randomUUID().toString().take(8) }
             val cleanMember = member.copy(
                 userId = cleanId,
@@ -1103,10 +1262,17 @@ class AuraFirestoreRepository(
             } else {
                 existing.add(cleanMember)
             }
+            val syncedMemberUids = extractValidMemberUids(
+                members = existing,
+                existingMemberUids = currentHousehold?.memberUids.orEmpty(),
+                uid,
+                currentHousehold?.ownerId.orEmpty()
+            )
             val ref = db.collection("households").document(householdId)
             docPath = ref.path
             ref.update(
                 mapOf(
+                    "memberUids" to FieldValue.arrayUnion(*syncedMemberUids.toTypedArray()),
                     "members" to memberBadgesToFirestoreList(existing),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -1136,10 +1302,17 @@ class AuraFirestoreRepository(
                 return Result.failure(IllegalArgumentException("Você não pode remover a si mesmo da família."))
             }
             val updated = currentHousehold?.members.orEmpty().filterNot { it.userId == memberUserId }
+            val remainingMemberUids = extractValidMemberUids(
+                members = updated,
+                existingMemberUids = currentHousehold?.memberUids.orEmpty().filterNot { it == memberUserId },
+                uid,
+                currentHousehold?.ownerId.orEmpty()
+            )
             val ref = db.collection("households").document(householdId)
             docPath = ref.path
             ref.update(
                 mapOf(
+                    "memberUids" to remainingMemberUids,
                     "members" to memberBadgesToFirestoreList(updated),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )

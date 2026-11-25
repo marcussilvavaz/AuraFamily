@@ -31,12 +31,19 @@ service cloud.firestore {
       return (n is int || n is float);
     }
 
-    // Check if the authenticated user belongs to a household via their /users/{uid} profile
+    // Check if the authenticated user belongs to a household via their /users/{uid} profile or household memberUids/ownerId
     function isHouseholdMember(householdId) {
       return isSignedIn() &&
              isValidId(householdId) &&
-             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.householdId == householdId;
+             (
+               (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                get(/databases/$(database)/documents/users/$(request.auth.uid)).data.householdId == householdId) ||
+               (exists(/databases/$(database)/documents/households/$(householdId)) &&
+                (get(/databases/$(database)/documents/households/$(householdId)).data.ownerId == request.auth.uid ||
+                 ('memberUids' in get(/databases/$(database)/documents/households/$(householdId)).data &&
+                  get(/databases/$(database)/documents/households/$(householdId)).data.memberUids is list &&
+                  request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.memberUids)))
+             );
     }
 
     // 1. UserProfile validation
@@ -44,7 +51,7 @@ service cloud.firestore {
       return data.userId is string && data.userId == request.auth.uid &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
              data.householdId is string && isValidId(data.householdId) &&
-             data.themeMode is string && (data.themeMode == 'SYSTEM' || data.themeMode == 'LIGHT' || data.themeMode == 'DARK') &&
+             data.themeMode is string && (data.themeMode == 'SYSTEM' || data.themeMode == 'LIGHT' || data.themeMode == 'DARK' || data.themeMode == 'AMOLED') &&
              data.baseCurrency is string && data.baseCurrency == 'BRL' &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
@@ -58,7 +65,7 @@ service cloud.firestore {
                        request.auth.uid == userId &&
                        incoming().keys().hasAll(['userId', 'displayName', 'householdId', 'themeMode', 'baseCurrency', 'createdAt', 'updatedAt']) &&
                        incoming().keys().hasOnly([
-                         'userId', 'displayName', 'householdId', 'themeMode', 'baseCurrency',
+                         'userId', 'displayName', 'email', 'avatarBase64', 'householdId', 'themeMode', 'baseCurrency',
                          'memberColorHex', 'avatarInitials', 'avatarEmoji', 'memberRole',
                          'defaultSplitPercentage', 'createdAt', 'updatedAt'
                        ]) &&
@@ -71,7 +78,7 @@ service cloud.firestore {
                        incoming().userId == existing().userId &&
                        incoming().createdAt == existing().createdAt &&
                        incoming().diff(existing()).affectedKeys().hasOnly([
-                         'displayName', 'householdId', 'themeMode', 'baseCurrency',
+                         'displayName', 'email', 'avatarBase64', 'householdId', 'themeMode', 'baseCurrency',
                          'memberColorHex', 'avatarInitials', 'avatarEmoji', 'memberRole',
                          'defaultSplitPercentage', 'updatedAt'
                        ]);
@@ -193,8 +200,21 @@ service cloud.firestore {
     }
 
     match /households/{householdId} {
-      allow get: if isSignedIn() && isValidId(householdId) && (isHouseholdMember(householdId) || (resource != null && existing().ownerId == request.auth.uid));
-      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow get: if isSignedIn() &&
+                    isValidId(householdId) &&
+                    (
+                      isHouseholdMember(householdId) ||
+                      (resource != null && (
+                        existing().ownerId == request.auth.uid ||
+                        ('memberUids' in existing() && existing().memberUids is list && request.auth.uid in existing().memberUids) ||
+                        ('inviteOpen' in existing() && existing().inviteOpen == true)
+                      ))
+                    );
+      allow list: if isSignedIn() &&
+                     (
+                       existing().ownerId == request.auth.uid ||
+                       ('memberUids' in existing() && existing().memberUids is list && request.auth.uid in existing().memberUids)
+                     );
 
       allow create: if isSignedIn() &&
                        isValidId(householdId) &&
@@ -202,23 +222,41 @@ service cloud.firestore {
                        incoming().ownerId == request.auth.uid &&
                        incoming().keys().hasAll(['householdId', 'name', 'ownerId', 'monthlyIncomeBrl', 'needsPercentage', 'wantsPercentage', 'savingsPercentage', 'createdAt', 'updatedAt']) &&
                        incoming().keys().hasOnly([
-                         'householdId', 'name', 'ownerId', 'monthlyIncomeBrl',
+                         'householdId', 'name', 'ownerId', 'memberUids', 'inviteOpen', 'migratedTo', 'monthlyIncomeBrl',
                          'needsPercentage', 'wantsPercentage', 'savingsPercentage',
-                         'memberIds', 'members', 'membersMap', 'bankAccounts', 'defaultSplitMode', 'createdAt', 'updatedAt'
+                         'memberIds', 'members', 'membersMap', 'bankAccounts',
+                         'categoryBudgetsBrl', 'customCategories', 'muralItems',
+                         'defaultSplitMode', 'createdAt', 'updatedAt'
                        ]) &&
                        isValidHousehold(incoming());
 
       allow update: if isSignedIn() &&
                        isValidId(householdId) &&
                        isValidHousehold(incoming()) &&
-                       (isHouseholdMember(householdId) || existing().ownerId == request.auth.uid) &&
                        incoming().householdId == existing().householdId &&
                        incoming().ownerId == existing().ownerId &&
                        incoming().createdAt == existing().createdAt &&
-                       incoming().diff(existing()).affectedKeys().hasOnly([
-                         'name', 'monthlyIncomeBrl', 'needsPercentage', 'wantsPercentage', 'savingsPercentage',
-                         'memberIds', 'members', 'membersMap', 'bankAccounts', 'defaultSplitMode', 'updatedAt'
-                       ]);
+                       (
+                         (
+                           (isHouseholdMember(householdId) ||
+                            existing().ownerId == request.auth.uid ||
+                            ('memberUids' in existing() && existing().memberUids is list && request.auth.uid in existing().memberUids)) &&
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'name', 'memberUids', 'inviteOpen', 'migratedTo', 'monthlyIncomeBrl',
+                             'needsPercentage', 'wantsPercentage', 'savingsPercentage',
+                             'memberIds', 'members', 'membersMap', 'bankAccounts',
+                             'categoryBudgetsBrl', 'customCategories', 'muralItems',
+                             'defaultSplitMode', 'updatedAt'
+                           ])
+                         ) ||
+                         (
+                           ('inviteOpen' in existing() && existing().inviteOpen == true) &&
+                           ('memberUids' in incoming() && incoming().memberUids is list && request.auth.uid in incoming().memberUids) &&
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'memberUids', 'members', 'updatedAt'
+                           ])
+                         )
+                       );
 
       allow delete: if isSignedIn() && isValidId(householdId) && existing().ownerId == request.auth.uid;
 
@@ -400,6 +438,18 @@ service cloud.firestore {
                          ]);
 
         allow delete: if isSignedIn() && isValidId(goalId) && isHouseholdMember(householdId);
+      }
+
+      // Subcollection: HealthLogs
+      match /health_logs/{logId} {
+        allow get, list: if isSignedIn() && isHouseholdMember(householdId);
+        allow create, update, delete: if isSignedIn() && isValidId(logId) && isHouseholdMember(householdId);
+      }
+
+      // Subcollection: DiaryEntries
+      match /diary_entries/{entryId} {
+        allow get, list: if isSignedIn() && isHouseholdMember(householdId);
+        allow create, update, delete: if isSignedIn() && isValidId(entryId) && isHouseholdMember(householdId);
       }
     }
 

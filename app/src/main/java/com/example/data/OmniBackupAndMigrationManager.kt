@@ -411,10 +411,10 @@ object OmniBackupAndMigrationManager {
                 }
             }
 
-            // Query households where memberIds contains uid
+            // Query households where memberUids contains uid
             runCatching {
                 val memberSnap = db.collection("households")
-                    .whereArrayContains("memberIds", uid)
+                    .whereArrayContains("memberUids", uid)
                     .get()
                     .await()
                 memberSnap.documents.forEach { doc ->

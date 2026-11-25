@@ -409,6 +409,8 @@ data class Household(
     val householdId: String = "",
     val name: String = "Família Omni",
     val ownerId: String = "",
+    val memberUids: List<String> = emptyList(),
+    val inviteOpen: Boolean = false,
     val migratedTo: String = "",
     val monthlyIncomeBrl: Double = 0.0,
     val needsPercentage: Long = 60L,

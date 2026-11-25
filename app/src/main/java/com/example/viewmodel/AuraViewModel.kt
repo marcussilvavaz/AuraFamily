@@ -388,17 +388,41 @@ class AuraViewModel(
         }
     }
 
-    fun joinOrCreateHousehold(householdCode: String, familyName: String) {
+    fun setHouseholdInviteOpen(inviteOpen: Boolean) {
+        viewModelScope.launch {
+            val houseId = currentHouseholdId()
+            val result = repository.updateHouseholdInviteOpen(houseId, inviteOpen)
+            result.onSuccess {
+                _statusBannerMessage.value = if (inviteOpen) {
+                    "Convite aberto! Novos membros podem entrar usando o código $houseId."
+                } else {
+                    "Convite fechado. Apenas membros atuais podem acessar a família."
+                }
+            }.onFailure { err ->
+                _statusBannerMessage.value = err.message ?: err.localizedMessage ?: "Não foi possível alterar o status do convite."
+            }
+        }
+    }
+
+    fun joinOrCreateHousehold(
+        householdCode: String,
+        familyName: String,
+        isCreatingNewFamily: Boolean = false
+    ) {
         viewModelScope.launch {
             _isBusy.value = true
-            _isProfileServerReady.value = false
-            val result = repository.switchOrJoinHousehold(householdCode, familyName)
-            _isProfileServerReady.value = true
+            val result = repository.switchOrJoinHousehold(
+                newHouseholdCodeRaw = householdCode,
+                familyNameRaw = familyName,
+                isCreatingNewFamily = isCreatingNewFamily
+            )
             _isBusy.value = false
             result.onSuccess { code ->
                 _statusBannerMessage.value = "Família ativa: ${familyName.ifBlank { "Família Omni" }} • Código: $code"
             }.onFailure { err ->
-                _statusBannerMessage.value = err.localizedMessage ?: "Erro ao alterar código familiar."
+                _statusBannerMessage.value = err.message
+                    ?: err.localizedMessage
+                    ?: "Convite fechado ou código inválido. Peça para um membro da família ativar 'Aceitar novos membros' no Perfil."
             }
         }
     }
@@ -407,7 +431,7 @@ class AuraViewModel(
         val generatedCode = customInviteCode.trim().uppercase().takeIf { it.isNotBlank() }
             ?: ("FAM_" + UUID.randomUUID().toString().replace("-", "").take(6).uppercase())
         val cleanName = familyName.trim().ifBlank { "Família Omni" }
-        joinOrCreateHousehold(generatedCode, cleanName)
+        joinOrCreateHousehold(generatedCode, cleanName, isCreatingNewFamily = true)
     }
 
     fun saveFamilyMember(member: FamilyMemberBadge) {

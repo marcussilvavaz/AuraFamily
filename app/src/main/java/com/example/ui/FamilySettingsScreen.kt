@@ -203,6 +203,7 @@ fun FamilySettingsScreen(
     userEmail: String?,
     onUpdateProfileIdentity: (displayName: String, memberColorHex: Long) -> Unit,
     onJoinHousehold: (String, String) -> Unit,
+    onToggleInviteOpen: (Boolean) -> Unit = {},
     onCreateNewFamily: (familyName: String, customInviteCode: String) -> Unit = { _, _ -> },
     onSaveFamilyMember: (com.example.data.FamilyMemberBadge) -> Unit = {},
     onRemoveFamilyMember: (memberUserId: String, memberName: String) -> Unit = { _, _ -> },
@@ -1342,6 +1343,50 @@ fun FamilySettingsScreen(
                                 }
                             }
 
+                            // Trava de Convite (inviteOpen) para entrada por código
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Aceitar novos membros (Convite aberto)",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = if (household.inviteOpen) {
+                                                "Aberto: familiares com o código ${household.householdId} podem entrar"
+                                            } else {
+                                                "Fechado: ninguém de fora pode entrar usando o código"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (household.inviteOpen) {
+                                                MaterialTheme.colorScheme.primary
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            }
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Switch(
+                                        checked = household.inviteOpen,
+                                        onCheckedChange = { checked ->
+                                            onToggleInviteOpen(checked)
+                                        },
+                                        modifier = Modifier.testTag("toggle_household_invite_open_switch")
+                                    )
+                                }
+                            }
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1568,7 +1613,6 @@ fun FamilySettingsScreen(
                         onClick = {
                             if (targetCodeInput.isNotBlank()) {
                                 onJoinHousehold(targetCodeInput, targetFamilyNameInput)
-                                triggerFeedback("Conectado à família $targetFamilyNameInput!")
                                 targetCodeInput = ""
                             }
                         },

@@ -1162,6 +1162,9 @@ fun MainFeatureScreen(
                                 onJoinHousehold = { code, famName ->
                                     viewModel.joinOrCreateHousehold(code, famName)
                                 },
+                                onToggleInviteOpen = { inviteOpen ->
+                                    viewModel.setHouseholdInviteOpen(inviteOpen)
+                                },
                                 onCreateNewFamily = { famName, customCode ->
                                     viewModel.createNewFamily(famName, customCode)
                                 },

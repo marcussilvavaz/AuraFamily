@@ -348,22 +348,32 @@ class LocalOfflineStore(context: Context) {
         val customCatsList = runCatching {
             if (customCatsRaw.isNullOrBlank()) emptyList() else deserializeStringList(JSONArray(customCatsRaw))
         }.getOrDefault(emptyList())
+        val inviteOpen = prefs.getBoolean(KEY_INVITE_OPEN, false)
+        val loadedMembers = loadExtraMembers(profile)
+        val memberUids = (listOf(LOCAL_USER_ID) + loadedMembers.map { it.userId }.filter { it.isNotBlank() }).distinct()
         return Household(
             id = houseId,
             householdId = houseId,
             name = name,
             ownerId = LOCAL_USER_ID,
+            memberUids = memberUids,
+            inviteOpen = inviteOpen,
             monthlyIncomeBrl = income,
             needsPercentage = needs,
             wantsPercentage = wants,
             savingsPercentage = savings,
             defaultSplitMode = defaultSplit,
-            members = loadExtraMembers(profile),
+            members = loadedMembers,
             bankAccounts = loadBankAccounts(),
             categoryBudgetsBrl = budgetsMap,
             customCategories = customCatsList,
             muralItems = OmniBackupAndMigrationManager.getFamilyMuralItems(appContext)
         )
+    }
+
+    fun updateHouseholdInviteOpen(inviteOpen: Boolean) {
+        prefs.edit().putBoolean(KEY_INVITE_OPEN, inviteOpen).apply()
+        _householdFlow.value = loadHousehold()
     }
 
     fun updateCategoryBudget(category: String, limitBrl: Double) {
@@ -1752,6 +1762,7 @@ class LocalOfflineStore(context: Context) {
             .putInt(KEY_WANTS_PCT, household.wantsPercentage.toInt())
             .putInt(KEY_SAVINGS_PCT, household.savingsPercentage.toInt())
             .putString(KEY_DEFAULT_SPLIT_MODE, household.defaultSplitMode.ifBlank { SplitMode.EQUAL })
+            .putBoolean(KEY_INVITE_OPEN, household.inviteOpen)
             .putBoolean(KEY_USER_EDITED_BUDGET, true)
             .putString(KEY_CATEGORY_BUDGETS_JSON, serializeDoubleMap(household.categoryBudgetsBrl).toString())
             .putString(KEY_CUSTOM_CATEGORIES_JSON, serializeStringList(household.customCategories).toString())
@@ -1807,5 +1818,6 @@ class LocalOfflineStore(context: Context) {
         private const val KEY_GOALS_JSON = "goals_json"
         private const val KEY_CATEGORY_BUDGETS_JSON = "category_budgets_json"
         private const val KEY_CUSTOM_CATEGORIES_JSON = "custom_categories_json"
+        private const val KEY_INVITE_OPEN = "household_invite_open"
     }
 }

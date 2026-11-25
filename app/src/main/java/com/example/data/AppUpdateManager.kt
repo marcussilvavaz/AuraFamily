@@ -64,10 +64,10 @@ data class AppReleaseMetadata(
         const val GITHUB_LATEST_RELEASE_API_URL = "https://api.github.com/repos/marcussilvavaz/AuraFamily/releases/latest"
         const val GITHUB_DEFAULT_APK_DOWNLOAD_URL = "https://github.com/marcussilvavaz/AuraFamily/releases/latest/download/Omni.apk"
         const val RELEASE_NOTES_SIMPLE =
-            "• Fusão segura de famílias na nuvem para FAM_OMNI2448 (Família Vaz), sincronização Cloud-First e fotos de perfil em Base64 entre aparelhos\n" +
-            "• Notificações reais em 2º plano (Samsung One UI / Android 12+) com reagendamento automático pós-reinicialização\n" +
-            "• Tema Preto Puro (AMOLED #000000) persistente, PIN do Diário Privado mascarado com confirmação de segurança e regra 60/20/20 padronizada\n" +
-            "• Atualização OTA automática via GitHub Releases (marcussilvavaz/AuraFamily) com instalador direto"
+            "• Blindagem multi-família no Firestore com memberUids sincronizado e consultas compatíveis com Security Rules\n" +
+            "• Trava de convite ('Aceitar novos membros') no Perfil para controlar quem pode entrar por código familiar\n" +
+            "• Fusão segura para FAM_OMNI2448 (Família Vaz), sincronização Cloud-First e fotos de perfil em Base64\n" +
+            "• Tema Preto Puro (AMOLED), diagnóstico detalhado de Login Google/SHA-1 e alarmes exatos em 2º plano (One UI)"
 
         const val DEFAULT_RELEASE_NOTES = RELEASE_NOTES_SIMPLE
     }
