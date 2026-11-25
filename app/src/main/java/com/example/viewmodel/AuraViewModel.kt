@@ -65,6 +65,10 @@ class AuraViewModel(
     val isBusy: StateFlow<Boolean> = _isBusy.asStateFlow()
 
     private val _isProfileServerReady = MutableStateFlow(false)
+    val isProfileServerReady: StateFlow<Boolean> = _isProfileServerReady.asStateFlow()
+
+    private val _isRestoringFromCloud = MutableStateFlow(true)
+    val isRestoringFromCloud: StateFlow<Boolean> = _isRestoringFromCloud.asStateFlow()
 
     // 1. User Profile StateFlow
     val userProfileState: StateFlow<UiState<UserProfile?>> = repository.observeUserProfile(currentUserId)
@@ -192,8 +196,10 @@ class AuraViewModel(
 
     init {
         viewModelScope.launch {
+            _isRestoringFromCloud.value = true
             repository.ensureUserProfileAndHousehold(initialDisplayName)
             _isProfileServerReady.value = true
+            _isRestoringFromCloud.value = false
         }
         refreshExchangeRates()
     }
@@ -266,21 +272,112 @@ class AuraViewModel(
         return profile?.memberColorHex?.takeIf { it != 0L } ?: 0xFF0B6E4F
     }
 
-    fun updateUserProfileIdentity(displayName: String, memberColorHex: Long, avatarEmoji: String? = null) {
+    fun updateUserProfileIdentity(
+        displayName: String,
+        memberColorHex: Long,
+        avatarEmoji: String? = null,
+        avatarBase64: String = ""
+    ) {
         viewModelScope.launch {
-            val cleanName = displayName.trim().ifBlank { currentUserName() }
+            val cleanName = displayName.trim().let { raw ->
+                if (raw.equals("Você", ignoreCase = true) ||
+                    raw.equals("Voce", ignoreCase = true) ||
+                    raw.equals("VO", ignoreCase = true)
+                ) "" else raw
+            }.ifBlank { currentUserName() }
             val currentEmoji = avatarEmoji?.takeIf { it.isNotBlank() }
                 ?: (userProfileState.value as? UiState.Success)?.data?.avatarEmoji?.ifBlank { "🌿" }
                 ?: "🌿"
             val result = repository.updateUserMemberIdentity(
                 displayName = cleanName,
                 memberColorHex = memberColorHex,
-                avatarEmoji = currentEmoji
+                avatarEmoji = currentEmoji,
+                avatarBase64 = avatarBase64
             )
             result.onSuccess {
-                _statusBannerMessage.value = "Perfil e cor na agenda atualizados com sucesso!"
+                _statusBannerMessage.value = "Perfil e cor na agenda atualizados na nuvem!"
             }.onFailure { err ->
                 _statusBannerMessage.value = err.localizedMessage ?: "Erro ao atualizar perfil."
+            }
+        }
+    }
+
+    fun updateUserAvatarBase64(avatarBase64: String) {
+        viewModelScope.launch {
+            val result = repository.updateUserAvatarBase64(
+                householdId = currentHouseholdId(),
+                currentHousehold = currentHousehold(),
+                avatarBase64 = avatarBase64
+            )
+            result.onSuccess {
+                _statusBannerMessage.value = if (avatarBase64.isNotBlank()) {
+                    "Foto de perfil sincronizada na nuvem!"
+                } else {
+                    "Foto de perfil removida."
+                }
+            }.onFailure { err ->
+                _statusBannerMessage.value = err.localizedMessage ?: "Erro ao sincronizar foto na nuvem."
+            }
+        }
+    }
+
+    fun forceFullCloudSyncNow(
+        context: Context,
+        displayNameHint: String = "",
+        avatarBase64Hint: String = ""
+    ) {
+        viewModelScope.launch {
+            _isBusy.value = true
+            val result = repository.forceFullCloudSyncNow(
+                displayNameHint = displayNameHint.ifBlank { currentUserName() },
+                avatarBase64Hint = avatarBase64Hint
+            )
+            _isBusy.value = false
+            result.onSuccess { msg ->
+                syncAlarmsWithCurrentTasksAndSubscriptions(context)
+                _statusBannerMessage.value = msg
+            }.onFailure { err ->
+                _statusBannerMessage.value = err.localizedMessage ?: "Falha ao sincronizar com o Firestore."
+            }
+        }
+    }
+
+    fun syncAlarmsWithCurrentTasksAndSubscriptions(context: Context) {
+        val tasks = (tasksState.value as? UiState.Success)?.data.orEmpty()
+        val subs = (subscriptionsState.value as? UiState.Success)?.data.orEmpty()
+        val todayEpoch = DateCalendarUtils.todayEpochDay()
+        for (task in tasks) {
+            if (!task.isInbox && task.alarmEnabled && !task.completed &&
+                (task.dateEpochDay >= todayEpoch || task.isRecurringOrMultiDay)
+            ) {
+                val targetDate = if (task.dateEpochDay >= todayEpoch) task.dateEpochDay else todayEpoch
+                AlarmScheduler.scheduleTaskAlarm(
+                    context = context,
+                    taskId = task.id,
+                    title = task.title,
+                    category = task.category,
+                    dateEpochDay = targetDate,
+                    hour = task.alarmHour.toInt(),
+                    minute = task.alarmMinute.toInt(),
+                    ringtoneCategory = task.ringtoneCategory
+                )
+            } else {
+                AlarmScheduler.cancelTaskAlarm(context, task.id)
+            }
+        }
+        for (sub in subs) {
+            if (sub.active) {
+                AlarmScheduler.scheduleSubscriptionReminder(
+                    context = context,
+                    subscriptionId = sub.id,
+                    title = sub.title,
+                    amountFormatted = formatCurrencyOriginal(sub.amountOriginal, sub.currency),
+                    dueDayOfMonth = sub.dueDayOfMonth.toInt(),
+                    reminderDaysBefore = sub.reminderDaysBefore.toInt(),
+                    ringtoneCategory = sub.ringtoneCategory
+                )
+            } else {
+                AlarmScheduler.cancelSubscriptionReminder(context, sub.id)
             }
         }
     }

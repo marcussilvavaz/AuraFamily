@@ -584,9 +584,88 @@ fun ModularProfileEditorContent(
                     testTag = "switch_diary_biometric_lock"
                 )
                 AnimatedVisibility(visible = config.diaryBiometricLockEnabled) {
-                    var pinDraft by remember(config.diaryBackupPin) {
-                        mutableStateOf(config.diaryBackupPin.ifBlank { "1234" })
+                    val savedPin = config.diaryBackupPin.ifBlank { "1234" }
+                    var isPinVerified by remember { mutableStateOf(false) }
+                    var showVerifyCurrentPinDialog by remember { mutableStateOf(false) }
+                    var currentPinAttempt by remember { mutableStateOf("") }
+                    var currentPinError by remember { mutableStateOf(false) }
+                    var newPinDraft by remember(savedPin) { mutableStateOf("") }
+
+                    if (showVerifyCurrentPinDialog) {
+                        androidx.compose.material3.AlertDialog(
+                            onDismissRequest = {
+                                showVerifyCurrentPinDialog = false
+                                currentPinAttempt = ""
+                                currentPinError = false
+                            },
+                            title = {
+                                Text("Confirmar PIN Atual", fontWeight = FontWeight.Bold)
+                            },
+                            text = {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(
+                                        text = "Digite o PIN atual do Diário Privado para autorizar a visualização ou alteração do código:",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    OutlinedTextField(
+                                        value = currentPinAttempt,
+                                        onValueChange = { raw ->
+                                            currentPinAttempt = raw.filter { it.isDigit() }.take(6)
+                                            currentPinError = false
+                                        },
+                                        label = { Text("PIN Atual") },
+                                        singleLine = true,
+                                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                            keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword
+                                        ),
+                                        isError = currentPinError,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("verify_current_diary_pin_input")
+                                    )
+                                    if (currentPinError) {
+                                        Text(
+                                            text = "PIN incorreto. Tente novamente.",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        if (currentPinAttempt == savedPin) {
+                                            isPinVerified = true
+                                            newPinDraft = ""
+                                            showVerifyCurrentPinDialog = false
+                                            currentPinAttempt = ""
+                                            currentPinError = false
+                                        } else {
+                                            currentPinError = true
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("confirm_verify_current_diary_pin_btn")
+                                ) {
+                                    Text("Validar PIN")
+                                }
+                            },
+                            dismissButton = {
+                                androidx.compose.material3.TextButton(
+                                    onClick = {
+                                        showVerifyCurrentPinDialog = false
+                                        currentPinAttempt = ""
+                                        currentPinError = false
+                                    }
+                                ) {
+                                    Text("Cancelar")
+                                }
+                            }
+                        )
                     }
+
                     Surface(
                         shape = RoundedCornerShape(14.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
@@ -597,31 +676,81 @@ fun ModularProfileEditorContent(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                text = "🔒 Biometria do aparelho (digital / facial / bloqueio de tela) ativa. Você também pode definir um PIN numérico rápido do Diário:",
+                                text = "🔒 Biometria do aparelho (digital / facial / bloqueio de tela) ativa. O PIN de segurança fica protegido e mascarado:",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            OutlinedTextField(
-                                value = pinDraft,
-                                onValueChange = { raw ->
-                                    val digits = raw.filter { it.isDigit() }.take(6)
-                                    pinDraft = digits
-                                    if (digits.length >= 4) {
-                                        customizationRepo.updateDiaryBiometricLock(
-                                            enabled = true,
-                                            backupPin = digits
+
+                            if (!isPinVerified) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = "PIN Configurado: ••••",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Valide o PIN atual para alterar",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
-                                },
-                                label = { Text("PIN do Diário (4 a 6 dígitos)") },
-                                singleLine = true,
-                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                                ),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("input_diary_backup_pin")
-                            )
+                                    OutlinedButton(
+                                        onClick = {
+                                            currentPinAttempt = ""
+                                            currentPinError = false
+                                            showVerifyCurrentPinDialog = true
+                                        },
+                                        shape = RoundedCornerShape(50),
+                                        modifier = Modifier.testTag("btn_unlock_pin_change")
+                                    ) {
+                                        Text("Alterar PIN")
+                                    }
+                                }
+                            } else {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    OutlinedTextField(
+                                        value = newPinDraft,
+                                        onValueChange = { raw ->
+                                            newPinDraft = raw.filter { it.isDigit() }.take(6)
+                                        },
+                                        label = { Text("Novo PIN (4 a 6 dígitos)") },
+                                        singleLine = true,
+                                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                            keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword
+                                        ),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("input_diary_backup_pin")
+                                    )
+                                    Button(
+                                        onClick = {
+                                            if (newPinDraft.length >= 4) {
+                                                customizationRepo.updateDiaryBiometricLock(
+                                                    enabled = true,
+                                                    backupPin = newPinDraft
+                                                )
+                                                isPinVerified = false
+                                                newPinDraft = ""
+                                            }
+                                        },
+                                        enabled = newPinDraft.length >= 4,
+                                        shape = RoundedCornerShape(50),
+                                        modifier = Modifier.testTag("save_new_diary_pin_btn")
+                                    ) {
+                                        Text("Salvar PIN")
+                                    }
+                                }
+                            }
                         }
                     }
                 }

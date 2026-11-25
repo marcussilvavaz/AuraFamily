@@ -37,17 +37,31 @@ class LocalOfflineStore(context: Context) {
     private fun loadUserProfile(): UserProfile {
         val houseId = prefs.getString(KEY_HOUSEHOLD_ID, "FAM_OMNI_LOCAL") ?: "FAM_OMNI_LOCAL"
         val theme = prefs.getString(KEY_THEME_MODE, "SYSTEM") ?: "SYSTEM"
-        val rawName = prefs.getString(KEY_MEMBER_NAME, "Você (Omni)") ?: "Você (Omni)"
-        val displayName = rawName.replace("Família Aura (Modo Local)", "Você (Omni)").replace("Aura", "Omni")
+        val rawName = (prefs.getString(KEY_MEMBER_NAME, "") ?: "").trim()
+        val displayName = rawName
+            .replace("Família Aura (Modo Local)", "")
+            .replace("Você (Omni)", "")
+            .replace("Aura", "Omni")
+            .trim()
+            .let { n ->
+                if (n.equals("Você", ignoreCase = true) ||
+                    n.equals("Voce", ignoreCase = true) ||
+                    n.equals("VO", ignoreCase = true)
+                ) "" else n
+            }
         val colorHex = prefs.getLong(KEY_MEMBER_COLOR_HEX, 0xFF0E7C5B)
         val emoji = prefs.getString(KEY_MEMBER_EMOJI, "🌿") ?: "🌿"
         val initials = prefs.getString(KEY_MEMBER_INITIALS, "OM") ?: "OM"
         val role = prefs.getString(KEY_MEMBER_ROLE, "ADMIN") ?: "ADMIN"
         val splitPct = prefs.getFloat(KEY_MEMBER_SPLIT_PCT, 50f).toDouble()
+        val avatarBase64 = prefs.getString(KEY_MEMBER_AVATAR_BASE64, "") ?: ""
+        val email = prefs.getString(KEY_MEMBER_EMAIL, "") ?: ""
         return UserProfile(
             id = LOCAL_USER_ID,
             userId = LOCAL_USER_ID,
             displayName = displayName,
+            email = email,
+            avatarBase64 = avatarBase64,
             householdId = houseId,
             themeMode = theme,
             baseCurrency = "BRL",
@@ -65,9 +79,16 @@ class LocalOfflineStore(context: Context) {
         avatarEmoji: String,
         avatarInitials: String,
         memberRole: String,
-        defaultSplitPercentage: Double
+        defaultSplitPercentage: Double,
+        avatarBase64: String = _userProfileFlow.value.avatarBase64,
+        email: String = _userProfileFlow.value.email
     ) {
-        val cleanName = displayName.trim().ifBlank { "Você" }
+        val cleanName = displayName.trim().let { n ->
+            if (n.equals("Você", ignoreCase = true) ||
+                n.equals("Voce", ignoreCase = true) ||
+                n.equals("VO", ignoreCase = true)
+            ) "" else n
+        }
         prefs.edit()
             .putString(KEY_MEMBER_NAME, cleanName)
             .putLong(KEY_MEMBER_COLOR_HEX, memberColorHex)
@@ -75,45 +96,66 @@ class LocalOfflineStore(context: Context) {
             .putString(KEY_MEMBER_INITIALS, avatarInitials.take(3).ifBlank { "OM" })
             .putString(KEY_MEMBER_ROLE, memberRole.ifBlank { "ADMIN" })
             .putFloat(KEY_MEMBER_SPLIT_PCT, defaultSplitPercentage.toFloat())
+            .putString(KEY_MEMBER_AVATAR_BASE64, avatarBase64)
+            .putString(KEY_MEMBER_EMAIL, email)
             .apply()
         _userProfileFlow.value = loadUserProfile()
         _householdFlow.value = loadHousehold()
 
-        val updatedTasks = _tasksFlow.value.map { task ->
-            if (task.userId == LOCAL_USER_ID || task.assignedMemberId == LOCAL_USER_ID || task.assignedMemberId.isBlank()) {
-                task.copy(
-                    assignedMemberColorHex = memberColorHex,
-                    createdByColorHex = memberColorHex,
-                    assignedMemberName = if (task.privacyScope == PrivacyScope.PERSONAL) "Só Meu ($cleanName)" else cleanName
-                )
-            } else {
-                task
+        if (cleanName.isNotBlank()) {
+            val updatedTasks = _tasksFlow.value.map { task ->
+                if (task.userId == LOCAL_USER_ID || task.assignedMemberId == LOCAL_USER_ID || task.assignedMemberId.isBlank()) {
+                    task.copy(
+                        assignedMemberColorHex = memberColorHex,
+                        createdByColorHex = memberColorHex,
+                        assignedMemberName = if (task.privacyScope == PrivacyScope.PERSONAL) "Só Meu ($cleanName)" else cleanName
+                    )
+                } else {
+                    task
+                }
             }
+            saveTasks(updatedTasks)
+            _tasksFlow.value = updatedTasks
         }
-        saveTasks(updatedTasks)
-        _tasksFlow.value = updatedTasks
     }
 
     private fun loadExtraMembers(ownerProfile: UserProfile): List<FamilyMemberBadge> {
-        val ownerBadge = FamilyMemberBadge(
-            userId = ownerProfile.userId,
-            displayName = ownerProfile.displayName,
-            colorHex = ownerProfile.memberColorHex,
-            avatarEmoji = ownerProfile.avatarEmoji,
-            role = ownerProfile.memberRole
-        )
-        val raw = prefs.getString(KEY_FAMILY_MEMBERS_JSON, null) ?: return listOf(ownerBadge)
+        val ownerList = if (ownerProfile.displayName.isNotBlank()) {
+            listOf(
+                FamilyMemberBadge(
+                    userId = ownerProfile.userId,
+                    displayName = ownerProfile.displayName,
+                    email = ownerProfile.email,
+                    avatarBase64 = ownerProfile.avatarBase64,
+                    colorHex = ownerProfile.memberColorHex,
+                    avatarEmoji = ownerProfile.avatarEmoji,
+                    role = ownerProfile.memberRole,
+                    isCurrentUser = true
+                )
+            )
+        } else {
+            emptyList()
+        }
+        val raw = prefs.getString(KEY_FAMILY_MEMBERS_JSON, null) ?: return ownerList
         return try {
             val arr = JSONArray(raw)
             val others = buildList {
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
                     val uid = obj.optString("userId", "")
-                    if (uid.isNotBlank() && uid != ownerProfile.userId) {
+                    val rawDisp = obj.optString("displayName", "").trim()
+                    if (rawDisp.equals("Você", ignoreCase = true) ||
+                        rawDisp.equals("Voce", ignoreCase = true) ||
+                        rawDisp.equals("VO", ignoreCase = true) ||
+                        rawDisp.equals("Família", ignoreCase = true)
+                    ) continue
+                    if ((uid.isNotBlank() && uid != ownerProfile.userId) || rawDisp.isNotBlank()) {
                         add(
                             FamilyMemberBadge(
                                 userId = uid,
-                                displayName = obj.optString("displayName", "Membro"),
+                                displayName = rawDisp,
+                                email = obj.optString("email", ""),
+                                avatarBase64 = obj.optString("avatarBase64", ""),
                                 colorHex = obj.optLong("colorHex", 0xFF2962FF),
                                 avatarEmoji = obj.optString("avatarEmoji", "👤"),
                                 role = obj.optString("role", "ADULT")
@@ -122,25 +164,37 @@ class LocalOfflineStore(context: Context) {
                     }
                 }
             }
-            listOf(ownerBadge) + others
+            (ownerList + others).distinctBy { it.userId.ifBlank { it.displayName.lowercase() } }
         } catch (_: Exception) {
-            listOf(ownerBadge)
+            ownerList
         }
     }
 
     private fun saveExtraMembers(members: List<FamilyMemberBadge>) {
         val arr = JSONArray()
-        members.filter { it.userId != LOCAL_USER_ID }.forEach { m ->
-            arr.put(
-                JSONObject().apply {
-                    put("userId", m.userId)
-                    put("displayName", m.displayName)
-                    put("colorHex", m.colorHex)
-                    put("avatarEmoji", m.avatarEmoji)
-                    put("role", m.role)
-                }
-            )
-        }
+        members
+            .filter {
+                it.userId != LOCAL_USER_ID &&
+                    it.displayName.isNotBlank() &&
+                    !it.displayName.equals("Você", ignoreCase = true) &&
+                    !it.displayName.equals("Voce", ignoreCase = true) &&
+                    !it.displayName.equals("VO", ignoreCase = true) &&
+                    !it.displayName.equals("Família", ignoreCase = true)
+            }
+            .distinctBy { it.userId.ifBlank { it.displayName.lowercase() } }
+            .forEach { m ->
+                arr.put(
+                    JSONObject().apply {
+                        put("userId", m.userId)
+                        put("displayName", m.displayName)
+                        put("email", m.email)
+                        put("avatarBase64", m.avatarBase64)
+                        put("colorHex", m.colorHex)
+                        put("avatarEmoji", m.avatarEmoji)
+                        put("role", m.role)
+                    }
+                )
+            }
         prefs.edit().putString(KEY_FAMILY_MEMBERS_JSON, arr.toString()).apply()
     }
 
@@ -183,43 +237,49 @@ class LocalOfflineStore(context: Context) {
     private fun loadBankAccounts(): List<BankAccount> {
         val raw = prefs.getString(KEY_BANK_ACCOUNTS_JSON, null)
         if (raw == null) {
-            val defaults = BankAccountCatalog.defaultAccounts()
+            val defaults = BankAccountCatalog.defaultAccounts().map { it.sanitized() }
             saveBankAccounts(defaults)
             return defaults
         }
         return try {
             val arr = JSONArray(raw)
+            var dirtyCashAccount = false
             val loaded = buildList {
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
                     val id = obj.optString("id", "")
                     if (id.isNotBlank()) {
-                        add(
-                            BankAccount(
-                                id = id,
-                                name = obj.optString("name", "Conta"),
-                                institution = obj.optString("institution", "Outro"),
-                                initialBalanceBrl = obj.optDouble("initialBalanceBrl", 0.0),
-                                creditLimitBrl = obj.optDouble("creditLimitBrl", 5000.0),
-                                closingDay = obj.optInt("closingDay", 25).coerceIn(1, 31),
-                                dueDay = obj.optInt("dueDay", 5).coerceIn(1, 31),
-                                colorHex = obj.optLong("colorHex", 0xFF0E7C5B),
-                                iconEmoji = obj.optString("iconEmoji", "🏦"),
-                                privacyScope = obj.optString("privacyScope", PrivacyScope.FAMILY)
-                            )
+                        val rawAcc = BankAccount(
+                            id = id,
+                            name = obj.optString("name", "Conta"),
+                            institution = obj.optString("institution", "Outro"),
+                            initialBalanceBrl = obj.optDouble("initialBalanceBrl", 0.0),
+                            creditLimitBrl = obj.optDouble("creditLimitBrl", 0.0),
+                            closingDay = obj.optInt("closingDay", 0),
+                            dueDay = obj.optInt("dueDay", 0),
+                            colorHex = obj.optLong("colorHex", 0xFF0E7C5B),
+                            iconEmoji = obj.optString("iconEmoji", "🏦"),
+                            privacyScope = obj.optString("privacyScope", PrivacyScope.FAMILY)
                         )
+                        val sanitized = rawAcc.sanitized()
+                        if (sanitized != rawAcc) dirtyCashAccount = true
+                        add(sanitized)
                     }
                 }
             }
-            loaded.ifEmpty { BankAccountCatalog.defaultAccounts() }
+            val result = loaded.ifEmpty { BankAccountCatalog.defaultAccounts().map { it.sanitized() } }
+            if (dirtyCashAccount) {
+                saveBankAccounts(result)
+            }
+            result
         } catch (_: Exception) {
-            BankAccountCatalog.defaultAccounts()
+            BankAccountCatalog.defaultAccounts().map { it.sanitized() }
         }
     }
 
     private fun saveBankAccounts(accounts: List<BankAccount>) {
         val arr = JSONArray()
-        accounts.forEach { acc ->
+        accounts.map { it.sanitized() }.forEach { acc ->
             arr.put(
                 JSONObject().apply {
                     put("id", acc.id)
@@ -246,7 +306,7 @@ class LocalOfflineStore(context: Context) {
             name = account.name.trim().ifBlank { account.institution.ifBlank { "Conta" } },
             institution = account.institution.trim().ifBlank { "Banco" },
             iconEmoji = account.iconEmoji.ifBlank { "🏦" }
-        )
+        ).sanitized()
         val idx = current.indexOfFirst { it.id == cleanId }
         if (idx >= 0) {
             current[idx] = cleanAccount
@@ -259,7 +319,7 @@ class LocalOfflineStore(context: Context) {
 
     fun deleteBankAccount(accountId: String) {
         val current = loadBankAccounts().filterNot { it.id == accountId }
-        val safeList = current.ifEmpty { BankAccountCatalog.defaultAccounts() }
+        val safeList = current.ifEmpty { BankAccountCatalog.defaultAccounts().map { it.sanitized() } }
         saveBankAccounts(safeList)
         _householdFlow.value = loadHousehold()
     }
@@ -268,10 +328,16 @@ class LocalOfflineStore(context: Context) {
         val houseId = prefs.getString(KEY_HOUSEHOLD_ID, "FAM_OMNI_LOCAL") ?: "FAM_OMNI_LOCAL"
         val rawName = prefs.getString(KEY_HOUSEHOLD_NAME, "Família Omni") ?: "Família Omni"
         val name = rawName.replace("Família Aura", "Família Omni")
-        val income = prefs.getFloat(KEY_MONTHLY_INCOME, 8500f).toDouble()
-        val needs = prefs.getInt(KEY_NEEDS_PCT, 50).toLong()
-        val wants = prefs.getInt(KEY_WANTS_PCT, 30).toLong()
-        val savings = prefs.getInt(KEY_SAVINGS_PCT, 20).toLong()
+        val rawIncome = prefs.getFloat(KEY_MONTHLY_INCOME, 0f).toDouble()
+        val income = if (rawIncome == 8500.0 && !prefs.getBoolean(KEY_USER_EDITED_BUDGET, false)) 0.0 else rawIncome
+        val rawNeeds = prefs.getInt(KEY_NEEDS_PCT, 60)
+        val rawWants = prefs.getInt(KEY_WANTS_PCT, 20)
+        val rawSavings = prefs.getInt(KEY_SAVINGS_PCT, 20)
+        val isLegacy503020 = rawNeeds == 50 && rawWants == 30 && rawSavings == 20 &&
+            !prefs.getBoolean(KEY_USER_EDITED_BUDGET, false)
+        val needs = (if (isLegacy503020) 60 else rawNeeds).toLong()
+        val wants = (if (isLegacy503020) 20 else rawWants).toLong()
+        val savings = (if (isLegacy503020) 20 else rawSavings).toLong()
         val defaultSplit = prefs.getString(KEY_DEFAULT_SPLIT_MODE, SplitMode.EQUAL) ?: SplitMode.EQUAL
         val profile = loadUserProfile()
         val budgetsRaw = prefs.getString(KEY_CATEGORY_BUDGETS_JSON, null)
@@ -357,6 +423,7 @@ class LocalOfflineStore(context: Context) {
             .putInt(KEY_WANTS_PCT, wantsPct)
             .putInt(KEY_SAVINGS_PCT, savingsPct)
             .putString(KEY_DEFAULT_SPLIT_MODE, defaultSplitMode)
+            .putBoolean(KEY_USER_EDITED_BUDGET, true)
             .apply()
         _householdFlow.value = loadHousehold()
     }
@@ -482,125 +549,25 @@ class LocalOfflineStore(context: Context) {
         }
     }
 
-    // Tasks
+    // Tasks (Zero Seed Data)
     private fun loadTasks(): List<TaskItem> {
-        val raw = prefs.getString(KEY_TASKS_JSON, null)
-        if (raw == null) {
-            val today = DateCalendarUtils.todayEpochDay()
-            val ym = DateCalendarUtils.yearMonthFromEpochDay(today)
-            val initial = listOf(
-                TaskItem(
-                    id = "task_demo_1",
-                    userId = LOCAL_USER_ID,
-                    householdId = "FAM_OMNI_LOCAL",
-                    title = "Revisar orçamento familiar da semana",
-                    notes = "Conferir contas fixas, regra 50/30/20 e metas do mês",
-                    category = "Finanças",
-                    priority = "HIGH",
-                    isEssential = true,
-                    dateEpochDay = today,
-                    yearMonth = ym,
-                    alarmHour = 9,
-                    alarmMinute = 0,
-                    alarmEnabled = true,
-                    completed = false,
-                    isInbox = false,
-                    durationMinutes = 45,
-                    iconEmoji = "📊",
-                    taskColorHex = 0xFF0E7C5B,
-                    recurrence = TaskRecurrence.WEEKLY,
-                    ringtoneCategory = "FOCO",
-                    subtasks = listOf(
-                        SubtaskItem(id = "st_1", title = "Checar saldo disponível do mês", done = true),
-                        SubtaskItem(id = "st_2", title = "Confirmar faturas e contas da semana", done = false),
-                        SubtaskItem(id = "st_3", title = "Separar 20% da meta de reserva", done = false)
-                    ),
-                    privacyScope = PrivacyScope.FAMILY,
-                    assignedMemberId = LOCAL_USER_ID,
-                    assignedMemberName = "Família",
-                    assignedMemberColorHex = 0xFF0E7C5B,
-                    assignedMemberEmoji = "🌿"
-                ),
-                TaskItem(
-                    id = "task_demo_3",
-                    userId = LOCAL_USER_ID,
-                    householdId = "FAM_OMNI_LOCAL",
-                    title = "Pagar academia / plano pessoal",
-                    notes = "Conta individual (visível só no meu filtro Individual ou Tudo)",
-                    category = "Finanças",
-                    priority = "HIGH",
-                    isEssential = true,
-                    dateEpochDay = today,
-                    yearMonth = ym,
-                    alarmHour = 11,
-                    alarmMinute = 30,
-                    alarmEnabled = true,
-                    completed = false,
-                    isInbox = false,
-                    durationMinutes = 30,
-                    iconEmoji = "🏋️",
-                    taskColorHex = 0xFF7C4DFF,
-                    recurrence = TaskRecurrence.MONTHLY,
-                    ringtoneCategory = "CONTAS",
-                    subtasks = listOf(
-                        SubtaskItem(id = "st_4", title = "Copiar código PIX no app da academia", done = false),
-                        SubtaskItem(id = "st_5", title = "Dar check para lançar automaticamente nas Finanças", done = false)
-                    ),
-                    privacyScope = PrivacyScope.PERSONAL,
-                    assignedMemberId = LOCAL_USER_ID,
-                    assignedMemberName = "Só Meu",
-                    assignedMemberColorHex = 0xFF7C4DFF,
-                    assignedMemberEmoji = "🔒",
-                    estimatedCostBrl = 119.90,
-                    autoCreateExpenseOnComplete = true
-                ),
-                TaskItem(
-                    id = "task_demo_2",
-                    userId = LOCAL_USER_ID,
-                    householdId = "FAM_OMNI_LOCAL",
-                    title = "Compras da despensa e frutas da semana",
-                    notes = "Passar no mercado após o expediente",
-                    category = "Casa",
-                    priority = "MEDIUM",
-                    isEssential = false,
-                    dateEpochDay = today,
-                    yearMonth = ym,
-                    alarmHour = 18,
-                    alarmMinute = 0,
-                    alarmEnabled = true,
-                    completed = false,
-                    isInbox = false,
-                    durationMinutes = 60,
-                    iconEmoji = "🛒",
-                    taskColorHex = 0xFFD4AF37,
-                    recurrence = TaskRecurrence.WEEKLY,
-                    ringtoneCategory = "SUAVE",
-                    subtasks = listOf(
-                        SubtaskItem(id = "st_6", title = "Frutas, verduras e ovos", done = true),
-                        SubtaskItem(id = "st_7", title = "Café e itens de limpeza", done = false)
-                    ),
-                    privacyScope = PrivacyScope.FAMILY,
-                    assignedMemberId = LOCAL_USER_ID,
-                    assignedMemberName = "Família",
-                    assignedMemberColorHex = 0xFFD4AF37,
-                    assignedMemberEmoji = "🛒",
-                    estimatedCostBrl = 250.0,
-                    autoCreateExpenseOnComplete = true
-                )
-            )
-            saveTasks(initial)
-            return initial
-        }
+        val raw = prefs.getString(KEY_TASKS_JSON, null) ?: return emptyList()
         return try {
             val arr = JSONArray(raw)
-            buildList {
+            var hadDemoTasks = false
+            val loaded = buildList {
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
+                    val id = obj.optString("id")
+                    if (id.startsWith("task_demo_")) {
+                        hadDemoTasks = true
+                        continue
+                    }
                     val prio = obj.optString("priority", "MEDIUM")
                     val memberCol = obj.optLong("assignedMemberColorHex", 0xFF0E7C5B)
                     add(
                         TaskItem(
-                            id = obj.optString("id"),
+                            id = id,
                             userId = obj.optString("userId", LOCAL_USER_ID),
                             householdId = obj.optString("householdId", "FAM_OMNI_LOCAL"),
                             title = obj.optString("title"),
@@ -650,6 +617,8 @@ class LocalOfflineStore(context: Context) {
                     .thenBy { it.alarmHour }
                     .thenBy { it.alarmMinute }
             )
+            if (hadDemoTasks) saveTasks(loaded)
+            loaded
         } catch (_: Exception) {
             emptyList()
         }
@@ -979,72 +948,16 @@ class LocalOfflineStore(context: Context) {
         _tasksFlow.value = updated
     }
 
-    // Transactions
+    // Transactions (Zero Seed Data)
     private fun loadTransactions(): List<FinanceTransaction> {
-        val raw = prefs.getString(KEY_TX_JSON, null)
-        if (raw == null) {
-            val today = DateCalendarUtils.todayEpochDay()
-            val ym = DateCalendarUtils.yearMonthFromEpochDay(today)
-            val initial = listOf(
-                FinanceTransaction(
-                    id = "tx_demo_1",
-                    userId = LOCAL_USER_ID,
-                    householdId = "FAM_OMNI_LOCAL",
-                    title = "Supermercado da Família",
-                    amountOriginal = 480.0,
-                    currency = "BRL",
-                    exchangeRateToBrl = 1.0,
-                    amountBrl = 480.0,
-                    type = "EXPENSE",
-                    budgetBucket = "NEEDS",
-                    category = "Alimentação",
-                    dateEpochDay = today,
-                    yearMonth = ym,
-                    createdByName = "Família",
-                    createdByColorHex = 0xFF0E7C5B,
-                    createdByEmoji = "🌿",
-                    privacyScope = PrivacyScope.FAMILY,
-                    responsibleMemberName = "Família",
-                    responsibleMemberColorHex = 0xFF0E7C5B,
-                    splitMode = SplitMode.EQUAL,
-                    accountId = "acc_nubank",
-                    accountName = "Nubank",
-                    isPaid = true
-                ),
-                FinanceTransaction(
-                    id = "tx_demo_2",
-                    userId = LOCAL_USER_ID,
-                    householdId = "FAM_OMNI_LOCAL",
-                    title = "Jantar de Fim de Semana",
-                    amountOriginal = 165.0,
-                    currency = "BRL",
-                    exchangeRateToBrl = 1.0,
-                    amountBrl = 165.0,
-                    type = "EXPENSE",
-                    budgetBucket = "WANTS",
-                    category = "Lazer",
-                    dateEpochDay = today,
-                    yearMonth = ym,
-                    createdByName = "Família",
-                    createdByColorHex = 0xFFD4AF37,
-                    createdByEmoji = "✨",
-                    privacyScope = PrivacyScope.FAMILY,
-                    responsibleMemberName = "Família",
-                    responsibleMemberColorHex = 0xFFD4AF37,
-                    splitMode = SplitMode.EQUAL,
-                    accountId = "acc_itau",
-                    accountName = "Itaú",
-                    isPaid = true
-                )
-            )
-            saveTransactions(initial)
-            return initial
-        }
+        val raw = prefs.getString(KEY_TX_JSON, null) ?: return emptyList()
         return try {
             val arr = JSONArray(raw)
             buildList {
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
+                    val id = obj.optString("id")
+                    if (id.startsWith("tx_demo_")) continue
                     val isCredit = obj.optBoolean("isCreditCard", false)
                     add(
                         FinanceTransaction(
@@ -1392,69 +1305,19 @@ class LocalOfflineStore(context: Context) {
         _transactionsFlow.value = updated
     }
 
-    // Subscriptions
+    // Subscriptions (Zero Seed Data)
     private fun loadSubscriptions(): List<SubscriptionBill> {
-        val raw = prefs.getString(KEY_SUBS_JSON, null)
-        if (raw == null) {
-            val todayDayOfMonth = DateCalendarUtils.fromEpochDay(DateCalendarUtils.todayEpochDay()).third.toLong()
-            val initial = listOf(
-                SubscriptionBill(
-                    id = "sub_demo_1",
-                    userId = LOCAL_USER_ID,
-                    householdId = "FAM_OMNI_LOCAL",
-                    title = "Internet Fibra da Casa",
-                    amountOriginal = 129.90,
-                    currency = "BRL",
-                    exchangeRateToBrl = 1.0,
-                    amountBrl = 129.90,
-                    category = "Moradia",
-                    budgetBucket = "NEEDS",
-                    dueDayOfMonth = todayDayOfMonth,
-                    reminderDaysBefore = 2,
-                    autoPostEnabled = true,
-                    lastPostedYearMonth = "",
-                    active = true,
-                    privacyScope = PrivacyScope.FAMILY,
-                    responsibleMemberName = "Família",
-                    responsibleMemberColorHex = 0xFF0E7C5B,
-                    splitMode = SplitMode.EQUAL,
-                    ringtoneCategory = "CONTAS"
-                ),
-                SubscriptionBill(
-                    id = "sub_demo_2",
-                    userId = LOCAL_USER_ID,
-                    householdId = "FAM_OMNI_LOCAL",
-                    title = "Plano Celular Pessoal",
-                    amountOriginal = 59.90,
-                    currency = "BRL",
-                    exchangeRateToBrl = 1.0,
-                    amountBrl = 59.90,
-                    category = "Assinatura",
-                    budgetBucket = "NEEDS",
-                    dueDayOfMonth = todayDayOfMonth,
-                    reminderDaysBefore = 1,
-                    autoPostEnabled = true,
-                    lastPostedYearMonth = "",
-                    active = true,
-                    privacyScope = PrivacyScope.PERSONAL,
-                    responsibleMemberName = "Só Meu",
-                    responsibleMemberColorHex = 0xFF7C4DFF,
-                    responsibleMemberEmoji = "🔒",
-                    splitMode = SplitMode.NONE,
-                    ringtoneCategory = "CONTAS"
-                )
-            )
-            saveSubscriptions(initial)
-            return initial
-        }
+        val raw = prefs.getString(KEY_SUBS_JSON, null) ?: return emptyList()
         return try {
             val arr = JSONArray(raw)
             buildList {
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
+                    val id = obj.optString("id")
+                    if (id.startsWith("sub_demo_")) continue
                     add(
                         SubscriptionBill(
-                            id = obj.optString("id"),
+                            id = id,
                             userId = obj.optString("userId", LOCAL_USER_ID),
                             householdId = obj.optString("householdId", "FAM_OMNI_LOCAL"),
                             title = obj.optString("title"),
@@ -1695,38 +1558,19 @@ class LocalOfflineStore(context: Context) {
         _subscriptionsFlow.value = updated
     }
 
-    // Savings Goals
+    // Savings Goals (Zero Seed Data)
     private fun loadSavingsGoals(): List<SavingsGoal> {
-        val raw = prefs.getString(KEY_GOALS_JSON, null)
-        if (raw == null) {
-            val initial = listOf(
-                SavingsGoal(
-                    id = "goal_demo_1",
-                    userId = LOCAL_USER_ID,
-                    householdId = "FAM_OMNI_LOCAL",
-                    title = "Reserva de Emergência Familiar",
-                    targetAmountBrl = 15000.0,
-                    currentAmountBrl = 4500.0,
-                    incomePercentage = 15,
-                    category = "Reserva",
-                    targetYearMonth = "2027-06",
-                    privacyScope = PrivacyScope.FAMILY,
-                    responsibleMemberName = "Família",
-                    responsibleMemberColorHex = 0xFF0E7C5B,
-                    splitMode = SplitMode.EQUAL
-                )
-            )
-            saveSavingsGoals(initial)
-            return initial
-        }
+        val raw = prefs.getString(KEY_GOALS_JSON, null) ?: return emptyList()
         return try {
             val arr = JSONArray(raw)
             buildList {
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
+                    val id = obj.optString("id")
+                    if (id.startsWith("goal_demo_")) continue
                     add(
                         SavingsGoal(
-                            id = obj.optString("id"),
+                            id = id,
                             userId = obj.optString("userId", LOCAL_USER_ID),
                             householdId = obj.optString("householdId", "FAM_OMNI_LOCAL"),
                             title = obj.optString("title"),
@@ -1875,6 +1719,66 @@ class LocalOfflineStore(context: Context) {
         _savingsGoalsFlow.value = updated
     }
 
+    /**
+     * Substitui o cache local pelos dados reais baixados do Firestore ("Nuvem Primeiro"),
+     * garantindo que os widgets da tela inicial e o modo offline reflitam exatamente a família na nuvem.
+     */
+    fun replaceAllWithCloudPull(
+        profile: UserProfile,
+        household: Household,
+        tasks: List<TaskItem>,
+        transactions: List<FinanceTransaction>,
+        subscriptions: List<SubscriptionBill>,
+        savingsGoals: List<SavingsGoal>
+    ) {
+        val cleanHouseholdId = household.householdId.ifBlank { household.id }.ifBlank { "FAM_OMNI2448" }
+        val sanitizedAccounts = household.bankAccounts.ifEmpty { BankAccountCatalog.defaultAccounts() }.map { it.sanitized() }
+        saveBankAccounts(sanitizedAccounts)
+        saveExtraMembers(household.members)
+        prefs.edit()
+            .putString(KEY_HOUSEHOLD_ID, cleanHouseholdId)
+            .putString(KEY_HOUSEHOLD_NAME, household.name.ifBlank { "Família Omni" })
+            .putString(KEY_THEME_MODE, profile.themeMode.ifBlank { "SYSTEM" })
+            .putString(KEY_MEMBER_NAME, profile.displayName)
+            .putString(KEY_MEMBER_EMAIL, profile.email)
+            .putString(KEY_MEMBER_AVATAR_BASE64, profile.avatarBase64)
+            .putLong(KEY_MEMBER_COLOR_HEX, profile.memberColorHex)
+            .putString(KEY_MEMBER_EMOJI, profile.avatarEmoji)
+            .putString(KEY_MEMBER_INITIALS, profile.avatarInitials)
+            .putString(KEY_MEMBER_ROLE, profile.memberRole)
+            .putFloat(KEY_MEMBER_SPLIT_PCT, profile.defaultSplitPercentage.toFloat())
+            .putFloat(KEY_MONTHLY_INCOME, household.monthlyIncomeBrl.toFloat())
+            .putInt(KEY_NEEDS_PCT, household.needsPercentage.toInt())
+            .putInt(KEY_WANTS_PCT, household.wantsPercentage.toInt())
+            .putInt(KEY_SAVINGS_PCT, household.savingsPercentage.toInt())
+            .putString(KEY_DEFAULT_SPLIT_MODE, household.defaultSplitMode.ifBlank { SplitMode.EQUAL })
+            .putBoolean(KEY_USER_EDITED_BUDGET, true)
+            .putString(KEY_CATEGORY_BUDGETS_JSON, serializeDoubleMap(household.categoryBudgetsBrl).toString())
+            .putString(KEY_CUSTOM_CATEGORIES_JSON, serializeStringList(household.customCategories).toString())
+            .apply()
+
+        if (household.muralItems.isNotEmpty()) {
+            OmniBackupAndMigrationManager.saveFamilyMuralItems(appContext, household.muralItems, notifyWidgets = false)
+        }
+
+        val cleanTasks = tasks.filterNot { it.id.startsWith("task_demo_") }
+        val cleanTx = transactions.filterNot { it.id.startsWith("tx_demo_") }
+        val cleanSubs = subscriptions.filterNot { it.id.startsWith("sub_demo_") }
+        val cleanGoals = savingsGoals.filterNot { it.id.startsWith("goal_demo_") }
+
+        saveTasks(cleanTasks)
+        saveTransactions(cleanTx)
+        saveSubscriptions(cleanSubs)
+        saveSavingsGoals(cleanGoals)
+
+        _userProfileFlow.value = loadUserProfile()
+        _householdFlow.value = loadHousehold()
+        _tasksFlow.value = cleanTasks
+        _transactionsFlow.value = cleanTx
+        _subscriptionsFlow.value = cleanSubs
+        _savingsGoalsFlow.value = cleanGoals
+    }
+
     companion object {
         const val LOCAL_USER_ID = "LOCAL_TEST_USER"
         private const val PREFS_NAME = "aura_local_offline_store"
@@ -1882,6 +1786,8 @@ class LocalOfflineStore(context: Context) {
         private const val KEY_HOUSEHOLD_NAME = "household_name"
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_MEMBER_NAME = "member_name"
+        private const val KEY_MEMBER_EMAIL = "member_email"
+        private const val KEY_MEMBER_AVATAR_BASE64 = "member_avatar_base64"
         private const val KEY_MEMBER_COLOR_HEX = "member_color_hex"
         private const val KEY_MEMBER_EMOJI = "member_emoji"
         private const val KEY_MEMBER_INITIALS = "member_initials"
@@ -1892,6 +1798,7 @@ class LocalOfflineStore(context: Context) {
         private const val KEY_NEEDS_PCT = "needs_pct"
         private const val KEY_WANTS_PCT = "wants_pct"
         private const val KEY_SAVINGS_PCT = "savings_pct"
+        private const val KEY_USER_EDITED_BUDGET = "user_edited_budget"
         private const val KEY_FAMILY_MEMBERS_JSON = "family_members_json"
         private const val KEY_BANK_ACCOUNTS_JSON = "bank_accounts_json"
         private const val KEY_TASKS_JSON = "tasks_json"

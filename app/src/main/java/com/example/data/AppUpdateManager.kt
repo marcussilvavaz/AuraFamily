@@ -61,11 +61,13 @@ data class AppReleaseMetadata(
 
     companion object {
         const val AI_STUDIO_PORTAL_URL = "https://aistudio.google.com/apps"
+        const val GITHUB_LATEST_RELEASE_API_URL = "https://api.github.com/repos/marcussilvavaz/AuraFamily/releases/latest"
+        const val GITHUB_DEFAULT_APK_DOWNLOAD_URL = "https://github.com/marcussilvavaz/AuraFamily/releases/latest/download/Omni.apk"
         const val RELEASE_NOTES_SIMPLE =
-            "• Estilo Visual Orgânico global (Pílula & Fluido, Translúcido e Suave Minimal) e temas Claro de alto contraste + Preto Puro (AMOLED)\n" +
-            "• Barra inferior com 5 abas, Perfil no avatar do topo, Busca Global no Hub, Bento Grid 2 colunas e Botão Flutuante Único com toque longo para Voz\n" +
-            "• Mural da Família compartilhado sem senha na aba Diário (lista de compras interativa, notas fixadas e cor de cada membro)\n" +
-            "• Módulo Financeiro completo: limite de cartão com barra de uso, fechamento/vencimento automático, pagamento de fatura em 1 toque, botão Olhinho, teto de gastos por categoria e Resumo Matinal"
+            "• Fusão segura de famílias na nuvem para FAM_OMNI2448 (Família Vaz), sincronização Cloud-First e fotos de perfil em Base64 entre aparelhos\n" +
+            "• Notificações reais em 2º plano (Samsung One UI / Android 12+) com reagendamento automático pós-reinicialização\n" +
+            "• Tema Preto Puro (AMOLED #000000) persistente, PIN do Diário Privado mascarado com confirmação de segurança e regra 60/20/20 padronizada\n" +
+            "• Atualização OTA automática via GitHub Releases (marcussilvavaz/AuraFamily) com instalador direto"
 
         const val DEFAULT_RELEASE_NOTES = RELEASE_NOTES_SIMPLE
     }
@@ -133,6 +135,7 @@ class AppUpdateManager(
         ensureUpdateNotificationChannel()
         detectLocalApkUpgrade()
         startRealtimeUpdateListener()
+        checkGitHubReleaseInBackground(isManualCheck = false)
     }
 
     /**
@@ -276,29 +279,13 @@ class AppUpdateManager(
             return
         }
 
-        // Determine if the remote release in Firestore is newer than this installed APK:
+        // Compare exclusively remote.versionCode > BuildConfig.VERSION_CODE (never trigger false alerts by dexSignature differences)
         val storedLocalRev = prefs.getLong(KEY_LOCAL_KNOWN_REVISION, 1L)
-        val selfPublishedRev = prefs.getLong(KEY_SELF_PUBLISHED_REVISION, -1L)
-        val acknowledgedRev = prefs.getLong(KEY_ACKNOWLEDGED_REVISION, -1L)
+        val dismissedVersionCode = prefs.getInt(KEY_DISMISSED_VERSION_CODE, -1)
 
         val isRemoteHigherVersionCode = sanitizedRemote.versionCode > localVer
-        val isRemoteNewerCompileTimestamp =
-            sanitizedRemote.buildTimestampMs > 0L &&
-                localBuildTs > 0L &&
-                (sanitizedRemote.buildTimestampMs > localBuildTs + 2000L)
-        val isRemoteDifferentSignature =
-            latestRemoteSig.isNotBlank() && latestRemoteSig != localSignature
-        val isManualRevisionBumpForOtherDevices =
-            sanitizedRemote.buildRevision > storedLocalRev && selfPublishedRev < sanitizedRemote.buildRevision
 
-        val hasUnacknowledgedRemoteUpdate =
-            (isRemoteHigherVersionCode ||
-                isRemoteNewerCompileTimestamp ||
-                isRemoteDifferentSignature ||
-                isManualRevisionBumpForOtherDevices) &&
-                acknowledgedRev < sanitizedRemote.buildRevision
-
-        if (!hasUnacknowledgedRemoteUpdate) {
+        if (!isRemoteHigherVersionCode) {
             prefs.edit().putLong(KEY_LOCAL_KNOWN_REVISION, sanitizedRemote.buildRevision).apply()
             _uiState.value = _uiState.value.copy(
                 localKnownRevision = sanitizedRemote.buildRevision,
@@ -306,26 +293,28 @@ class AppUpdateManager(
                 isUpdateAvailable = false,
                 isCheckingOrPublishing = false,
                 customDownloadUrl = cleanRemoteUrl.ifBlank { _uiState.value.customDownloadUrl },
-                lastCheckStatusMessage = "App atualizado na última compilação (Rev #${sanitizedRemote.buildRevision} • v${BuildConfig.VERSION_NAME} • #$localSignature)"
+                lastCheckStatusMessage = "App atualizado na última versão (v${BuildConfig.VERSION_NAME} • Código ${BuildConfig.VERSION_CODE})"
             )
             return
         }
 
-        val isPreviouslyDismissedSameRev =
-            _uiState.value.isModalDismissedForSession &&
-                _uiState.value.remoteRelease?.buildRevision == sanitizedRemote.buildRevision
+        val isDismissedForThisVersion =
+            (_uiState.value.isModalDismissedForSession && _uiState.value.remoteRelease?.versionCode == sanitizedRemote.versionCode) ||
+                (dismissedVersionCode == sanitizedRemote.versionCode && !sanitizedRemote.mandatory)
 
         _uiState.value = _uiState.value.copy(
             localKnownRevision = storedLocalRev,
             remoteRelease = sanitizedRemote,
             isUpdateAvailable = true,
-            isModalDismissedForSession = isPreviouslyDismissedSameRev,
+            isModalDismissedForSession = isDismissedForThisVersion,
             isCheckingOrPublishing = false,
             customDownloadUrl = cleanRemoteUrl.ifBlank { _uiState.value.customDownloadUrl },
-            lastCheckStatusMessage = "🚀 Nova atualização disponível! (Revisão #${sanitizedRemote.buildRevision} • v${sanitizedRemote.versionName})"
+            lastCheckStatusMessage = "🚀 Nova atualização disponível! (v${sanitizedRemote.versionName} • Código ${sanitizedRemote.versionCode})"
         )
 
-        maybeSendSystemUpdateNotification(sanitizedRemote)
+        if (!isDismissedForThisVersion) {
+            maybeSendSystemUpdateNotification(sanitizedRemote)
+        }
     }
 
     /**
@@ -629,14 +618,121 @@ class AppUpdateManager(
     }
 
     /**
-     * Forces an immediate manual check against Firestore `/app_releases/latest`.
+     * Checks GitHub Releases (`https://api.github.com/repos/marcussilvavaz/AuraFamily/releases/latest`)
+     * for a newer `VERSION_CODE:(\d+)` and `.apk` asset `browser_download_url`.
+     * Always ends the loading state (`isCheckingOrPublishing = false`) inside `finally`.
+     */
+    private fun checkGitHubReleaseInBackground(isManualCheck: Boolean) {
+        backgroundScope.launch {
+            try {
+                val ghRelease = fetchLatestGitHubRelease()
+                if (ghRelease != null) {
+                    val localVer = BuildConfig.VERSION_CODE
+                    val dismissedVer = prefs.getInt(KEY_DISMISSED_VERSION_CODE, -1)
+                    if (ghRelease.versionCode > localVer) {
+                        val shouldDismissModal = !isManualCheck && dismissedVer == ghRelease.versionCode
+                        _uiState.value = _uiState.value.copy(
+                            remoteRelease = ghRelease,
+                            isUpdateAvailable = true,
+                            isModalDismissedForSession = shouldDismissModal,
+                            customDownloadUrl = ghRelease.downloadUrl.ifBlank { _uiState.value.customDownloadUrl },
+                            lastCheckStatusMessage = "🚀 Nova versão disponível no GitHub Releases: v${ghRelease.versionName} (Código ${ghRelease.versionCode})!"
+                        )
+                        if (!shouldDismissModal) {
+                            maybeSendSystemUpdateNotification(ghRelease)
+                        }
+                    } else if (isManualCheck) {
+                        _uiState.value = _uiState.value.copy(
+                            isUpdateAvailable = false,
+                            lastCheckStatusMessage = "✅ Você já está na versão mais recente (v${BuildConfig.VERSION_NAME} • Código ${BuildConfig.VERSION_CODE})."
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+                // Fallback to Firestore/local status gracefully
+            } finally {
+                _uiState.value = _uiState.value.copy(isCheckingOrPublishing = false)
+            }
+        }
+    }
+
+    private fun fetchLatestGitHubRelease(): AppReleaseMetadata? {
+        return runCatching {
+            val url = URL(AppReleaseMetadata.GITHUB_LATEST_RELEASE_API_URL)
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10000
+                readTimeout = 12000
+                setRequestProperty("Accept", "application/vnd.github+json")
+                setRequestProperty("User-Agent", "Omni-Android-Updater/${BuildConfig.VERSION_NAME}")
+            }
+            val code = conn.responseCode
+            if (code !in 200..299) return@runCatching null
+            val bodyText = conn.inputStream.bufferedReader().use { it.readText() }
+            val json = org.json.JSONObject(bodyText)
+            val tagName = json.optString("tag_name", "").trim()
+            val releaseBody = json.optString("body", "").trim()
+
+            // Extract VERSION_CODE:(\d+) from body or fallback to digits in tag_name
+            val bodyCodeMatch = Regex("""VERSION_CODE\s*:\s*(\d+)""", RegexOption.IGNORE_CASE).find(releaseBody)
+            val remoteVersionCode = bodyCodeMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("""-b(\d+)$""").find(tagName)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("""(\d+)$""").find(tagName)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: BuildConfig.VERSION_CODE
+
+            val cleanVersionName = tagName
+                .removePrefix("v")
+                .substringBefore("-b")
+                .ifBlank { BuildConfig.VERSION_NAME }
+
+            var apkDownloadUrl = AppReleaseMetadata.GITHUB_DEFAULT_APK_DOWNLOAD_URL
+            val assets = json.optJSONArray("assets")
+            if (assets != null) {
+                for (i in 0 until assets.length()) {
+                    val asset = assets.optJSONObject(i) ?: continue
+                    val assetName = asset.optString("name", "")
+                    val browserUrl = asset.optString("browser_download_url", "")
+                    if (assetName.endsWith(".apk", ignoreCase = true) && browserUrl.isNotBlank()) {
+                        apkDownloadUrl = browserUrl
+                        break
+                    }
+                }
+            }
+
+            val cleanNotes = releaseBody
+                .lines()
+                .filterNot { it.trim().startsWith("VERSION_CODE:", ignoreCase = true) }
+                .joinToString("\n")
+                .trim()
+                .ifBlank { AppReleaseMetadata.DEFAULT_RELEASE_NOTES }
+
+            AppReleaseMetadata(
+                buildRevision = remoteVersionCode.toLong(),
+                versionCode = remoteVersionCode,
+                versionName = cleanVersionName,
+                dexSignatureChain = localSignature,
+                releaseNotes = cleanNotes,
+                downloadUrl = apkDownloadUrl,
+                mandatory = false,
+                publishedBy = "GitHub Releases",
+                updatedAtEpochMs = System.currentTimeMillis(),
+                buildTimestampMs = System.currentTimeMillis()
+            )
+        }.getOrNull()
+    }
+
+    /**
+     * Forces an immediate manual check against GitHub Releases and Firestore `/app_releases/latest`.
      */
     fun checkNow() {
-        val firestore = db ?: return
         _uiState.value = _uiState.value.copy(
             isCheckingOrPublishing = true,
-            lastCheckStatusMessage = "Verificando se há novas alterações publicadas..."
+            isModalDismissedForSession = false,
+            lastCheckStatusMessage = "Verificando atualizações no GitHub Releases e na nuvem..."
         )
+        checkGitHubReleaseInBackground(isManualCheck = true)
+
+        val firestore = db ?: return
         firestore.collection(COLLECTION_APP_RELEASES)
             .document(DOC_LATEST)
             .get()
@@ -646,27 +742,20 @@ class AppUpdateManager(
                         remote = snapshot.toAppReleaseMetadata(),
                         isStudioPreviewOverride = isStudioPreview
                     )
-                } else {
-                    publishCurrentBuildAsLatest(
-                        previousChain = emptyList(),
-                        nextRevision = 1L,
-                        releaseNotes = AppReleaseMetadata.DEFAULT_RELEASE_NOTES,
-                        downloadUrl = _uiState.value.customDownloadUrl,
-                        mandatory = false
-                    )
                 }
             }
-            .addOnFailureListener {
-                _uiState.value = _uiState.value.copy(
-                    isCheckingOrPublishing = false,
-                    lastCheckStatusMessage = "Verificação concluída • Build atual #$localSignature (v${BuildConfig.VERSION_NAME})"
-                )
+            .addOnCompleteListener {
+                _uiState.value = _uiState.value.copy(isCheckingOrPublishing = false)
             }
     }
 
     fun dismissModalForSession() {
-        val mandatory = _uiState.value.remoteRelease?.mandatory == true
+        val remote = _uiState.value.remoteRelease
+        val mandatory = remote?.mandatory == true
         if (!mandatory) {
+            if (remote != null && remote.versionCode > BuildConfig.VERSION_CODE) {
+                prefs.edit().putInt(KEY_DISMISSED_VERSION_CODE, remote.versionCode).apply()
+            }
             _uiState.value = _uiState.value.copy(isModalDismissedForSession = true)
         }
     }
@@ -812,21 +901,132 @@ class AppUpdateManager(
     }
 
     fun downloadAndInstallUpdate(context: Context, onMessage: (String) -> Unit) {
-        if (hasValidExternalDownloadUrl()) {
-            val opened = openUpdateDownloadLink(context)
-            if (opened) {
-                onMessage("Abrindo download da atualização v${_uiState.value.remoteRelease?.versionName ?: BuildConfig.VERSION_NAME}...")
-                return
+        // 1. Check unknown sources permission on Android 8.0+ (API 26+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val canInstall = runCatching { context.packageManager.canRequestPackageInstalls() }.getOrDefault(true)
+            if (!canInstall) {
+                runCatching {
+                    val intent = Intent(
+                        android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:${context.packageName}")
+                    ).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                    onMessage("Autorize 'Instalar apps desconhecidos' para atualizar o Omni diretamente.")
+                    return
+                }
             }
         }
-        val openedPortal = openUpdateDownloadLink(context)
-        if (openedPortal) {
-            onMessage("Abrindo página para baixar a nova versão do Omni...")
-        } else {
-            shareCurrentInstalledApk(context)
-                .onSuccess { msg -> onMessage(msg) }
-                .onFailure { err -> onMessage("Não foi possível iniciar o download: ${err.localizedMessage}") }
+
+        val targetUrl = getEffectiveExternalDownloadUrl().ifBlank {
+            AppReleaseMetadata.GITHUB_DEFAULT_APK_DOWNLOAD_URL
         }
+        val verName = _uiState.value.remoteRelease?.versionName ?: BuildConfig.VERSION_NAME
+
+        _uiState.value = _uiState.value.copy(
+            isCheckingOrPublishing = true,
+            lastCheckStatusMessage = "Baixando instalador Omni v$verName..."
+        )
+        onMessage("Baixando atualização Omni v$verName...")
+
+        backgroundScope.launch {
+            try {
+                // Clean old .apk files before downloading
+                val exportDir = File(context.cacheDir, "apk_exports").apply { mkdirs() }
+                exportDir.listFiles()?.forEach { file ->
+                    if (file.name.endsWith(".apk", ignoreCase = true)) {
+                        runCatching { file.delete() }
+                    }
+                }
+                context.getExternalFilesDir(null)?.let { extDir ->
+                    File(extDir, "updates").listFiles()?.forEach { file ->
+                        if (file.name.endsWith(".apk", ignoreCase = true)) {
+                            runCatching { file.delete() }
+                        }
+                    }
+                }
+
+                val targetFile = File(exportDir, "Omni-update-v$verName.apk")
+                val downloaded = downloadApkFollowingRedirects(targetUrl, targetFile)
+
+                withContext(Dispatchers.Main) {
+                    if (downloaded && targetFile.exists() && targetFile.length() > 100_000L) {
+                        val apkUri = FileProvider.getUriForFile(
+                            context,
+                            "${context.packageName}.fileprovider",
+                            targetFile
+                        )
+                        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(apkUri, "application/vnd.android.package-archive")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(installIntent)
+                        onMessage("Instalador Omni v$verName pronto! Confirme a instalação na tela.")
+                    } else {
+                        val opened = openUpdateDownloadLink(context, targetUrl)
+                        if (opened) {
+                            onMessage("Abrindo download direto do Omni v$verName no navegador...")
+                        } else {
+                            onMessage("Não foi possível baixar o APK automaticamente.")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    val opened = openUpdateDownloadLink(context, targetUrl)
+                    if (opened) {
+                        onMessage("Abrindo download da atualização v$verName...")
+                    } else {
+                        onMessage("Erro ao baixar atualização: ${e.localizedMessage ?: "verifique sua conexão"}")
+                    }
+                }
+            } finally {
+                _uiState.value = _uiState.value.copy(
+                    isCheckingOrPublishing = false,
+                    lastCheckStatusMessage = "Pronto (v${BuildConfig.VERSION_NAME} • Código ${BuildConfig.VERSION_CODE})"
+                )
+            }
+        }
+    }
+
+    private fun downloadApkFollowingRedirects(startUrl: String, destinationFile: File): Boolean {
+        return runCatching {
+            var currentUrl = startUrl
+            var redirects = 0
+            while (redirects < 6) {
+                val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = true
+                    connectTimeout = 15000
+                    readTimeout = 60000
+                    setRequestProperty("User-Agent", "Omni-Android-Updater/${BuildConfig.VERSION_NAME}")
+                    setRequestProperty("Accept", "application/octet-stream, application/vnd.android.package-archive, */*")
+                }
+                val status = conn.responseCode
+                if (status in 300..399) {
+                    val location = conn.getHeaderField("Location")
+                    conn.disconnect()
+                    if (location.isNullOrBlank()) return@runCatching false
+                    currentUrl = location
+                    redirects++
+                    continue
+                }
+                if (status !in 200..299) {
+                    conn.disconnect()
+                    return@runCatching false
+                }
+                conn.inputStream.use { input ->
+                    destinationFile.outputStream().use { output ->
+                        input.copyTo(output)
+                        output.flush()
+                    }
+                }
+                conn.disconnect()
+                return@runCatching destinationFile.exists() && destinationFile.length() > 100_000L
+            }
+            false
+        }.getOrDefault(false)
     }
 
     fun openAiStudioPortal(context: Context): Boolean {
@@ -941,6 +1141,7 @@ class AppUpdateManager(
         private const val KEY_CUSTOM_DOWNLOAD_URL = "custom_download_url"
         private const val KEY_LAST_UPLOADED_APK_SIG = "last_uploaded_apk_sig"
         private const val KEY_LAST_UPLOADED_APK_URL = "last_uploaded_apk_url"
+        private const val KEY_DISMISSED_VERSION_CODE = "dismissed_version_code"
 
         private const val COLLECTION_APP_RELEASES = "app_releases"
         private const val DOC_LATEST = "latest"

@@ -186,6 +186,97 @@ fun MainFeatureScreen(
         }
     }
 
+    val isRestoringFromCloud by viewModel.isRestoringFromCloud.collectAsStateWithLifecycle()
+    val selectedYearMonth by viewModel.selectedYearMonth.collectAsStateWithLifecycle()
+    val selectedEpochDay by viewModel.selectedEpochDay.collectAsStateWithLifecycle()
+    val currencyRates by viewModel.currencyRates.collectAsStateWithLifecycle()
+    val statusBanner by viewModel.statusBannerMessage.collectAsStateWithLifecycle()
+    val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
+
+    val userProfileState by viewModel.userProfileState.collectAsStateWithLifecycle()
+    val householdState by viewModel.householdState.collectAsStateWithLifecycle()
+    val tasksState by viewModel.tasksState.collectAsStateWithLifecycle()
+    val transactionsState by viewModel.transactionsState.collectAsStateWithLifecycle()
+    val subscriptionsState by viewModel.subscriptionsState.collectAsStateWithLifecycle()
+    val savingsGoalsState by viewModel.savingsGoalsState.collectAsStateWithLifecycle()
+
+    val userProfile = (userProfileState as? UiState.Success)?.data
+    val loadedHousehold = (householdState as? UiState.Success)?.data
+
+    // Quando o perfil/família for restaurado da nuvem, sincroniza nome, cor, avatarBase64 e marca onboarding como concluído se já houver perfil válido na nuvem
+    LaunchedEffect(userProfile?.displayName, userProfile?.memberColorHex, userProfile?.avatarBase64, loadedHousehold?.householdId) {
+        val remoteName = userProfile?.displayName?.trim().orEmpty()
+        if (remoteName.isNotBlank() &&
+            !remoteName.equals("Você", ignoreCase = true) &&
+            !remoteName.equals("VO", ignoreCase = true)
+        ) {
+            if (customizationConfig.profileName.isBlank() ||
+                customizationConfig.profileName.equals("Você", ignoreCase = true) ||
+                customizationConfig.profileName.equals("VO", ignoreCase = true)
+            ) {
+                customizationRepo.updateProfileIdentity(
+                    name = remoteName,
+                    colorHex = userProfile?.memberColorHex ?: customizationConfig.profileColorHex
+                )
+            }
+            if (!customizationConfig.hasCompletedModularOnboarding && !loadedHousehold?.householdId.isNullOrBlank()) {
+                customizationRepo.completeModularOnboarding()
+            }
+        }
+        val remoteAvatar = userProfile?.avatarBase64.orEmpty()
+        if (remoteAvatar.isNotBlank() && remoteAvatar != customizationConfig.profileAvatarBase64) {
+            customizationRepo.updateProfileAvatarBase64(remoteAvatar)
+        }
+    }
+
+    // FASE "NUVEM PRIMEIRO": Exibe tela de carregamento "Restaurando seus dados da nuvem..." antes de abrir onboarding ou Hub
+    if (isRestoringFromCloud) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 420.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(28.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Restaurando seus dados da nuvem...",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Sincronizando sua família oficial, agenda, finanças, saúde e mural no Cloud Firestore.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+        return
+    }
+
     // PASSO 1: Exibir "Meu Perfil e Módulos" no primeiro acesso como onboarding
     if ((!customizationConfig.hasCompletedModularOnboarding && pendingWidgetAction.isNullOrBlank()) || showModularOnboardingModal) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -213,20 +304,6 @@ fun MainFeatureScreen(
         return
     }
 
-    val selectedYearMonth by viewModel.selectedYearMonth.collectAsStateWithLifecycle()
-    val selectedEpochDay by viewModel.selectedEpochDay.collectAsStateWithLifecycle()
-    val currencyRates by viewModel.currencyRates.collectAsStateWithLifecycle()
-    val statusBanner by viewModel.statusBannerMessage.collectAsStateWithLifecycle()
-    val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
-
-    val userProfileState by viewModel.userProfileState.collectAsStateWithLifecycle()
-    val householdState by viewModel.householdState.collectAsStateWithLifecycle()
-    val tasksState by viewModel.tasksState.collectAsStateWithLifecycle()
-    val transactionsState by viewModel.transactionsState.collectAsStateWithLifecycle()
-    val subscriptionsState by viewModel.subscriptionsState.collectAsStateWithLifecycle()
-    val savingsGoalsState by viewModel.savingsGoalsState.collectAsStateWithLifecycle()
-
-    val userProfile = (userProfileState as? UiState.Success)?.data
     val effectiveDiaryUserId = userProfile?.userId ?: LocalOfflineStore.LOCAL_USER_ID
     val diaryRepo = remember(effectiveDiaryUserId) {
         PrivateDiaryRepository(context.applicationContext, effectiveDiaryUserId)
@@ -345,6 +422,22 @@ fun MainFeatureScreen(
             enabled = customizationConfig.morningSummaryEnabled,
             hour = customizationConfig.morningSummaryHour,
             minute = customizationConfig.morningSummaryMinute
+        )
+    }
+
+    // Keep Agenda tasks and Subscription bills alarms synchronized in real time when received via SnapshotListener
+    LaunchedEffect(tasks, subscriptions) {
+        if (tasks.isNotEmpty() || subscriptions.isNotEmpty()) {
+            viewModel.syncAlarmsWithCurrentTasksAndSubscriptions(context)
+        }
+    }
+
+    // Keep Daily Blood Pressure reminder alarm scheduled when enabled in Health/Profile settings
+    LaunchedEffect(customizationConfig.bloodPressureEnabled, customizationConfig.bloodPressureReminderTime) {
+        com.example.alarm.AlarmScheduler.scheduleBloodPressureDailyReminder(
+            context = context,
+            enabled = customizationConfig.bloodPressureEnabled,
+            reminderTimeRaw = customizationConfig.bloodPressureReminderTime
         )
     }
 
@@ -495,10 +588,11 @@ fun MainFeatureScreen(
                             onClick = { currentTab = 3 },
                             icon = {
                                 ProfileAvatarBadge(
-                                    profileName = customizationConfig.profileName,
+                                    profileName = customizationConfig.profileName.ifBlank { userProfile?.displayName.orEmpty() },
                                     profileColorHex = customizationConfig.profileColorHex,
                                     profilePhotoPath = customizationConfig.profilePhotoPath,
                                     profilePhotoVersion = customizationConfig.profilePhotoVersion,
+                                    profileAvatarBase64 = customizationConfig.profileAvatarBase64.ifBlank { userProfile?.avatarBase64.orEmpty() },
                                     size = 26.dp,
                                     testTag = "rail_profile_avatar"
                                 )
@@ -572,10 +666,11 @@ fun MainFeatureScreen(
                                         softWrap = false
                                     )
                                     ProfileAvatarBadge(
-                                        profileName = customizationConfig.profileName,
+                                        profileName = customizationConfig.profileName.ifBlank { userProfile?.displayName.orEmpty() },
                                         profileColorHex = customizationConfig.profileColorHex,
                                         profilePhotoPath = customizationConfig.profilePhotoPath,
                                         profilePhotoVersion = customizationConfig.profilePhotoVersion,
+                                        profileAvatarBase64 = customizationConfig.profileAvatarBase64.ifBlank { userProfile?.avatarBase64.orEmpty() },
                                         size = 24.dp,
                                         testTag = "top_bar_profile_avatar"
                                     )
@@ -1050,8 +1145,19 @@ fun MainFeatureScreen(
                                 customizationConfig = customizationConfig,
                                 customizationRepo = customizationRepo,
                                 userEmail = userEmail,
+                                syncedItemsTotalCount = tasks.size + transactions.size + subscriptions.size + savingsGoals.size + household.muralItems.size + diaryState.entries.size + healthState.glucoseRecords.size + healthState.bloodPressureRecords.size,
+                                onForceCloudSyncNow = {
+                                    viewModel.forceFullCloudSyncNow(
+                                        context = context,
+                                        displayNameHint = customizationConfig.profileName,
+                                        avatarBase64Hint = customizationConfig.profileAvatarBase64
+                                    )
+                                },
                                 onUpdateProfileIdentity = { displayName, memberColorHex ->
                                     viewModel.updateUserProfileIdentity(displayName, memberColorHex)
+                                },
+                                onUpdateAvatarBase64 = { base64 ->
+                                    viewModel.updateUserAvatarBase64(base64)
                                 },
                                 onJoinHousehold = { code, famName ->
                                     viewModel.joinOrCreateHousehold(code, famName)
@@ -1065,7 +1171,10 @@ fun MainFeatureScreen(
                                 onRemoveFamilyMember = { memberId, memberName ->
                                     viewModel.removeFamilyMember(memberId, memberName)
                                 },
-                                onChangeThemeMode = { viewModel.setThemeMode(it) },
+                                onChangeThemeMode = { mode ->
+                                    customizationRepo.updateThemeMode(mode)
+                                    viewModel.setThemeMode(mode)
+                                },
                                 onOpenCustomizationStudio = { currentTab = 4 },
                                 onOpenModularOnboardingScreen = { showModularOnboardingModal = true },
                                 achievementsSummary = achievementsSummary,

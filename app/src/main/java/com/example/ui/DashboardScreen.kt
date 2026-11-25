@@ -199,7 +199,7 @@ fun DashboardScreen(
         monthTransactions.filter { it.type == "EXPENSE" && it.budgetBucket == "SAVINGS" }.sumOf { it.amountBrl }
     }
 
-    val safeBudgetBase = effectiveIncomeBrl.coerceAtLeast(1.0)
+    val safeBudgetBase = effectiveIncomeBrl.coerceAtLeast(0.0)
     val needsLimit = safeBudgetBase * (household.needsPercentage / 100.0)
     val wantsLimit = safeBudgetBase * (household.wantsPercentage / 100.0)
     val savingsTarget = safeBudgetBase * (household.savingsPercentage / 100.0)
@@ -564,8 +564,14 @@ fun DashboardScreen(
                                                 style = MaterialTheme.typography.bodyLarge,
                                                 fontWeight = FontWeight.Bold
                                             )
+                                            val scopeLabel = if (acc.privacyScope == PrivacyScope.PERSONAL) "Individual" else "Familiar"
+                                            val cardDatesSuffix = if (!acc.isCashOrWallet() && acc.creditLimitBrl > 0.0 && acc.closingDay > 0 && acc.dueDay > 0) {
+                                                " • Fecha dia ${acc.closingDay} • Vence dia ${acc.dueDay}"
+                                            } else {
+                                                ""
+                                            }
                                             Text(
-                                                text = "${acc.institution} • ${if (acc.privacyScope == PrivacyScope.PERSONAL) "Individual" else "Familiar"} • Fecha dia ${acc.closingDay} • Vence dia ${acc.dueDay}",
+                                                text = "${acc.institution} • $scopeLabel$cardDatesSuffix",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
@@ -614,7 +620,7 @@ fun DashboardScreen(
                                 }
 
                                 // Barra de progresso de Limite de Crédito (Usado x Disponível) + Botão 1-toque "Pagar Fatura do Mês"
-                                if (acc.creditLimitBrl > 0.0) {
+                                if (!acc.isCashOrWallet() && acc.creditLimitBrl > 0.0) {
                                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),

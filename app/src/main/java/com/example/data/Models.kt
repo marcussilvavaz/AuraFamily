@@ -64,6 +64,8 @@ data class ExpenseSplitShare(
 data class FamilyMemberBadge(
     val userId: String = "",
     val displayName: String = "",
+    val email: String = "",
+    val avatarBase64: String = "",
     val colorHex: Long = 0xFF0E7C5B,
     val avatarEmoji: String = "🌿",
     val role: String = "ADMIN",
@@ -187,6 +189,8 @@ data class UserProfile(
     @DocumentId val id: String = "",
     val userId: String = "",
     val displayName: String = "",
+    val email: String = "",
+    val avatarBase64: String = "",
     val householdId: String = "",
     val themeMode: String = "SYSTEM",
     val baseCurrency: String = "BRL",
@@ -218,13 +222,37 @@ data class BankAccount(
     val emoji: String = iconEmoji,
     val initialBalanceBrl: Double = 0.0,
     val currentBalanceBrl: Double = initialBalanceBrl,
-    val creditLimitBrl: Double = 5000.0,
-    val closingDay: Int = 25,
-    val dueDay: Int = 5,
+    val creditLimitBrl: Double = 0.0,
+    val closingDay: Int = 0,
+    val dueDay: Int = 0,
     val usedCreditLimitBrl: Double = 0.0,
     val availableCreditLimitBrl: Double = creditLimitBrl,
     val privacyScope: String = PrivacyScope.FAMILY
-)
+) {
+    fun isCashOrWallet(): Boolean {
+        val lowerName = name.trim().lowercase(Locale.ROOT)
+        val lowerInst = institution.trim().lowercase(Locale.ROOT)
+        return id == "acc_cash" ||
+            lowerName.contains("dinheiro") ||
+            lowerName.contains("carteira") ||
+            lowerInst.contains("dinheiro") ||
+            lowerInst.contains("carteira")
+    }
+
+    fun sanitized(): BankAccount {
+        return if (isCashOrWallet()) {
+            copy(
+                creditLimitBrl = 0.0,
+                closingDay = 0,
+                dueDay = 0,
+                usedCreditLimitBrl = 0.0,
+                availableCreditLimitBrl = 0.0
+            )
+        } else {
+            this
+        }
+    }
+}
 
 object BankAccountCatalog {
     fun defaultAccounts(): List<BankAccount> = listOf(
@@ -233,8 +261,8 @@ object BankAccountCatalog {
             name = "Nubank",
             institutionColorHex = 0xFF820AD1,
             iconEmoji = "🟣",
-            initialBalanceBrl = 2450.00,
-            creditLimitBrl = 6000.00,
+            initialBalanceBrl = 0.0,
+            creditLimitBrl = 0.0,
             closingDay = 25,
             dueDay = 5,
             privacyScope = PrivacyScope.FAMILY
@@ -244,8 +272,8 @@ object BankAccountCatalog {
             name = "Itaú",
             institutionColorHex = 0xFFEC7000,
             iconEmoji = "🟠",
-            initialBalanceBrl = 3800.00,
-            creditLimitBrl = 8000.00,
+            initialBalanceBrl = 0.0,
+            creditLimitBrl = 0.0,
             closingDay = 20,
             dueDay = 1,
             privacyScope = PrivacyScope.FAMILY
@@ -255,8 +283,8 @@ object BankAccountCatalog {
             name = "PicPay",
             institutionColorHex = 0xFF11C76F,
             iconEmoji = "🟢",
-            initialBalanceBrl = 650.00,
-            creditLimitBrl = 2500.00,
+            initialBalanceBrl = 0.0,
+            creditLimitBrl = 0.0,
             closingDay = 28,
             dueDay = 10,
             privacyScope = PrivacyScope.PERSONAL
@@ -266,10 +294,10 @@ object BankAccountCatalog {
             name = "Dinheiro / Carteira",
             institutionColorHex = 0xFF0B6E4F,
             iconEmoji = "💵",
-            initialBalanceBrl = 320.00,
+            initialBalanceBrl = 0.0,
             creditLimitBrl = 0.0,
-            closingDay = 25,
-            dueDay = 5,
+            closingDay = 0,
+            dueDay = 0,
             privacyScope = PrivacyScope.PERSONAL
         )
     )
@@ -302,7 +330,7 @@ object BankAccountCatalog {
         accounts: List<BankAccount>,
         transactions: List<FinanceTransaction>
     ): List<BankAccount> {
-        val effectiveAccounts = accounts.ifEmpty { defaultAccounts() }
+        val effectiveAccounts = accounts.ifEmpty { defaultAccounts() }.map { it.sanitized() }
         return effectiveAccounts.map { acc ->
             var balance = acc.initialBalanceBrl
             var usedCredit = 0.0
@@ -315,13 +343,11 @@ object BankAccountCatalog {
                         }
                     }
                     "EXPENSE" -> {
-                        // Despesas no Crédito só descontam do saldo da conta quando a fatura/parcela é marcada como Paga (isPaid == true)
                         val deductFromAccount = !tx.isCreditCard || tx.isPaid
                         if (txAccId == acc.id && deductFromAccount) {
                             balance -= tx.amountBrl
                         }
-                        // Enquanto não paga, toda parcela de crédito consome o Limite de Crédito disponível da conta
-                        if (txAccId == acc.id && tx.isCreditCard && !tx.isPaid) {
+                        if (!acc.isCashOrWallet() && txAccId == acc.id && tx.isCreditCard && !tx.isPaid) {
                             usedCredit += tx.amountBrl
                         }
                     }
@@ -338,8 +364,11 @@ object BankAccountCatalog {
             val resolvedColor = if (acc.colorHex != 0L) acc.colorHex else acc.institutionColorHex
             val resolvedEmoji = acc.emoji.ifBlank { acc.iconEmoji.ifBlank { "🏦" } }
             val resolvedInst = acc.institution.ifBlank { acc.name }
-            val safeLimit = acc.creditLimitBrl.coerceAtLeast(0.0)
-            val availableLimit = (safeLimit - usedCredit).coerceAtLeast(0.0)
+            val isCash = acc.isCashOrWallet()
+            val safeLimit = if (isCash) 0.0 else acc.creditLimitBrl.coerceAtLeast(0.0)
+            val availableLimit = if (isCash) 0.0 else (safeLimit - usedCredit).coerceAtLeast(0.0)
+            val safeClosingDay = if (isCash || safeLimit <= 0.0) 0 else acc.closingDay.coerceIn(1, 31)
+            val safeDueDay = if (isCash || safeLimit <= 0.0) 0 else acc.dueDay.coerceIn(1, 31)
             acc.copy(
                 institution = resolvedInst,
                 institutionColorHex = resolvedColor,
@@ -348,9 +377,9 @@ object BankAccountCatalog {
                 emoji = resolvedEmoji,
                 currentBalanceBrl = balance,
                 creditLimitBrl = safeLimit,
-                closingDay = acc.closingDay.coerceIn(1, 31),
-                dueDay = acc.dueDay.coerceIn(1, 31),
-                usedCreditLimitBrl = usedCredit,
+                closingDay = safeClosingDay,
+                dueDay = safeDueDay,
+                usedCreditLimitBrl = if (isCash) 0.0 else usedCredit,
                 availableCreditLimitBrl = availableLimit
             )
         }
@@ -380,9 +409,10 @@ data class Household(
     val householdId: String = "",
     val name: String = "Família Omni",
     val ownerId: String = "",
-    val monthlyIncomeBrl: Double = 8500.0,
-    val needsPercentage: Long = 50L,
-    val wantsPercentage: Long = 30L,
+    val migratedTo: String = "",
+    val monthlyIncomeBrl: Double = 0.0,
+    val needsPercentage: Long = 60L,
+    val wantsPercentage: Long = 20L,
     val savingsPercentage: Long = 20L,
     val defaultSplitMode: String = SplitMode.EQUAL,
     val members: List<FamilyMemberBadge> = emptyList(),
@@ -394,13 +424,14 @@ data class Household(
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     /**
-     * Retorna a lista oficial de membros da família garantindo que cada membro tenha
-     * uma cor padrão distinta atribuída caso não tenha escolhido manualmente.
+     * Retorna a lista oficial de membros da família deduplicada e normalizada,
+     * sem placeholders genéricos ("Você", "VO", "Família" ou vazio) e com cores distintas.
      */
     fun membersWithAssignedColors(
         fallbackProfileName: String = "",
         fallbackProfileColorHex: Long = 0xFF0E7C5B,
-        fallbackUserId: String = ""
+        fallbackUserId: String = "",
+        fallbackAvatarBase64: String = ""
     ): List<FamilyMemberBadge> {
         val defaultPalette = listOf(
             0xFF0E7C5B, // Esmeralda
@@ -412,13 +443,70 @@ data class Household(
             0xFF5C6BC0, // Índigo
             0xFFC62828  // Coral
         )
-        val rawList = if (members.isNotEmpty()) {
-            members
-        } else if (fallbackProfileName.isNotBlank()) {
+
+        fun isPlaceholderName(raw: String): Boolean {
+            val clean = raw.trim().lowercase(Locale.ROOT)
+            return clean.isBlank() ||
+                clean == "você" ||
+                clean == "voce" ||
+                clean == "vo" ||
+                clean == "família" ||
+                clean == "familia" ||
+                clean == "membro"
+        }
+
+        val cleanFallbackName = fallbackProfileName.trim().takeUnless { isPlaceholderName(it) } ?: ""
+
+        // Deduplicar membros por userId (ou por nome normalizado quando userId estiver vazio ou coincidir)
+        val mergedByKey = linkedMapOf<String, FamilyMemberBadge>()
+        for (rawMember in members) {
+            val isCurrent = (fallbackUserId.isNotBlank() && rawMember.userId == fallbackUserId) || rawMember.isCurrentUser
+            val resolvedName = when {
+                !isPlaceholderName(rawMember.displayName) -> rawMember.displayName.trim()
+                isCurrent && cleanFallbackName.isNotBlank() -> cleanFallbackName
+                rawMember.email.isNotBlank() -> rawMember.email.substringBefore('@').replaceFirstChar { it.titlecase(Locale.ROOT) }
+                cleanFallbackName.isNotBlank() && members.size == 1 -> cleanFallbackName
+                else -> ""
+            }
+            if (resolvedName.isBlank()) continue
+
+            val normalizedNameKey = resolvedName.lowercase(Locale.ROOT)
+            val existingKey = mergedByKey.entries.firstOrNull { (_, existing) ->
+                (rawMember.userId.isNotBlank() && existing.userId == rawMember.userId) ||
+                    existing.displayName.trim().lowercase(Locale.ROOT) == normalizedNameKey ||
+                    (rawMember.email.isNotBlank() && existing.email.equals(rawMember.email, ignoreCase = true))
+            }?.key ?: rawMember.userId.ifBlank { normalizedNameKey }
+
+            val previous = mergedByKey[existingKey]
+            val mergedAvatar = when {
+                rawMember.avatarBase64.isNotBlank() -> rawMember.avatarBase64
+                previous?.avatarBase64?.isNotBlank() == true -> previous.avatarBase64
+                isCurrent && fallbackAvatarBase64.isNotBlank() -> fallbackAvatarBase64
+                else -> ""
+            }
+            mergedByKey[existingKey] = FamilyMemberBadge(
+                userId = rawMember.userId.ifBlank { previous?.userId.orEmpty() }.ifBlank {
+                    if (isCurrent) fallbackUserId else ""
+                },
+                displayName = if (!isPlaceholderName(rawMember.displayName)) rawMember.displayName.trim()
+                else previous?.displayName?.takeUnless { isPlaceholderName(it) } ?: resolvedName,
+                email = rawMember.email.ifBlank { previous?.email.orEmpty() },
+                avatarBase64 = mergedAvatar,
+                colorHex = if (rawMember.colorHex != 0L) rawMember.colorHex else (previous?.colorHex ?: 0L),
+                avatarEmoji = rawMember.avatarEmoji.ifBlank { previous?.avatarEmoji ?: "🌿" },
+                role = rawMember.role.ifBlank { previous?.role ?: "ADMIN" },
+                isCurrentUser = isCurrent || (previous?.isCurrentUser == true)
+            )
+        }
+
+        val rawList = if (mergedByKey.isNotEmpty()) {
+            mergedByKey.values.toList()
+        } else if (cleanFallbackName.isNotBlank()) {
             listOf(
                 FamilyMemberBadge(
                     userId = fallbackUserId.ifBlank { ownerId.ifBlank { "member_admin" } },
-                    displayName = fallbackProfileName,
+                    displayName = cleanFallbackName,
+                    avatarBase64 = fallbackAvatarBase64,
                     colorHex = if (fallbackProfileColorHex != 0L) fallbackProfileColorHex else defaultPalette[0],
                     avatarEmoji = "🌿",
                     role = "ADMIN",
@@ -439,7 +527,7 @@ data class Household(
             }
             usedColors.add(cleanColor)
             member.copy(
-                displayName = member.displayName.ifBlank { "Membro ${index + 1}" },
+                displayName = member.displayName.trim(),
                 colorHex = cleanColor
             )
         }

@@ -500,12 +500,16 @@ fun FinancesScreen(
                                                 fontWeight = FontWeight.Bold
                                             )
                                             Text(
-                                                text = "Fecha dia ${acc.closingDay} • Vence dia ${acc.dueDay} • Fatura do mês: ${formatCurrencyBrl(openInvMonth, hideValues)}",
+                                                text = if (!acc.isCashOrWallet() && acc.creditLimitBrl > 0.0 && acc.closingDay > 0 && acc.dueDay > 0) {
+                                                    "Fecha dia ${acc.closingDay} • Vence dia ${acc.dueDay} • Fatura do mês: ${formatCurrencyBrl(openInvMonth, hideValues)}"
+                                                } else {
+                                                    "${acc.institution} • Conta à vista / Carteira (sem fatura de cartão)"
+                                                },
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
-                                        if (openInvMonth > 0.009) {
+                                        if (!acc.isCashOrWallet() && openInvMonth > 0.009) {
                                             FilledTonalButton(
                                                 onClick = {
                                                     onPayAllCreditForMonth(selectedYearMonth, acc.id, acc.name)
@@ -525,7 +529,7 @@ fun FinancesScreen(
                                             }
                                         }
                                     }
-                                    if (acc.creditLimitBrl > 0.0) {
+                                    if (!acc.isCashOrWallet() && acc.creditLimitBrl > 0.0) {
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.SpaceBetween
@@ -2098,14 +2102,14 @@ fun AddTransactionDialog(
                     }
 
                     Text(
-                        text = "Faixa do Plano de Economia (50/30/20)",
+                        text = "Faixa do Plano de Economia (60/20/20)",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold
                     )
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         listOf(
-                            "NEEDS" to "50% Necessidades",
-                            "WANTS" to "30% Desejos",
+                            "NEEDS" to "60% Necessidades",
+                            "WANTS" to "20% Desejos",
                             "SAVINGS" to "20% Economia"
                         ).forEach { (code, label) ->
                             FilterChip(
@@ -2464,9 +2468,9 @@ fun BankAccountEditorDialog(
                 onClick = {
                     val cleanName = name.trim().ifBlank { institution }
                     val initBal = initialBalanceText.replace(",", ".").toDoubleOrNull() ?: 0.0
-                    val credLim = (creditLimitText.replace(",", ".").toDoubleOrNull() ?: 5000.0).coerceAtLeast(0.0)
-                    val closeDay = (closingDayText.toIntOrNull() ?: 25).coerceIn(1, 28)
-                    val dueDay = (dueDayText.toIntOrNull() ?: 5).coerceIn(1, 28)
+                    val credLim = (creditLimitText.replace(",", ".").toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
+                    val closeDay = if (credLim > 0.0) (closingDayText.toIntOrNull() ?: 25).coerceIn(1, 28) else 0
+                    val dueDay = if (credLim > 0.0) (dueDayText.toIntOrNull() ?: 5).coerceIn(1, 28) else 0
                     onSave(
                         BankAccount(
                             id = initialAccount?.id ?: "acc_${UUID.randomUUID().toString().take(8)}",
@@ -2480,7 +2484,7 @@ fun BankAccountEditorDialog(
                             creditLimitBrl = credLim,
                             closingDay = closeDay,
                             dueDay = dueDay
-                        )
+                        ).sanitized()
                     )
                 },
                 modifier = Modifier.testTag("save_bank_account_btn")
@@ -2847,7 +2851,7 @@ private fun AddSubscriptionDialog(
                 }
 
                 Text(
-                    text = "Categoria e Faixa 50/30/20",
+                    text = "Categoria e Faixa 60/20/20",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold
                 )

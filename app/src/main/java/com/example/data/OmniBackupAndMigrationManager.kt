@@ -102,21 +102,25 @@ object OmniBackupAndMigrationManager {
         val prefs = appContext.getSharedPreferences(PREFS_MIGRATION, Context.MODE_PRIVATE)
         val raw = prefs.getString(KEY_FAMILY_MURAL_JSON, null)
         if (raw.isNullOrBlank()) {
-            val defaults = defaultFamilyMuralItems()
-            saveFamilyMuralItems(appContext, defaults, notifyWidgets = false)
-            _muralItemsFlow.value = defaults
-            return defaults
+            _muralItemsFlow.value = emptyList()
+            return emptyList()
         }
+        var hadSeedItems = false
         val parsed = runCatching {
             val arr = JSONArray(raw)
             buildList {
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
+                    val id = obj.optString("id", "mural_$i")
+                    if (id.startsWith("mural_seed_")) {
+                        hadSeedItems = true
+                        continue
+                    }
                     val title = obj.optString("title", "").trim()
                     if (title.isNotEmpty()) {
                         add(
                             FamilyMuralItem(
-                                id = obj.optString("id", "mural_$i"),
+                                id = id,
                                 title = title,
                                 notes = obj.optString("notes", ""),
                                 category = obj.optString("category", "Compras"),
@@ -133,50 +137,15 @@ object OmniBackupAndMigrationManager {
                     }
                 }
             }
-        }.getOrElse { defaultFamilyMuralItems() }
+        }.getOrElse { emptyList() }
+        if (hadSeedItems) {
+            saveFamilyMuralItems(appContext, parsed, notifyWidgets = false)
+        }
         _muralItemsFlow.value = parsed
         return parsed
     }
 
-    private fun defaultFamilyMuralItems(): List<FamilyMuralItem> {
-        return listOf(
-            FamilyMuralItem(
-                id = "mural_seed_1",
-                title = "Frutas, ovos e pão integral",
-                category = "Compras",
-                addedBy = "Família",
-                addedByColorHex = 0xFF0E7C5B,
-                completed = false
-            ),
-            FamilyMuralItem(
-                id = "mural_seed_2",
-                title = "Tiras de glicemia / farmácia",
-                category = "Compras",
-                addedBy = "Família",
-                addedByColorHex = 0xFF7B61FF,
-                completed = false
-            ),
-            FamilyMuralItem(
-                id = "mural_seed_3",
-                title = "Lembrete: Abastecer água filtrada e revisar despensa da semana",
-                notes = "Conferir também café e azeite antes de sábado.",
-                category = "Mural",
-                addedBy = "Família",
-                addedByColorHex = 0xFF2E7D9B,
-                pinned = true,
-                isNote = true,
-                completed = false
-            ),
-            FamilyMuralItem(
-                id = "mural_seed_4",
-                title = "Separar contas e comprovantes da semana",
-                category = "Casa",
-                addedBy = "Família",
-                addedByColorHex = 0xFF0E7C5B,
-                completed = true
-            )
-        )
-    }
+    private fun defaultFamilyMuralItems(): List<FamilyMuralItem> = emptyList()
 
     fun saveFamilyMuralItems(
         context: Context,

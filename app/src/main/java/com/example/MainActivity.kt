@@ -178,7 +178,7 @@ fun AuraAppRoot(
             showOptionalLoginScreen = false
         }
         AuraFinancasTheme(
-            themeMode = "SYSTEM",
+            themeMode = customizationConfig.themeMode.ifBlank { "SYSTEM" },
             customization = customizationConfig
         ) {
             Column(
@@ -243,10 +243,18 @@ fun AuraAppRoot(
             )
 
             val profileState by auraViewModel.userProfileState.collectAsStateWithLifecycle()
-            val themeMode = (profileState as? UiState.Success)?.data?.themeMode ?: "SYSTEM"
+            val remoteThemeMode = (profileState as? UiState.Success)?.data?.themeMode
+            LaunchedEffect(remoteThemeMode) {
+                if (!remoteThemeMode.isNullOrBlank() && remoteThemeMode != "SYSTEM" && remoteThemeMode != customizationConfig.themeMode) {
+                    customizationRepo.updateThemeMode(remoteThemeMode)
+                }
+            }
+            val effectiveThemeMode = customizationConfig.themeMode.takeIf { it.isNotBlank() && it != "SYSTEM" }
+                ?: remoteThemeMode?.takeIf { it.isNotBlank() }
+                ?: "SYSTEM"
 
             AuraFinancasTheme(
-                themeMode = themeMode,
+                themeMode = effectiveThemeMode,
                 customization = customizationConfig
             ) {
                 MainFeatureScreen(

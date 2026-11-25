@@ -2594,7 +2594,9 @@ private fun MonthlyCalendarGridContent(
                                 ?: dayTasks.firstOrNull()?.assignedMemberColorHex
                             val hasCompletedTask = dayTasks.isNotEmpty() && dayTasks.all { it.completed }
                             val hasCreditInvoiceDue = bankAccounts.any { acc ->
-                                acc.dueDay == dayNumber &&
+                                !acc.isCashOrWallet() &&
+                                    acc.creditLimitBrl > 0.0 &&
+                                    acc.dueDay == dayNumber &&
                                     com.example.data.BankAccountCatalog.openInvoiceForMonthBrl(
                                         accountId = acc.id,
                                         yearMonth = selectedYearMonth,

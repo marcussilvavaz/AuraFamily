@@ -113,7 +113,8 @@ import com.example.ui.theme.SavingsGold
 
 private data class MemberColorFilterOption(
     val label: String,
-    val colorHex: Long
+    val colorHex: Long,
+    val avatarBase64: String = ""
 )
 
 private fun hubOrganicEnterTransition(): EnterTransition =
@@ -229,9 +230,15 @@ fun FamilyHubScreen(
     var globalSearchQuery by remember { mutableStateOf("") }
     var quickMuralInput by remember { mutableStateOf("") }
 
-    val profileName = remember(customizationConfig.profileName, userProfile?.displayName) {
-        customizationConfig.profileName.ifBlank {
-            userProfile?.displayName?.ifBlank { "Você" } ?: "Você"
+    val profileName = remember(customizationConfig.profileName, userProfile?.displayName, userEmail) {
+        val rawCustom = customizationConfig.profileName.trim()
+        val rawProfile = userProfile?.displayName?.trim().orEmpty()
+        val emailPrefix = userEmail?.substringBefore("@")?.trim().orEmpty()
+        when {
+            rawCustom.isNotBlank() && !rawCustom.equals("Você", ignoreCase = true) && !rawCustom.equals("VO", ignoreCase = true) -> rawCustom
+            rawProfile.isNotBlank() && !rawProfile.equals("Você", ignoreCase = true) && !rawProfile.equals("VO", ignoreCase = true) -> rawProfile
+            emailPrefix.isNotBlank() -> emailPrefix.replaceFirstChar { it.uppercase() }
+            else -> "Membro"
         }
     }
     val profileColorHex = customizationConfig.profileColorHex
@@ -329,24 +336,47 @@ fun FamilyHubScreen(
         )
     }
 
-    val memberColorOptions = remember(officialMembers, tasks, profileName, profileColorHex) {
-        val map = LinkedHashMap<Long, String>()
+    val memberColorOptions = remember(officialMembers, profileName, profileColorHex, customizationConfig.profileAvatarBase64, userProfile?.avatarBase64) {
+        val seenNames = mutableSetOf<String>()
+        val seenColors = mutableSetOf<Long>()
+        val result = mutableListOf<MemberColorFilterOption>()
+        val myAvatar = customizationConfig.profileAvatarBase64.ifBlank { userProfile?.avatarBase64.orEmpty() }
+
         officialMembers.forEach { member ->
-            if (member.colorHex != 0L && !map.containsKey(member.colorHex)) {
-                map[member.colorHex] = member.displayName
+            val cleanName = member.displayName.trim()
+            val normName = cleanName.lowercase()
+            if (cleanName.isNotBlank() &&
+                normName != "você" &&
+                normName != "voce" &&
+                normName != "vo" &&
+                normName != "família" &&
+                normName != "familia" &&
+                member.colorHex != 0L &&
+                seenNames.add(normName) &&
+                seenColors.add(member.colorHex)
+            ) {
+                val resolvedAvatar = member.avatarBase64.ifBlank {
+                    if (normName == profileName.trim().lowercase()) myAvatar else ""
+                }
+                result.add(
+                    MemberColorFilterOption(
+                        label = cleanName,
+                        colorHex = member.colorHex,
+                        avatarBase64 = resolvedAvatar
+                    )
+                )
             }
         }
-        if (map.isEmpty()) {
-            map[profileColorHex] = profileName
+        if (result.isEmpty() && profileName.isNotBlank() && !profileName.equals("Família", ignoreCase = true)) {
+            result.add(
+                MemberColorFilterOption(
+                    label = profileName,
+                    colorHex = profileColorHex,
+                    avatarBase64 = myAvatar
+                )
+            )
         }
-        tasks.forEach { task ->
-            val hex = task.assignedMemberColorHex
-            if (hex != 0L && !map.containsKey(hex)) {
-                val cleanName = task.assignedMemberName.ifBlank { "Membro" }
-                map[hex] = cleanName
-            }
-        }
-        map.entries.map { MemberColorFilterOption(label = it.value, colorHex = it.key) }
+        result
     }
 
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -490,6 +520,7 @@ fun FamilyHubScreen(
                                 profileColorHex = profileColorHex,
                                 profilePhotoPath = customizationConfig.profilePhotoPath,
                                 profilePhotoVersion = customizationConfig.profilePhotoVersion,
+                                profileAvatarBase64 = customizationConfig.profileAvatarBase64.ifBlank { userProfile?.avatarBase64.orEmpty() },
                                 size = 48.dp,
                                 onClick = { onOpenProfileSettings() },
                                 testTag = "hub_top_avatar_badge"
@@ -506,7 +537,7 @@ fun FamilyHubScreen(
                         }
                     }
 
-                    // Slim Couple / Family Member Avatars Bar (replaces the giant Family Colors card)
+                    // Slim Couple / Family Member Avatars Bar (1 single "Família" filter + deduplicated real members)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -524,9 +555,10 @@ fun FamilyHubScreen(
                             modifier = Modifier
                                 .clip(organicButtonShape)
                                 .clickable { selectedMemberColorFilter = null }
+                                .testTag("hub_member_avatar_filter_all")
                         ) {
                             Text(
-                                text = "Todos",
+                                text = "Família",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = if (selectedMemberColorFilter == null) hubAccentColor else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -539,7 +571,6 @@ fun FamilyHubScreen(
                         memberColorOptions.forEach { option ->
                             val isSelected = selectedMemberColorFilter == option.colorHex
                             val memberCol = Color(option.colorHex.toInt())
-                            val initial = option.label.trim().take(1).uppercase()
                             Surface(
                                 shape = organicButtonShape,
                                 color = if (isSelected) memberCol.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
@@ -559,22 +590,14 @@ fun FamilyHubScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(20.dp)
-                                            .clip(CircleShape)
-                                            .background(memberCol),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = initial,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = Color(0xFF0F172A),
-                                            maxLines = 1,
-                                            softWrap = false
-                                        )
-                                    }
+                                    ProfileAvatarBadge(
+                                        profileName = option.label,
+                                        profileColorHex = option.colorHex,
+                                        profilePhotoPath = "",
+                                        profilePhotoVersion = 0L,
+                                        profileAvatarBase64 = option.avatarBase64,
+                                        size = 20.dp
+                                    )
                                     Text(
                                         text = option.label,
                                         style = MaterialTheme.typography.labelSmall,
@@ -1595,16 +1618,17 @@ private fun SmartwatchBalanceRingWidget(
     val organicShape = RoundedCornerShape(cardRadius)
     val hideFinanceValues = com.example.ui.theme.LocalFinancePrivacyHideValues.current
     val financeColor = remember(moduleColorHex) { Color(moduleColorHex.toInt()) }
-    val safeIncome = effectiveIncomeBrl.coerceAtLeast(1.0)
-    val spentRatio = (totalExpensesBrl / safeIncome).toFloat().coerceIn(0f, 1f)
+    val cleanIncome = effectiveIncomeBrl.coerceAtLeast(0.0)
+    val safeIncomeDenominator = if (cleanIncome > 0.0) cleanIncome else 1.0
+    val spentRatio = if (cleanIncome > 0.0) (totalExpensesBrl / safeIncomeDenominator).toFloat().coerceIn(0f, 1f) else 0f
 
-    val needsTargetBrl = safeIncome * (household.needsPercentage / 100.0)
-    val wantsTargetBrl = safeIncome * (household.wantsPercentage / 100.0)
-    val savingsTargetBrl = safeIncome * (household.savingsPercentage / 100.0)
+    val needsTargetBrl = cleanIncome * (household.needsPercentage / 100.0)
+    val wantsTargetBrl = cleanIncome * (household.wantsPercentage / 100.0)
+    val savingsTargetBrl = cleanIncome * (household.savingsPercentage / 100.0)
 
-    val needsRatio = (needsSpentBrl / needsTargetBrl.coerceAtLeast(1.0)).toFloat().coerceIn(0f, 1f)
-    val wantsRatio = (wantsSpentBrl / wantsTargetBrl.coerceAtLeast(1.0)).toFloat().coerceIn(0f, 1f)
-    val savingsRatio = (savingsSpentBrl / savingsTargetBrl.coerceAtLeast(1.0)).toFloat().coerceIn(0f, 1f)
+    val needsRatio = if (needsTargetBrl > 0.0) (needsSpentBrl / needsTargetBrl).toFloat().coerceIn(0f, 1f) else 0f
+    val wantsRatio = if (wantsTargetBrl > 0.0) (wantsSpentBrl / wantsTargetBrl).toFloat().coerceIn(0f, 1f) else 0f
+    val savingsRatio = if (savingsTargetBrl > 0.0) (savingsSpentBrl / savingsTargetBrl).toFloat().coerceIn(0f, 1f) else 0f
 
     Card(
         modifier = Modifier

@@ -133,9 +133,10 @@ fun AuraFinancasTheme(
 ) {
     val systemDark = isSystemInDarkTheme()
     val presetInfo = CustomizationCatalog.presets.firstOrNull { it.id == customization.presetId }
-    val isAmoled = themeMode == "AMOLED"
+    val resolvedMode = themeMode.ifBlank { customization.themeMode }.ifBlank { "SYSTEM" }
+    val isAmoled = resolvedMode == "AMOLED"
 
-    val isDarkBg = when (themeMode) {
+    val isDarkBg = when (resolvedMode) {
         "LIGHT" -> false
         "DARK", "AMOLED" -> true
         else -> {
@@ -154,6 +155,8 @@ fun AuraFinancasTheme(
     val accentColor = Color(customization.accentHex)
 
     // Cores de fundo, card e texto com alto contraste garantido
+    // Quando AMOLED estiver ativo, sobrescreve com prioridade absoluta o fundo principal para preto puro (#000000)
+    // e superfícies para cinza escuro (#0D0D0D / #141414)
     val bgColor = when {
         isAmoled -> Color(0xFF000000)
         isDarkBg -> {
@@ -164,7 +167,7 @@ fun AuraFinancasTheme(
     }
 
     val baseCardColor = when {
-        isAmoled -> Color(0xFF0A0E14)
+        isAmoled -> Color(0xFF0D0D0D)
         isDarkBg -> {
             val rawCard = Color(customization.cardHex)
             if (rawCard.luminance() < 0.35f) rawCard else Color(0xFF171E29)
@@ -179,10 +182,10 @@ fun AuraFinancasTheme(
         baseCardColor
     }
 
-    val textColor = if (isDarkBg) {
-        Color(0xFFF8FAFC)
-    } else {
-        Color(0xFF0F172A) // Alto contraste (#0F172A) no Modo Claro
+    val textColor = when {
+        isAmoled -> Color(0xFFF9FAFB)
+        isDarkBg -> Color(0xFFF8FAFC)
+        else -> Color(0xFF0F172A) // Alto contraste (#0F172A) no Modo Claro
     }
 
     val onPrimary = contrastColorFor(primaryColor)
@@ -193,15 +196,19 @@ fun AuraFinancasTheme(
         .let { if (isTranslucent) it.copy(alpha = 0.65f) else it }
 
     val surfaceVariant = when {
-        isAmoled -> if (isTranslucent) Color(0xFF141A23).copy(alpha = 0.65f) else Color(0xFF141A23)
+        isAmoled -> if (isTranslucent) Color(0xFF141414).copy(alpha = 0.65f) else Color(0xFF141414)
         isDarkBg -> if (isTranslucent) Color(0xFF222B38).copy(alpha = 0.65f) else Color(0xFF222B38)
         else -> if (isTranslucent) Color(0xFFEEF2F6).copy(alpha = 0.65f) else Color(0xFFEEF2F6)
     }
 
-    val onSurfaceVariant = if (isDarkBg) Color(0xFF94A3B8) else Color(0xFF334155)
+    val onSurfaceVariant = when {
+        isAmoled -> Color(0xFF9CA3AF)
+        isDarkBg -> Color(0xFF94A3B8)
+        else -> Color(0xFF334155)
+    }
     val outline = when {
         isTranslucent -> primaryColor.copy(alpha = 0.48f)
-        isAmoled -> Color(0xFF1E293B)
+        isAmoled -> Color(0xFF1F2937)
         isDarkBg -> Color(0xFF334155)
         else -> Color(0xFFE2E8F0) // Borda sutil (#E2E8F0) nos cards claros
     }

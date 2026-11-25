@@ -226,11 +226,13 @@ class PrivateDiaryRepository(
             val entries = mutableListOf<PrivateDiaryEntry>()
             for (i in 0 until entriesArr.length()) {
                 val obj = entriesArr.getJSONObject(i)
+                val id = obj.optString("id", UUID.randomUUID().toString())
+                if (id.startsWith("diary_seed_")) continue
                 val tagsArr = obj.optJSONArray("symptomTags") ?: JSONArray()
                 val tags = (0 until tagsArr.length()).map { tagsArr.getString(it) }
                 entries.add(
                     PrivateDiaryEntry(
-                        id = obj.optString("id", UUID.randomUUID().toString()),
+                        id = id,
                         userId = obj.optString("userId", userId),
                         dateIso = obj.optString("dateIso", LocalDate.now().toString()),
                         epochDay = obj.optLong("epochDay", LocalDate.now().toEpochDay()),
@@ -289,38 +291,9 @@ class PrivateDiaryRepository(
         author: String,
         hasLocalKey: Boolean
     ): PrivateDiaryState {
-        val today = LocalDate.now()
-        val todayIso = today.toString()
-        val todayEpoch = today.toEpochDay()
-
-        val initialEntries = listOf(
-            PrivateDiaryEntry(
-                id = "diary_seed_1",
-                userId = userId,
-                dateIso = todayIso,
-                epochDay = todayEpoch,
-                hour = 8,
-                minute = 15,
-                moodId = "FOCUSED",
-                symptomTags = listOf("Boa disposição", "Sem dores"),
-                freeText = "Acordei com boa disposição hoje, tomei água e organizei as prioridades essenciais da manhã."
-            ),
-            PrivateDiaryEntry(
-                id = "diary_seed_2",
-                userId = userId,
-                dateIso = todayIso,
-                epochDay = todayEpoch,
-                hour = 13,
-                minute = 40,
-                moodId = "CALM",
-                symptomTags = listOf("Paz interior", "Tensão nos ombros"),
-                freeText = "Pausa após o almoço. Um pouco de tensão nos ombros, mas mantendo o ritmo tranquilo."
-            )
-        )
-
         return PrivateDiaryState(
             userId = userId,
-            entries = initialEntries,
+            entries = emptyList(),
             customSymptomTags = emptyList(),
             savedSupportLetters = emptyList(),
             activeShift = shift,
@@ -515,6 +488,15 @@ class PrivateDiaryRepository(
             ?.collection("private_diary")
             ?.document(entryId)
             ?.delete()
+        val houseId = appContext.getSharedPreferences("aura_local_offline_store", Context.MODE_PRIVATE)
+            .getString("household_id", null)
+        if (!houseId.isNullOrBlank()) {
+            db?.collection("households")
+                ?.document(houseId)
+                ?.collection("diary_entries")
+                ?.document(entryId)
+                ?.delete()
+        }
     }
 
     fun mergeImportedDiaryEntries(
@@ -1028,6 +1010,10 @@ class PrivateDiaryRepository(
                 if (snap != null && !snap.isEmpty) {
                     val remoteEntries = snap.documents.mapNotNull { doc ->
                         val id = doc.getString("id") ?: doc.id
+                        if (id.startsWith("diary_seed_")) {
+                            doc.reference.delete()
+                            return@mapNotNull null
+                        }
                         val dateIso = doc.getString("dateIso") ?: return@mapNotNull null
                         val epochDay = doc.getLong("epochDay") ?: runCatching { LocalDate.parse(dateIso).toEpochDay() }.getOrDefault(LocalDate.now().toEpochDay())
                         val hour = (doc.getLong("hour") ?: 9L).toInt()
@@ -1051,7 +1037,7 @@ class PrivateDiaryRepository(
                     }
                     if (remoteEntries.isNotEmpty()) {
                         updateState { current ->
-                            val merged = (current.entries + remoteEntries)
+                            val merged = (current.entries.filterNot { it.id.startsWith("diary_seed_") } + remoteEntries)
                                 .associateBy { it.id }
                                 .values
                                 .sortedWith(

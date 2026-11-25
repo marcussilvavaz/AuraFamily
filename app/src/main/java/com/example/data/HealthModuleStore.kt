@@ -292,14 +292,16 @@ class HealthRepository(context: Context) {
                 progressMap[dateIso] = inner
             }
 
-            // 3. Glicemia
+            // 3. Glicemia (Zero Seed Data)
             val glucoseArr = root.optJSONArray("glucoseRecords") ?: JSONArray()
             val glucoseList = mutableListOf<GlucoseRecord>()
             for (i in 0 until glucoseArr.length()) {
                 val obj = glucoseArr.getJSONObject(i)
+                val id = obj.optString("id")
+                if (id.startsWith("gl_seed_")) continue
                 glucoseList.add(
                     GlucoseRecord(
-                        id = obj.optString("id"),
+                        id = id,
                         dateIso = obj.optString("dateIso"),
                         dateEpochDay = obj.optLong("dateEpochDay", DateCalendarUtils.todayEpochDay()),
                         timeHHmm = obj.optString("timeHHmm", "08:00"),
@@ -314,14 +316,16 @@ class HealthRepository(context: Context) {
                 )
             }
 
-            // 4. Pressão Arterial
+            // 4. Pressão Arterial (Zero Seed Data)
             val bpArr = root.optJSONArray("bloodPressureRecords") ?: JSONArray()
             val bpList = mutableListOf<BloodPressureRecord>()
             for (i in 0 until bpArr.length()) {
                 val obj = bpArr.getJSONObject(i)
+                val id = obj.optString("id")
+                if (id.startsWith("bp_seed_")) continue
                 bpList.add(
                     BloodPressureRecord(
-                        id = obj.optString("id"),
+                        id = id,
                         dateIso = obj.optString("dateIso"),
                         dateEpochDay = obj.optLong("dateEpochDay", DateCalendarUtils.todayEpochDay()),
                         timeHHmm = obj.optString("timeHHmm", "21:00"),
@@ -610,81 +614,13 @@ class HealthRepository(context: Context) {
     )
 
     private fun createDefaultSeedState(): HealthModuleState {
-        val todayEpoch = DateCalendarUtils.todayEpochDay()
-        val todayIso = DateCalendarUtils.formatIsoDate(todayEpoch)
-        val yesterdayEpoch = todayEpoch - 1L
-        val yesterdayIso = DateCalendarUtils.formatIsoDate(yesterdayEpoch)
-
         return HealthModuleState(
             trackers = defaultTrackers(),
-            trackerProgressByDate = mapOf(
-                todayIso to mapOf(
-                    "tr_water" to 5,
-                    "tr_vitamins" to 2,
-                    "tr_movement" to 20,
-                    "tr_pause" to 2
-                )
-            ),
-            glucoseRecords = listOf(
-                GlucoseRecord(
-                    id = "gl_seed_1",
-                    dateIso = todayIso,
-                    dateEpochDay = todayEpoch,
-                    timeHHmm = "07:30",
-                    slot = DiabetesSlotCatalog.JEJUM,
-                    valueMgDl = 91,
-                    notes = "Medição ao acordar em jejum de 8h",
-                    privacyScope = PrivacyScope.PERSONAL
-                ),
-                GlucoseRecord(
-                    id = "gl_seed_2",
-                    dateIso = todayIso,
-                    dateEpochDay = todayEpoch,
-                    timeHHmm = "13:30",
-                    slot = DiabetesSlotCatalog.POS_ALMOCO_1H,
-                    valueMgDl = 126,
-                    notes = "1h após almoço balanceado (arroz integral, frango e salada)",
-                    privacyScope = PrivacyScope.PERSONAL
-                ),
-                GlucoseRecord(
-                    id = "gl_seed_3",
-                    dateIso = yesterdayIso,
-                    dateEpochDay = yesterdayEpoch,
-                    timeHHmm = "20:45",
-                    slot = DiabetesSlotCatalog.POS_JANTAR_1H,
-                    valueMgDl = 118,
-                    notes = "1h pós-jantar leve",
-                    privacyScope = PrivacyScope.PERSONAL
-                )
-            ),
-            bloodPressureRecords = listOf(
-                BloodPressureRecord(
-                    id = "bp_seed_1",
-                    dateIso = todayIso,
-                    dateEpochDay = todayEpoch,
-                    timeHHmm = "08:00",
-                    systolic = 118,
-                    diastolic = 76,
-                    pulseBpm = 70,
-                    notes = "Repouso de 5 minutos antes de medir",
-                    privacyScope = PrivacyScope.PERSONAL
-                ),
-                BloodPressureRecord(
-                    id = "bp_seed_2",
-                    dateIso = yesterdayIso,
-                    dateEpochDay = yesterdayEpoch,
-                    timeHHmm = "21:30",
-                    systolic = 122,
-                    diastolic = 80,
-                    pulseBpm = 74,
-                    notes = "Medição noturna antes de dormir",
-                    privacyScope = PrivacyScope.PERSONAL
-                )
-            ),
+            trackerProgressByDate = emptyMap(),
+            glucoseRecords = emptyList(),
+            bloodPressureRecords = emptyList(),
             pregnancyChecklist = defaultPregnancyChecklist(),
-            pregnancyNotesLog = listOf(
-                "$todayIso • Bebê ativo após o almoço; pressão e glicemia estáveis."
-            )
+            pregnancyNotesLog = emptyList()
         )
     }
 

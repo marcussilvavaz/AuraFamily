@@ -1,38 +1,102 @@
-name: Build Omni APK
+name: Android Build & GitHub Release OTA
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+permissions:
+  contents: write
 
-      - name: Set up JDK 17
+jobs:
+  build_and_release:
+    name: Build Omni APK & Publish GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
           distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
-
-      - name: Build Debug APK
+      - name: Grant execute permission for gradlew
         run: |
           if [ -f "./gradlew" ]; then
-            chmod +x gradlew
-            ./gradlew assembleDebug
-          else
-            gradle assembleDebug
+            chmod +x ./gradlew
           fi
 
-      - name: Upload APK
+      - name: Extract versionCode and versionName from app/build.gradle.kts
+        id: extract_version
+        run: |
+          VERSION_CODE=$(grep -E 'versionCode\s*=\s*[0-9]+' app/build.gradle.kts | head -n 1 | sed -E 's/.*=\s*([0-9]+).*/\1/')
+          VERSION_NAME=$(grep -E 'versionName\s*=\s*"[^"]+"' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$VERSION_CODE" ]; then VERSION_CODE="12"; fi
+          if [ -z "$VERSION_NAME" ]; then VERSION_NAME="1.12.0"; fi
+          echo "VERSION_CODE=${VERSION_CODE}" >> $GITHUB_ENV
+          echo "VERSION_NAME=${VERSION_NAME}" >> $GITHUB_ENV
+          echo "Extracted VERSION_CODE=${VERSION_CODE}, VERSION_NAME=${VERSION_NAME}"
+
+      - name: Build Omni APK (Signed Release or Debug Fallback)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          GRADLE_CMD="./gradlew"
+          if [ ! -f "./gradlew" ]; then
+            GRADLE_CMD="gradle"
+          fi
+
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "Signing secrets detected. Decoding release keystore..."
+            echo "$KEYSTORE_BASE64" | base64 --decode > "${GITHUB_WORKSPACE}/release-keystore.jks"
+            $GRADLE_CMD assembleRelease --no-daemon \
+              -Pandroid.injected.signing.store.file="${GITHUB_WORKSPACE}/release-keystore.jks" \
+              -Pandroid.injected.signing.store.password="${KEYSTORE_PASSWORD}" \
+              -Pandroid.injected.signing.key.alias="${KEY_ALIAS}" \
+              -Pandroid.injected.signing.key.password="${KEY_PASSWORD}"
+            APK_SOURCE=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          else
+            echo "No release keystore secrets configured; building installable Debug APK..."
+            if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
+              base64 --decode debug.keystore.base64 > debug.keystore || true
+            fi
+            $GRADLE_CMD assembleDebug --no-daemon
+            APK_SOURCE=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          fi
+
+          if [ -z "$APK_SOURCE" ] || [ ! -f "$APK_SOURCE" ]; then
+            echo "Error: Built APK not found!"
+            exit 1
+          fi
+
+          cp "$APK_SOURCE" "${GITHUB_WORKSPACE}/Omni.apk"
+          ls -lh "${GITHUB_WORKSPACE}/Omni.apk"
+
+      - name: Upload Omni.apk Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: omni-apk-atualizado
-          path: "**/build/outputs/apk/debug/*.apk"
+          name: Omni-v${{ env.VERSION_NAME }}-b${{ env.VERSION_CODE }}
+          path: ${{ github.workspace }}/Omni.apk
+
+      - name: Publish GitHub Release (OTA)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ env.VERSION_NAME }}"
+          name: "Omni v${{ env.VERSION_NAME }} (Build ${{ env.VERSION_CODE }})"
+          body: |
+            VERSION_CODE:${{ env.VERSION_CODE }}
+            Atualização oficial OTA do aplicativo Omni (v${{ env.VERSION_NAME }}).
+          files: ${{ github.workspace }}/Omni.apk
+          make_latest: true
+          overwrite: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

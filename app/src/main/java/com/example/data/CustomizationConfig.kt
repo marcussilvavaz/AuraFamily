@@ -1,11 +1,17 @@
 package com.example.data
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.media.RingtoneManager
 import android.net.Uri
+import android.util.Base64
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 
@@ -105,14 +111,16 @@ data class AppCustomizationConfig(
     val billReminderSoundUri: String = "",
     val billReminderSoundTitle: String = "Notificação Padrão do Sistema",
     val billVibrateEnabled: Boolean = true,
-    // Profile Identity (Photo + Name + Personal Color for Family Agenda)
-    val profileName: String = "Você",
+    // Profile Identity (Photo + Base64 Cloud Avatar + Name + Personal Color for Family Agenda)
+    val profileName: String = "",
     val profileColorHex: Long = 0xFFE88378,
     val profilePhotoPath: String = "",
+    val profileAvatarBase64: String = "",
     val profilePhotoVersion: Long = 0L,
+    val themeMode: String = "SYSTEM", // SYSTEM, LIGHT, DARK, AMOLED
     // Structured Agenda Appearance & Layout Mode ("COMPLETO", "SIMPLIFICADO", "MINIMO")
     val agendaLayoutMode: String = AgendaLayoutMode.COMPLETO,
-    // Smartwatch Hub Builder Config
+    // Hub Builder Config
     val hubWidgetOrder: List<String> = HubWidgetIds.defaultOrder,
     val enabledHubWidgets: Set<String> = HubWidgetIds.defaultOrder.toSet(),
     // =========================================================================
@@ -169,11 +177,11 @@ data class AppCustomizationConfig(
 object CustomizationCatalog {
 
     val moduleSpecs: List<ModuleColorSpec> = listOf(
-        ModuleColorSpec(AppModuleId.HUB, "Hub", "Anéis smartwatch, saudação e resumo do lar"),
+        ModuleColorSpec(AppModuleId.HUB, "Hub", "Anéis de progresso, saudação e resumo do lar"),
         ModuleColorSpec(AppModuleId.AGENDA, "Agenda", "Linha do tempo, tarefas, pílulas e calendário"),
         ModuleColorSpec(AppModuleId.HEALTH, "Saúde", "Inegociáveis, glicemia, pressão e gestação"),
         ModuleColorSpec(AppModuleId.DIARY, "Diário", "Humor por hora, frases de turno e carta IA"),
-        ModuleColorSpec(AppModuleId.FINANCE, "Finanças", "Contas, orçamento 50/30/20 e metas")
+        ModuleColorSpec(AppModuleId.FINANCE, "Finanças", "Contas, orçamento 60/20/20 e metas")
     )
 
     // Paleta completa de cores orgânicas e vibrantes para personalizar cada módulo
@@ -207,7 +215,7 @@ object CustomizationCatalog {
         ),
         HubWidgetCatalogItem(
             id = HubWidgetIds.BALANCE_RING,
-            title = "Saldo Disponível & Anel 50/30/20",
+            title = "Saldo Disponível & Anel 60/20/20",
             subtitle = "Mostrador circular de economia familiar e saldo livre"
         ),
         HubWidgetCatalogItem(
@@ -545,10 +553,17 @@ class CustomizationRepository(context: Context) {
             billReminderSoundTitle = prefs.getString(KEY_BILL_SOUND_TITLE, "Notificação Padrão do Sistema")
                 ?: "Notificação Padrão do Sistema",
             billVibrateEnabled = prefs.getBoolean(KEY_BILL_VIBRATE, true),
-            profileName = prefs.getString(KEY_PROFILE_NAME, "Você") ?: "Você",
+            profileName = (prefs.getString(KEY_PROFILE_NAME, "") ?: "").trim().let { savedName ->
+                if (savedName.equals("Você", ignoreCase = true) ||
+                    savedName.equals("Voce", ignoreCase = true) ||
+                    savedName.equals("VO", ignoreCase = true)
+                ) "" else savedName
+            },
             profileColorHex = prefs.getLong(KEY_PROFILE_COLOR_HEX, prefs.getLong(KEY_AGENDA_COLOR_HEX, 0xFFE88378)),
             profilePhotoPath = validPhotoPath,
+            profileAvatarBase64 = prefs.getString(KEY_PROFILE_AVATAR_BASE64, "") ?: "",
             profilePhotoVersion = prefs.getLong(KEY_PROFILE_PHOTO_VERSION, 0L),
+            themeMode = prefs.getString(KEY_THEME_MODE, "SYSTEM") ?: "SYSTEM",
             agendaLayoutMode = prefs.getString(KEY_AGENDA_LAYOUT_MODE, AgendaLayoutMode.COMPLETO)
                 ?: AgendaLayoutMode.COMPLETO,
             hubWidgetOrder = completeOrder,
@@ -651,7 +666,9 @@ class CustomizationRepository(context: Context) {
             .putString(KEY_PROFILE_NAME, updated.profileName)
             .putLong(KEY_PROFILE_COLOR_HEX, updated.profileColorHex)
             .putString(KEY_PROFILE_PHOTO_PATH, updated.profilePhotoPath)
+            .putString(KEY_PROFILE_AVATAR_BASE64, updated.profileAvatarBase64)
             .putLong(KEY_PROFILE_PHOTO_VERSION, updated.profilePhotoVersion)
+            .putString(KEY_THEME_MODE, updated.themeMode)
             .putString(KEY_AGENDA_LAYOUT_MODE, updated.agendaLayoutMode)
             .putString(KEY_HUB_WIDGET_ORDER, updated.hubWidgetOrder.joinToString(","))
             .putString(KEY_HUB_ENABLED_WIDGETS, updated.enabledHubWidgets.joinToString(","))
@@ -949,27 +966,117 @@ class CustomizationRepository(context: Context) {
         colorHex: Long = _configFlow.value.profileColorHex
     ) {
         val current = _configFlow.value
+        val cleanName = name.trim().let { raw ->
+            if (raw.equals("Você", ignoreCase = true) ||
+                raw.equals("Voce", ignoreCase = true) ||
+                raw.equals("VO", ignoreCase = true)
+            ) "" else raw
+        }
         saveAndEmit(
             current.copy(
-                profileName = name.trim().ifBlank { "Você" },
+                profileName = cleanName.ifBlank { current.profileName },
                 profileColorHex = colorHex,
                 agendaColorHex = colorHex
             )
         )
     }
 
+    fun updateThemeMode(mode: String) {
+        val normalized = when (mode.uppercase()) {
+            "LIGHT", "DARK", "AMOLED", "SYSTEM" -> mode.uppercase()
+            else -> "SYSTEM"
+        }
+        val current = _configFlow.value
+        saveAndEmit(current.copy(themeMode = normalized))
+    }
+
+    fun updateProfileAvatarBase64(base64: String) {
+        val current = _configFlow.value
+        if (current.profileAvatarBase64 == base64) return
+        saveAndEmit(
+            current.copy(
+                profileAvatarBase64 = base64,
+                profilePhotoVersion = System.currentTimeMillis()
+            )
+        )
+    }
+
+    /**
+     * Comprime a foto selecionada da galeria corrigindo a rotação EXIF,
+     * redimensionando para no máximo 400x400px e comprimindo em JPEG (qualidade 75%),
+     * gerando uma string Base64 leve (100% compatível com o plano Spark do Firestore, sem Storage).
+     */
     fun saveProfilePhotoFromUri(sourceUri: Uri): Boolean {
         return try {
-            val destFile = File(appContext.filesDir, "profile_avatar.jpg")
+            val tempExifFile = File(appContext.cacheDir, "avatar_exif_tmp.jpg")
             appContext.contentResolver.openInputStream(sourceUri)?.use { input ->
-                FileOutputStream(destFile).use { output ->
+                FileOutputStream(tempExifFile).use { output ->
                     input.copyTo(output)
                 }
             }
+            if (!tempExifFile.exists() || tempExifFile.length() == 0L) return false
+
+            val rotationDegrees = try {
+                val exif = ExifInterface(tempExifFile.absolutePath)
+                when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            } catch (_: Exception) {
+                0f
+            }
+
+            // First decode bounds to avoid OOM on high-res photos
+            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(tempExifFile.absolutePath, boundsOptions)
+            var sampleSize = 1
+            val maxTarget = 400
+            while ((boundsOptions.outWidth / sampleSize) > maxTarget * 2 ||
+                (boundsOptions.outHeight / sampleSize) > maxTarget * 2
+            ) {
+                sampleSize *= 2
+            }
+
+            val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            val rawBitmap = BitmapFactory.decodeFile(tempExifFile.absolutePath, decodeOptions)
+                ?: return false
+            tempExifFile.delete()
+
+            val orientedBitmap = if (rotationDegrees != 0f) {
+                val matrix = Matrix().apply { postRotate(rotationDegrees) }
+                Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
+            } else {
+                rawBitmap
+            }
+
+            val width = orientedBitmap.width.coerceAtLeast(1)
+            val height = orientedBitmap.height.coerceAtLeast(1)
+            val scale = minOf(maxTarget.toFloat() / width.toFloat(), maxTarget.toFloat() / height.toFloat(), 1f)
+            val targetW = (width * scale).toInt().coerceAtLeast(1)
+            val targetH = (height * scale).toInt().coerceAtLeast(1)
+            val scaledBitmap = if (targetW != width || targetH != height) {
+                Bitmap.createScaledBitmap(orientedBitmap, targetW, targetH, true)
+            } else {
+                orientedBitmap
+            }
+
+            val baos = ByteArrayOutputStream()
+            scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 75, baos)
+            val jpegBytes = baos.toByteArray()
+            val base64Avatar = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+
+            val destFile = File(appContext.filesDir, "profile_avatar.jpg")
+            FileOutputStream(destFile).use { output ->
+                output.write(jpegBytes)
+            }
+
             val current = _configFlow.value
             saveAndEmit(
                 current.copy(
                     profilePhotoPath = destFile.absolutePath,
+                    profileAvatarBase64 = base64Avatar,
                     profilePhotoVersion = System.currentTimeMillis()
                 )
             )
@@ -989,6 +1096,7 @@ class CustomizationRepository(context: Context) {
         saveAndEmit(
             current.copy(
                 profilePhotoPath = "",
+                profileAvatarBase64 = "",
                 profilePhotoVersion = System.currentTimeMillis()
             )
         )
@@ -1250,5 +1358,7 @@ class CustomizationRepository(context: Context) {
         private const val KEY_MORNING_SUMMARY_HOUR = "morning_summary_hour"
         private const val KEY_MORNING_SUMMARY_MINUTE = "morning_summary_minute"
         private const val KEY_FINANCE_PRIVACY_HIDE_VALUES = "finance_privacy_hide_values"
+        private const val KEY_PROFILE_AVATAR_BASE64 = "profile_avatar_base64"
+        private const val KEY_THEME_MODE = "theme_mode"
     }
 }

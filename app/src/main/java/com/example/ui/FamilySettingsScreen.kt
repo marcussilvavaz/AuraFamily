@@ -102,6 +102,7 @@ fun ProfileAvatarBadge(
     profileColorHex: Long,
     profilePhotoPath: String,
     profilePhotoVersion: Long,
+    profileAvatarBase64: String = "",
     size: Dp = 48.dp,
     onClick: (() -> Unit)? = null,
     testTag: String = "profile_avatar_badge"
@@ -110,8 +111,13 @@ fun ProfileAvatarBadge(
         if (profileColorHex != 0L) Color(profileColorHex.toInt()) else Color(0xFF0B6E4F)
     }
 
-    val imageBitmap = remember(profilePhotoPath, profilePhotoVersion) {
-        if (profilePhotoPath.isNotBlank()) {
+    val imageBitmap = remember(profileAvatarBase64, profilePhotoPath, profilePhotoVersion) {
+        if (profileAvatarBase64.isNotBlank()) {
+            runCatching {
+                val bytes = android.util.Base64.decode(profileAvatarBase64, android.util.Base64.DEFAULT)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+            }.getOrNull()
+        } else if (profilePhotoPath.isNotBlank()) {
             runCatching {
                 val file = File(profilePhotoPath)
                 if (file.exists()) {
@@ -126,11 +132,13 @@ fun ProfileAvatarBadge(
     }
 
     val initials = remember(profileName) {
-        val parts = profileName.trim().split(" ").filter { it.isNotBlank() }
+        val clean = profileName.trim()
+        val parts = clean.split(" ").filter { it.isNotBlank() }
         when {
+            clean.equals("Você", ignoreCase = true) || clean.equals("VO", ignoreCase = true) -> "OM"
             parts.size >= 2 -> "${parts[0].first().uppercaseChar()}${parts[1].first().uppercaseChar()}"
             parts.size == 1 -> parts[0].take(2).uppercase()
-            else -> "VC"
+            else -> "OM"
         }
     }
 
@@ -208,6 +216,9 @@ fun FamilySettingsScreen(
     onRecoverLegacyData: () -> Unit = {},
     onBuildFullBackupJson: () -> String = { "{}" },
     onRestoreBackupFromUri: (android.net.Uri) -> Unit = {},
+    syncedItemsTotalCount: Int = 0,
+    onForceCloudSyncNow: () -> Unit = {},
+    onUpdateAvatarBase64: (String) -> Unit = {},
     onBackToHub: () -> Unit,
     onShowMessage: (String) -> Unit,
     onSignOut: () -> Unit
@@ -218,14 +229,18 @@ fun FamilySettingsScreen(
     val clipboardManager = LocalClipboardManager.current
     val triggerFeedback = rememberOmniFeedback()
 
-    var nameInput by remember(customizationConfig.profileName, userProfile?.displayName) {
+    var nameInput by remember(customizationConfig.profileName, userProfile?.displayName, userEmail) {
         mutableStateOf(
-            customizationConfig.profileName.ifBlank {
-                userProfile?.displayName?.ifBlank { "Você" } ?: "Você"
-            }
+            customizationConfig.profileName.takeIf { it.isNotBlank() && !it.equals("Você", ignoreCase = true) }
+                ?: userProfile?.displayName?.takeIf { it.isNotBlank() && !it.equals("Você", ignoreCase = true) }
+                ?: userEmail?.substringBefore("@")?.takeIf { it.isNotBlank() }
+                ?: "Membro"
         )
     }
     val selectedColorHex = customizationConfig.profileColorHex
+    val effectiveAvatarBase64 = customizationConfig.profileAvatarBase64.ifBlank {
+        userProfile?.avatarBase64.orEmpty()
+    }
 
     // Expandable section states
     var expandStructuredAppearance by remember { mutableStateOf(false) }
@@ -284,7 +299,9 @@ fun FamilySettingsScreen(
     var showMemberEditorDialog by remember { mutableStateOf(false) }
     var deletingFamilyMember by remember { mutableStateOf<com.example.data.FamilyMemberBadge?>(null) }
 
-    val activeTheme = userProfile?.themeMode ?: "SYSTEM"
+    val activeTheme = customizationConfig.themeMode.takeIf { it.isNotBlank() && it != "SYSTEM" }
+        ?: userProfile?.themeMode
+        ?: "SYSTEM"
     val selectedMemberColor = remember(selectedColorHex) {
         Color(selectedColorHex.toInt())
     }
@@ -300,7 +317,11 @@ fun FamilySettingsScreen(
         if (uri != null) {
             val saved = customizationRepo.saveProfilePhotoFromUri(uri)
             if (saved) {
-                onShowMessage("Foto do perfil atualizada com sucesso!")
+                val base64 = customizationRepo.configFlow.value.profileAvatarBase64
+                if (base64.isNotBlank()) {
+                    onUpdateAvatarBase64(base64)
+                }
+                onShowMessage("Foto do perfil sincronizada com a família na nuvem!")
             } else {
                 onShowMessage("Não foi possível carregar a foto selecionada.")
             }
@@ -369,6 +390,7 @@ fun FamilySettingsScreen(
                             profileColorHex = selectedColorHex,
                             profilePhotoPath = customizationConfig.profilePhotoPath,
                             profilePhotoVersion = customizationConfig.profilePhotoVersion,
+                            profileAvatarBase64 = effectiveAvatarBase64,
                             size = 54.dp,
                             onClick = {
                                 photoPickerLauncher.launch(
@@ -526,6 +548,174 @@ fun FamilySettingsScreen(
                                 )
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // STATUS DA NUVEM (FIRESTORE) & GARANTIR NOTIFICAÇÕES EM 2º PLANO (ONE UI)
+        // =========================================================================
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("cloud_status_firestore_card"),
+                shape = RoundedCornerShape(cardRadius),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.CloudDone,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Status da Nuvem (Firestore)",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (!userEmail.isNullOrBlank()) {
+                                        "Sincronização em Tempo Real Ativa • $userEmail"
+                                    } else {
+                                        "Modo Offline Local • Entre com Google para sincronizar"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(
+                                    text = "Família: ${household.name} (${household.householdId})",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "$syncedItemsTotalCount itens sincronizados (Agenda, Finanças, Saúde, Diário e Mural)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                triggerFeedback("Sincronizando todos os dados com o Cloud Firestore...")
+                                onForceCloudSyncNow()
+                            },
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("force_cloud_sync_now_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CloudDone,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Forçar Sincronização Agora",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    // Botão Garantir Notificações em 2º Plano (Samsung One UI / Android 12+)
+                    FilledTonalButton(
+                        onClick = {
+                            var openedSettings = false
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                val alarmManager = context.getSystemService(android.content.Context.ALARM_SERVICE) as? android.app.AlarmManager
+                                if (alarmManager != null && !alarmManager.canScheduleExactAlarms()) {
+                                    runCatching {
+                                        val intent = android.content.Intent(
+                                            android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                                            android.net.Uri.parse("package:${context.packageName}")
+                                        ).apply {
+                                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(intent)
+                                        openedSettings = true
+                                    }
+                                }
+                            }
+                            if (!openedSettings && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                                val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+                                if (pm != null && !pm.isIgnoringBatteryOptimizations(context.packageName)) {
+                                    runCatching {
+                                        val intent = android.content.Intent(
+                                            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                            android.net.Uri.parse("package:${context.packageName}")
+                                        ).apply {
+                                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(intent)
+                                        openedSettings = true
+                                    }
+                                }
+                            }
+                            com.example.alarm.AlarmScheduler.rescheduleAllActiveAlarms(context)
+                            if (openedSettings) {
+                                onShowMessage("Autorize alarmes exatos / bateria sem restrições para notificações em 2º plano.")
+                            } else {
+                                triggerFeedback("Notificações e alarmes exatos verificados e reagendados!")
+                                onShowMessage("✅ Alarmes exatos e bateria sem restrição ativos! Todos os lembretes foram reagendados.")
+                            }
+                        },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("ensure_background_notifications_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Notifications,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Garantir Notificações em 2º Plano",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
@@ -707,6 +897,7 @@ fun FamilySettingsScreen(
                             profileColorHex = selectedColorHex,
                             profilePhotoPath = customizationConfig.profilePhotoPath,
                             profilePhotoVersion = customizationConfig.profilePhotoVersion,
+                            profileAvatarBase64 = effectiveAvatarBase64,
                             size = 72.dp,
                             onClick = {
                                 photoPickerLauncher.launch(
@@ -740,10 +931,11 @@ fun FamilySettingsScreen(
                                 Text("Escolher Foto do Perfil")
                             }
 
-                            if (customizationConfig.profilePhotoPath.isNotBlank()) {
+                            if (customizationConfig.profilePhotoPath.isNotBlank() || effectiveAvatarBase64.isNotBlank()) {
                                 OutlinedButton(
                                     onClick = {
                                         customizationRepo.clearProfilePhoto()
+                                        onUpdateAvatarBase64("")
                                         onShowMessage("Foto removida. Usando iniciais do perfil.")
                                     },
                                     shape = RoundedCornerShape(50),
@@ -781,7 +973,10 @@ fun FamilySettingsScreen(
                         )
                         FilledTonalButton(
                             onClick = {
-                                val clean = nameInput.trim().ifBlank { "Você" }
+                                val clean = nameInput.trim().takeIf {
+                                    it.isNotBlank() && !it.equals("Você", ignoreCase = true)
+                                } ?: userEmail?.substringBefore("@")?.takeIf { it.isNotBlank() } ?: "Membro"
+                                nameInput = clean
                                 customizationRepo.updateProfileIdentity(clean, selectedColorHex)
                                 onUpdateProfileIdentity(clean, selectedColorHex)
                                 triggerFeedback("Nome do perfil salvo com sucesso!")
@@ -831,11 +1026,11 @@ fun FamilySettingsScreen(
         }
 
         // =========================================================================
-        // EXPANDABLE SECTION 3: MONTAR MEU HUB (WIDGETS ESTILO SMARTWATCH)
+        // EXPANDABLE SECTION 3: MONTAR MEU HUB
         // =========================================================================
         item {
             ExpandableProfileSectionCard(
-                title = "3. Montar Meu Hub (Widgets Smartwatch)",
+                title = "3. Montar Meu Hub",
                 subtitle = "Escolha quais blocos compactos aparecem no seu Hub e a ordem deles",
                 icon = Icons.Default.Watch,
                 accentColor = MaterialTheme.colorScheme.primary,
@@ -930,7 +1125,7 @@ fun FamilySettingsScreen(
                     OutlinedButton(
                         onClick = {
                             customizationRepo.resetHubWidgetsToDefault()
-                            onShowMessage("Widgets do Hub restaurados para o padrão smartwatch!")
+                            onShowMessage("Blocos do Hub restaurados para o padrão!")
                         },
                         shape = RoundedCornerShape(50),
                         modifier = Modifier
@@ -1066,17 +1261,20 @@ fun FamilySettingsScreen(
         // EXPANDABLE SECTION 5: GESTÃO DE FAMÍLIA, MEMBROS & CÓDIGO DE CONVITE
         // =========================================================================
         item {
-            val effectiveMembers = remember(household.members, nameInput, selectedColorHex, userProfile) {
-                if (household.members.isNotEmpty()) {
-                    household.members
+            val effectiveMembers = remember(household.members, nameInput, selectedColorHex, userProfile, effectiveAvatarBase64) {
+                val realMembers = household.membersWithAssignedColors()
+                if (realMembers.isNotEmpty()) {
+                    realMembers
                 } else {
                     listOf(
                         com.example.data.FamilyMemberBadge(
                             userId = userProfile?.uid?.ifBlank { "local_user" } ?: "local_user",
-                            displayName = nameInput.ifBlank { "Você" },
+                            displayName = nameInput.ifBlank { "Membro" },
                             colorHex = selectedColorHex,
                             avatarEmoji = userProfile?.avatarEmoji ?: "🧑",
-                            role = "Admin"
+                            role = "Admin",
+                            email = userEmail.orEmpty(),
+                            avatarBase64 = effectiveAvatarBase64
                         )
                     )
                 }
@@ -1244,6 +1442,14 @@ fun FamilySettingsScreen(
                                             verticalAlignment = Alignment.CenterVertically,
                                             modifier = Modifier.weight(1f)
                                         ) {
+                                            val memberBitmap = remember(member.avatarBase64) {
+                                                if (member.avatarBase64.isNotBlank()) {
+                                                    runCatching {
+                                                        val bytes = android.util.Base64.decode(member.avatarBase64, android.util.Base64.DEFAULT)
+                                                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                                                    }.getOrNull()
+                                                } else null
+                                            }
                                             Box(
                                                 modifier = Modifier
                                                     .size(38.dp)
@@ -1252,10 +1458,22 @@ fun FamilySettingsScreen(
                                                     .border(2.dp, memberColor, CircleShape),
                                                 contentAlignment = Alignment.Center
                                             ) {
-                                                Text(
-                                                    text = member.avatarEmoji.ifBlank { "🧑" },
-                                                    style = MaterialTheme.typography.titleMedium
-                                                )
+                                                if (memberBitmap != null) {
+                                                    Image(
+                                                        bitmap = memberBitmap,
+                                                        contentDescription = member.displayName,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier
+                                                            .fillMaxSize()
+                                                            .padding(2.dp)
+                                                            .clip(CircleShape)
+                                                    )
+                                                } else {
+                                                    Text(
+                                                        text = member.avatarEmoji.ifBlank { "🧑" },
+                                                        style = MaterialTheme.typography.titleMedium
+                                                    )
+                                                }
                                             }
                                             Spacer(modifier = Modifier.width(10.dp))
                                             Column {

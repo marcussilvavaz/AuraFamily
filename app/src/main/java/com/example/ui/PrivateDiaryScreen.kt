@@ -447,12 +447,17 @@ fun PrivateDiaryScreen(
     }
 
     if (showSecurityConfigModal && customizationRepo != null) {
+        val savedPin = customizationConfig.diaryBackupPin.ifBlank { "1234" }
         var lockEnabledDraft by remember(customizationConfig.diaryBiometricLockEnabled) {
             mutableStateOf(customizationConfig.diaryBiometricLockEnabled)
         }
-        var pinDraft by remember(customizationConfig.diaryBackupPin) {
-            mutableStateOf(customizationConfig.diaryBackupPin.ifBlank { "1234" })
+        var isCurrentPinVerified by remember(customizationConfig.diaryBiometricLockEnabled) {
+            mutableStateOf(!customizationConfig.diaryBiometricLockEnabled)
         }
+        var currentPinInput by remember { mutableStateOf("") }
+        var currentPinError by remember { mutableStateOf(false) }
+        var newPinDraft by remember { mutableStateOf("") }
+
         AlertDialog(
             onDismissRequest = { showSecurityConfigModal = false },
             title = {
@@ -485,27 +490,81 @@ fun PrivateDiaryScreen(
                         )
                     }
                     AnimatedVisibility(visible = lockEnabledDraft) {
-                        OutlinedTextField(
-                            value = pinDraft,
-                            onValueChange = { raw ->
-                                pinDraft = raw.filter { it.isDigit() }.take(6)
-                            },
-                            label = { Text("PIN numérico do Diário (4 a 6 dígitos)") },
-                            singleLine = true,
-                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("diary_modal_pin_input")
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "PIN atual protegido: ••••",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (!isCurrentPinVerified) {
+                                OutlinedTextField(
+                                    value = currentPinInput,
+                                    onValueChange = { raw ->
+                                        currentPinInput = raw.filter { it.isDigit() }.take(6)
+                                        currentPinError = false
+                                    },
+                                    label = { Text("Confirmar PIN atual para alterar") },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                        keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword
+                                    ),
+                                    isError = currentPinError,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("diary_modal_verify_current_pin_input")
+                                )
+                                if (currentPinError) {
+                                    Text(
+                                        text = "PIN atual incorreto.",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        if (currentPinInput == savedPin) {
+                                            isCurrentPinVerified = true
+                                            currentPinError = false
+                                        } else {
+                                            currentPinError = true
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("Validar PIN Atual")
+                                }
+                            } else {
+                                OutlinedTextField(
+                                    value = newPinDraft,
+                                    onValueChange = { raw ->
+                                        newPinDraft = raw.filter { it.isDigit() }.take(6)
+                                    },
+                                    label = { Text("Novo PIN numérico (4 a 6 dígitos)") },
+                                    placeholder = { Text("••••") },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                        keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("diary_modal_pin_input")
+                                )
+                            }
+                        }
                     }
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        val validPin = pinDraft.takeIf { it.length >= 4 } ?: "1234"
+                        val validPin = if (isCurrentPinVerified && newPinDraft.length >= 4) {
+                            newPinDraft
+                        } else {
+                            savedPin
+                        }
                         customizationRepo.updateDiaryBiometricLock(
                             enabled = lockEnabledDraft,
                             backupPin = validPin
@@ -515,7 +574,7 @@ fun PrivateDiaryScreen(
                         }
                         showSecurityConfigModal = false
                         triggerFeedback(
-                            if (lockEnabledDraft) "🔒 Bloqueio por Biometria / PIN ativado no Diário!"
+                            if (lockEnabledDraft) "🔒 Bloqueio por Biometria / PIN salvo no Diário!"
                             else "🔓 Bloqueio do Diário desativado."
                         )
                     }
@@ -665,10 +724,10 @@ fun PrivateDiaryScreen(
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = when (selectedDayEpoch) {
-                                    todayEpoch -> "Hoje • ${dayEntries.size} registro(s)"
-                                    todayEpoch - 1L -> "Ontem • ${dayEntries.size} registro(s)"
-                                    else -> "${dayEntries.size} registro(s) nesta data"
+                                text = if (selectedDayEpoch == todayEpoch) {
+                                    "Hoje • ${dayEntries.size} registro(s)"
+                                } else {
+                                    "${String.format(Locale.US, "%02d/%02d/%04d", selectedDate.dayOfMonth, selectedDate.monthValue, selectedDate.year)} • ${dayEntries.size} registro(s)"
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.primary,
@@ -679,7 +738,7 @@ fun PrivateDiaryScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (selectedDayEpoch != todayEpoch) {
                                 TextButton(onClick = { selectedDayEpoch = todayEpoch }) {
-                                    Text("Hoje", fontWeight = FontWeight.Bold)
+                                    Text("Ir para Hoje", fontWeight = FontWeight.Bold)
                                 }
                             }
                             IconButton(
@@ -696,18 +755,26 @@ fun PrivateDiaryScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // Quick 7-day history strip
+                    // Quick 7-day history strip anchored so "Hoje" only appears on todayEpoch
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        for (offset in -6..0) {
-                            val dayEp = todayEpoch + offset
+                        val stripEpochs = remember(selectedDayEpoch, todayEpoch) {
+                            val base = (-6..0).map { todayEpoch + it }
+                            if (selectedDayEpoch in base) {
+                                base
+                            } else {
+                                ((-3..3).map { selectedDayEpoch + it })
+                            }
+                        }
+                        stripEpochs.forEachIndexed { idx, dayEp ->
                             val d = LocalDate.ofEpochDay(dayEp)
                             val countForDay = diaryState.entries.count { it.epochDay == dayEp }
                             val isSelected = dayEp == selectedDayEpoch
+                            val isActuallyToday = dayEp == todayEpoch
                             Surface(
                                 shape = RoundedCornerShape(14.dp),
                                 color = if (isSelected) {
@@ -717,14 +784,18 @@ fun PrivateDiaryScreen(
                                 },
                                 modifier = Modifier
                                     .clickable { selectedDayEpoch = dayEp }
-                                    .testTag("diary_day_chip_$offset")
+                                    .testTag("diary_day_chip_$idx")
                             ) {
                                 Column(
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                                     horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
                                     Text(
-                                        text = if (offset == 0) "Hoje" else String.format(Locale.US, "%02d/%02d", d.dayOfMonth, d.monthValue),
+                                        text = if (isActuallyToday) {
+                                            "Hoje"
+                                        } else {
+                                            String.format(Locale.US, "%02d/%02d", d.dayOfMonth, d.monthValue)
+                                        },
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold,
                                         color = if (isSelected) {
@@ -782,7 +853,9 @@ fun PrivateDiaryScreen(
                             scope.launch {
                                 isGeneratingLetter = true
                                 val generated = diaryRepo.generatePersonalizedSupportLetter(
-                                    userName = customizationConfig.profileName.ifBlank { "Você" },
+                                    userName = customizationConfig.profileName.takeIf {
+                                        it.isNotBlank() && !it.equals("Você", ignoreCase = true)
+                                    } ?: "Membro",
                                     targetEpochDay = selectedDayEpoch
                                 )
                                 activeLetter = generated
@@ -805,49 +878,61 @@ fun PrivateDiaryScreen(
         // 4. NOVO REGISTRO DE HUMOR E SINTOMAS POR HORA (Menu Expansível - Somente se marcado no questionário)
         if (customizationConfig.hourlyMoodEnabled) {
             item {
+                val formattedSelectedTime = String.format(Locale.US, "%02d:%02d", entryHour, entryMinute)
                 AuraExpandableSectionCard(
                     title = "📝 Registrar Humor & Sintomas por Hora",
-                subtitle = "Carimbo das ${String.format(Locale.US, "%02d:%02d", entryHour, entryMinute)} • Humor, tags e relato livre",
-                icon = Icons.Default.EditNote,
-                accentColor = Color(customizationConfig.diaryColorHex),
-                badgeText = String.format(Locale.US, "%02d:%02d", entryHour, entryMinute),
-                initiallyExpanded = false,
-                testTag = "card_new_diary_entry"
-            ) {
-                // Quick Hour Adjuster Chips
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    subtitle = "Carimbo das $formattedSelectedTime • Humor, tags e relato livre",
+                    icon = Icons.Default.EditNote,
+                    accentColor = Color(customizationConfig.diaryColorHex),
+                    badgeText = formattedSelectedTime,
+                    initiallyExpanded = false,
+                    testTag = "card_new_diary_entry"
                 ) {
-                    Text(
-                        text = "Horário:",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    FilterChip(
-                        selected = false,
-                        onClick = {
-                            val now = LocalTime.now()
-                            entryHour = now.hour
-                            entryMinute = now.minute
-                        },
-                        label = { Text("Agora (${LocalTime.now().let { String.format(Locale.US, "%02d:%02d", it.hour, it.minute) }})") }
-                    )
-                    listOf(8 to 0, 10 to 30, 13 to 0, 16 to 0, 19 to 30, 22 to 0).forEach { (h, m) ->
-                        val isSel = entryHour == h && entryMinute == m
-                        FilterChip(
-                            selected = isSel,
-                            onClick = {
-                                entryHour = h
-                                entryMinute = m
-                            },
-                            label = { Text(String.format(Locale.US, "%02d:%02d", h, m)) }
-                        )
+                    // Quick Hour Adjuster Chips
+                    val presetHours = remember {
+                        listOf(8 to 0, 10 to 30, 13 to 0, 16 to 0, 19 to 30, 22 to 0)
                     }
-                }
+                    val isPresetSelected = presetHours.any { (h, m) -> entryHour == h && entryMinute == m }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Horário:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FilterChip(
+                            selected = !isPresetSelected,
+                            onClick = {
+                                val now = LocalTime.now()
+                                entryHour = now.hour
+                                entryMinute = now.minute
+                            },
+                            label = {
+                                val labelTime = if (!isPresetSelected) {
+                                    formattedSelectedTime
+                                } else {
+                                    LocalTime.now().let { String.format(Locale.US, "%02d:%02d", it.hour, it.minute) }
+                                }
+                                Text("Agora ($labelTime)")
+                            }
+                        )
+                        presetHours.forEach { (h, m) ->
+                            val isSel = entryHour == h && entryMinute == m
+                            FilterChip(
+                                selected = isSel,
+                                onClick = {
+                                    entryHour = h
+                                    entryMinute = m
+                                },
+                                label = { Text(String.format(Locale.US, "%02d:%02d", h, m)) }
+                            )
+                        }
+                    }
 
                 // Mood Selection Chips
                 Text(
@@ -968,10 +1053,7 @@ fun PrivateDiaryScreen(
                             freeText = freeTextInput
                         )
                         freeTextInput = ""
-                        val now = LocalTime.now()
-                        entryHour = now.hour
-                        entryMinute = now.minute
-                        triggerFeedback("Registro salvo na linha do tempo do Diário Privado!")
+                        triggerFeedback("Registro das $formattedSelectedTime salvo na linha do tempo do Diário Privado!")
                     },
                     shape = RoundedCornerShape(50),
                     modifier = Modifier
@@ -985,7 +1067,7 @@ fun PrivateDiaryScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Salvar Registro das ${String.format(Locale.US, "%02d:%02d", entryHour, entryMinute)}",
+                        text = "Salvar Registro das $formattedSelectedTime",
                         fontWeight = FontWeight.ExtraBold
                     )
                 }

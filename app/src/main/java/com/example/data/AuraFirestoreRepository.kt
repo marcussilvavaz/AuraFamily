@@ -9,6 +9,8 @@ import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
+import com.google.firebase.firestore.FirebaseFirestoreSettings
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -32,6 +34,50 @@ class AuraFirestoreRepository(
         auth = Firebase.auth,
         localStore = LocalOfflineStore(context.applicationContext)
     )
+
+    init {
+        runCatching {
+            val settings = FirebaseFirestoreSettings.Builder(db.firestoreSettings)
+                .setPersistenceEnabled(true)
+                .setCacheSizeBytes(FirebaseFirestoreSettings.CACHE_SIZE_UNLIMITED)
+                .build()
+            db.firestoreSettings = settings
+        }
+    }
+
+    private fun isPlaceholderMemberName(raw: String?): Boolean {
+        val clean = raw?.trim()?.lowercase(Locale.ROOT).orEmpty()
+        return clean.isBlank() ||
+            clean == "você" ||
+            clean == "voce" ||
+            clean == "vo" ||
+            clean == "você (omni)" ||
+            clean == "família" ||
+            clean == "familia" ||
+            clean == "membro" ||
+            clean == "membro da família"
+    }
+
+    private fun resolveRealAuthenticatedName(vararg candidates: String?): String {
+        for (c in candidates) {
+            val trimmed = c?.trim().orEmpty()
+            if (!isPlaceholderMemberName(trimmed)) {
+                return trimmed.take(80)
+            }
+        }
+        val firebaseUser = auth.currentUser
+        val authDisplay = firebaseUser?.displayName?.trim().orEmpty()
+        if (!isPlaceholderMemberName(authDisplay)) {
+            return authDisplay.take(80)
+        }
+        val emailPrefix = firebaseUser?.email?.substringBefore('@')?.trim().orEmpty()
+        if (emailPrefix.isNotBlank()) {
+            return emailPrefix.replaceFirstChar {
+                if (it.isLowerCase()) it.titlecase(Locale.forLanguageTag("pt-BR")) else it.toString()
+            }.take(80)
+        }
+        return "Marcus"
+    }
 
     private fun isLocalOfflineMode(): Boolean {
         return auth.currentUser == null && localStore != null
@@ -106,10 +152,28 @@ class AuraFirestoreRepository(
     }
 
     private fun memberBadgesToFirestoreList(members: List<FamilyMemberBadge>): List<Map<String, Any>> {
-        return members.map { m ->
+        val deduplicated = linkedMapOf<String, FamilyMemberBadge>()
+        for (m in members) {
+            val cleanName = m.displayName.trim()
+            if (isPlaceholderMemberName(cleanName)) continue
+            val key = m.userId.trim().ifBlank { cleanName.lowercase(Locale.ROOT) }
+            val existing = deduplicated[key]
+            deduplicated[key] = FamilyMemberBadge(
+                userId = m.userId.trim().ifBlank { existing?.userId.orEmpty() },
+                displayName = cleanName,
+                email = m.email.trim().ifBlank { existing?.email.orEmpty() },
+                avatarBase64 = m.avatarBase64.ifBlank { existing?.avatarBase64.orEmpty() },
+                colorHex = if (m.colorHex != 0L) m.colorHex else (existing?.colorHex ?: 0xFF0E7C5B),
+                avatarEmoji = m.avatarEmoji.ifBlank { existing?.avatarEmoji ?: "🌿" },
+                role = m.role.ifBlank { existing?.role ?: "ADMIN" }
+            )
+        }
+        return deduplicated.values.map { m ->
             mapOf(
                 "userId" to m.userId.take(128),
                 "displayName" to m.displayName.take(80),
+                "email" to m.email.take(160),
+                "avatarBase64" to m.avatarBase64,
                 "colorHex" to m.colorHex,
                 "avatarEmoji" to m.avatarEmoji.take(16),
                 "role" to m.role.take(24)
@@ -118,15 +182,20 @@ class AuraFirestoreRepository(
     }
 
     private fun bankAccountsToFirestoreList(accounts: List<BankAccount>): List<Map<String, Any>> {
-        return accounts.map { acc ->
+        return accounts.map { rawAcc ->
+            val acc = rawAcc.sanitized()
+            val isCash = acc.isCashOrWallet()
+            val safeLimit = if (isCash) 0.0 else acc.creditLimitBrl.coerceAtLeast(0.0)
+            val safeClosing = if (isCash || safeLimit <= 0.0) 0 else acc.closingDay.coerceIn(1, 31)
+            val safeDue = if (isCash || safeLimit <= 0.0) 0 else acc.dueDay.coerceIn(1, 31)
             mapOf(
                 "id" to acc.id.take(64).ifBlank { "acc_" + UUID.randomUUID().toString().take(8) },
                 "name" to acc.name.take(80),
                 "institution" to acc.institution.take(60),
                 "initialBalanceBrl" to acc.initialBalanceBrl,
-                "creditLimitBrl" to acc.creditLimitBrl.coerceAtLeast(0.0),
-                "closingDay" to acc.closingDay.coerceIn(1, 31),
-                "dueDay" to acc.dueDay.coerceIn(1, 31),
+                "creditLimitBrl" to safeLimit,
+                "closingDay" to safeClosing,
+                "dueDay" to safeDue,
                 "colorHex" to acc.colorHex,
                 "iconEmoji" to acc.iconEmoji.take(16),
                 "privacyScope" to acc.privacyScope.take(24)
@@ -135,7 +204,7 @@ class AuraFirestoreRepository(
     }
 
     private fun muralItemsToFirestoreList(items: List<FamilyMuralItem>): List<Map<String, Any>> {
-        return items.take(200).map { item ->
+        return items.filterNot { it.id.startsWith("mural_seed_") }.take(200).map { item ->
             mapOf(
                 "id" to item.id.take(64).ifBlank { "mural_" + UUID.randomUUID().toString().take(8) },
                 "title" to item.title.take(240),
@@ -194,145 +263,600 @@ class AuraFirestoreRepository(
         )
     }
 
-    suspend fun ensureUserProfileAndHousehold(displayNameRaw: String?): Result<UserProfile> {
+    /**
+     * Fluxo "Nuvem Primeiro" (Cloud-First) com Fusão Segura de Famílias (ex.: FAM_SKRKRVKS -> FAM_OMNI2448),
+     * eliminação de "Você" / "VO", limpeza de conta Dinheiro/Carteira e download integral antes de abrir o Hub.
+     */
+    suspend fun ensureUserProfileAndHousehold(
+        displayNameRaw: String?,
+        avatarBase64Raw: String = ""
+    ): Result<UserProfile> {
         if (isLocalOfflineMode()) {
             return Result.success(localStore!!.userProfileFlow.value)
         }
         var currentPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}"
         return try {
             val uid = requireUserId()
+            val userEmail = auth.currentUser?.email?.trim().orEmpty()
             val userDocRef = db.collection("users").document(uid)
             currentPath = userDocRef.path
-            val snapshot = userDocRef.get().await()
+            val userSnap = userDocRef.get().await()
+            val existingUserProfile = if (userSnap.exists()) {
+                userSnap.toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            } else null
 
-            val displayName = (displayNameRaw?.trim()?.take(80)).takeUnless { it.isNullOrBlank() } ?: "Membro da Família"
-            val initials = displayName.split(" ")
+            val resolvedName = resolveRealAuthenticatedName(
+                existingUserProfile?.displayName,
+                displayNameRaw,
+                auth.currentUser?.displayName
+            )
+            val initials = resolvedName.split(" ")
                 .mapNotNull { it.firstOrNull()?.uppercaseChar() }
                 .take(2)
                 .joinToString("")
                 .ifBlank { "OM" }
+            val resolvedAvatarBase64 = avatarBase64Raw.ifBlank { existingUserProfile?.avatarBase64.orEmpty() }
 
-            val profile = if (snapshot.exists()) {
-                val loaded = snapshot.toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                if (loaded != null && loaded.householdId.isNotBlank()) {
-                    loaded
-                } else {
-                    val defaultHouseId = defaultHouseholdIdForUser(uid)
-                    userDocRef.update(
-                        mapOf(
-                            "householdId" to defaultHouseId,
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).await()
-                    UserProfile(
-                        id = uid,
-                        userId = uid,
-                        displayName = displayName,
-                        householdId = defaultHouseId,
-                        memberColorHex = loaded?.memberColorHex ?: 0xFF0E7C5B,
-                        avatarEmoji = loaded?.avatarEmoji ?: "🌿",
-                        avatarInitials = loaded?.avatarInitials?.ifBlank { initials } ?: initials,
-                        memberRole = loaded?.memberRole ?: "ADMIN",
-                        defaultSplitPercentage = loaded?.defaultSplitPercentage ?: 50.0
-                    )
-                }
-            } else {
-                val defaultHouseId = defaultHouseholdIdForUser(uid)
-                val payload = mapOf(
-                    "userId" to uid,
-                    "displayName" to displayName,
-                    "householdId" to defaultHouseId,
-                    "themeMode" to "SYSTEM",
-                    "baseCurrency" to "BRL",
-                    "memberColorHex" to 0xFF0E7C5BL,
-                    "avatarEmoji" to "🌿",
-                    "avatarInitials" to initials,
-                    "memberRole" to "ADMIN",
-                    "defaultSplitPercentage" to 50.0,
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-                userDocRef.set(payload).await()
-                UserProfile(
-                    id = uid,
-                    userId = uid,
-                    displayName = displayName,
-                    householdId = defaultHouseId,
-                    themeMode = "SYSTEM",
-                    baseCurrency = "BRL",
-                    memberColorHex = 0xFF0E7C5BL,
-                    avatarEmoji = "🌿",
-                    avatarInitials = initials,
-                    memberRole = "ADMIN",
-                    defaultSplitPercentage = 50.0
-                )
+            // 1. Consultar todas as famílias na coleção households para descobrir famílias existentes do usuário
+            // (ignorando documentos que já tenham o campo migratedTo preenchido)
+            currentPath = "households"
+            val allHouseholdsSnap = runCatching { db.collection("households").get().await() }.getOrNull()
+            val activeHouseholdDocs = allHouseholdsSnap?.documents.orEmpty().filter { doc ->
+                val migratedTo = doc.getString("migratedTo")?.trim().orEmpty()
+                migratedTo.isBlank()
             }
 
-            // Ensure household document exists
-            val houseId = profile.householdId.ifBlank { defaultHouseholdIdForUser(uid) }
-            val houseRef = db.collection("households").document(houseId)
+            // Identificar famílias ligadas ao usuário (por ownerId, members, userProfile.householdId ou FAM_OMNI2448 / FAM_SKRKRVKS)
+            val userGeneratedCode = defaultHouseholdIdForUser(uid)
+            val candidateDocs = activeHouseholdDocs.filter { doc ->
+                val house = doc.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                val docId = doc.id
+                val matchesOwner = house?.ownerId == uid
+                val matchesMember = house?.members?.any { m ->
+                    m.userId == uid ||
+                        (userEmail.isNotBlank() && m.email.equals(userEmail, ignoreCase = true)) ||
+                        (!isPlaceholderMemberName(m.displayName) && m.displayName.equals(resolvedName, ignoreCase = true))
+                } == true
+                val matchesProfileHouse = existingUserProfile?.householdId?.isNotBlank() == true &&
+                    docId.equals(existingUserProfile.householdId, ignoreCase = true)
+                val matchesKnownOfficialOrDup = docId == OFFICIAL_HOUSEHOLD_ID ||
+                    docId == LEGACY_DUPLICATE_HOUSEHOLD_ID ||
+                    docId == userGeneratedCode
+                matchesOwner || matchesMember || matchesProfileHouse || matchesKnownOfficialOrDup
+            }
+
+            // Determinar a família oficial alvo:
+            // Se FAM_OMNI2448 existir (na lista ativa ou consulta direta), ela é SEMPRE a família oficial alvo.
+            val directOfficialSnap = runCatching {
+                db.collection("households").document(OFFICIAL_HOUSEHOLD_ID).get().await()
+            }.getOrNull()
+
+            val primaryHouseholdId: String = when {
+                directOfficialSnap != null && directOfficialSnap.exists() &&
+                    directOfficialSnap.getString("migratedTo").isNullOrBlank() -> OFFICIAL_HOUSEHOLD_ID
+                candidateDocs.any { it.id == OFFICIAL_HOUSEHOLD_ID } -> OFFICIAL_HOUSEHOLD_ID
+                candidateDocs.isNotEmpty() -> {
+                    // Priorizar família que não seja o código auto-gerado FAM_<UID> se houver outra, ou a que tiver mais membros
+                    candidateDocs.sortedWith(
+                        compareByDescending<DocumentSnapshot> { it.id == OFFICIAL_HOUSEHOLD_ID }
+                            .thenByDescending { it.id != userGeneratedCode && it.id != LEGACY_DUPLICATE_HOUSEHOLD_ID }
+                            .thenByDescending {
+                                val h = it.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                                h?.members?.size ?: 0
+                            }
+                    ).first().id
+                }
+                existingUserProfile?.householdId?.isNotBlank() == true &&
+                    existingUserProfile.householdId != LEGACY_DUPLICATE_HOUSEHOLD_ID -> {
+                    val savedId = existingUserProfile.householdId
+                    val savedSnap = runCatching { db.collection("households").document(savedId).get().await() }.getOrNull()
+                    if (savedSnap != null && savedSnap.exists() && !savedSnap.getString("migratedTo").isNullOrBlank()) {
+                        savedSnap.getString("migratedTo")!!.trim()
+                    } else {
+                        savedId
+                    }
+                }
+                else -> OFFICIAL_HOUSEHOLD_ID
+            }
+
+            // 2. Fusão Segura Automática: se existirem famílias duplicadas (ex.: FAM_SKRKRVKS ou FAM_<UID>) além da oficial
+            val duplicateDocsToFuse = candidateDocs.filter { doc ->
+                doc.id != primaryHouseholdId &&
+                    (doc.id == LEGACY_DUPLICATE_HOUSEHOLD_ID ||
+                        doc.id == userGeneratedCode ||
+                        doc.getString("ownerId") == uid)
+            }.toMutableList()
+
+            // Garantir verificação direta do documento FAM_SKRKRVKS mesmo que não tenha vindo no filtro
+            if (primaryHouseholdId == OFFICIAL_HOUSEHOLD_ID &&
+                duplicateDocsToFuse.none { it.id == LEGACY_DUPLICATE_HOUSEHOLD_ID }
+            ) {
+                val dupSnap = runCatching {
+                    db.collection("households").document(LEGACY_DUPLICATE_HOUSEHOLD_ID).get().await()
+                }.getOrNull()
+                if (dupSnap != null && dupSnap.exists() && dupSnap.getString("migratedTo").isNullOrBlank()) {
+                    duplicateDocsToFuse.add(dupSnap)
+                }
+            }
+
+            for (dupDoc in duplicateDocsToFuse) {
+                runCatching {
+                    fuseDuplicateHouseholdIntoOfficial(
+                        duplicateSnap = dupDoc,
+                        targetHouseholdId = primaryHouseholdId
+                    )
+                }
+            }
+
+            // 3. Atualizar ou criar o documento users/{uid} apontando para primaryHouseholdId e sem "Você" / "VO"
+            val finalProfile = UserProfile(
+                id = uid,
+                userId = uid,
+                displayName = resolvedName,
+                email = userEmail,
+                avatarBase64 = resolvedAvatarBase64,
+                householdId = primaryHouseholdId,
+                themeMode = existingUserProfile?.themeMode?.ifBlank { "SYSTEM" } ?: "SYSTEM",
+                baseCurrency = existingUserProfile?.baseCurrency?.ifBlank { "BRL" } ?: "BRL",
+                memberColorHex = existingUserProfile?.memberColorHex?.takeIf { it != 0L } ?: 0xFF0E7C5BL,
+                avatarEmoji = existingUserProfile?.avatarEmoji?.ifBlank { "🌿" } ?: "🌿",
+                avatarInitials = initials,
+                memberRole = existingUserProfile?.memberRole?.ifBlank { "ADMIN" } ?: "ADMIN",
+                defaultSplitPercentage = existingUserProfile?.defaultSplitPercentage ?: 50.0
+            )
+            currentPath = userDocRef.path
+            val userPayload = mutableMapOf<String, Any>(
+                "userId" to uid,
+                "displayName" to finalProfile.displayName,
+                "email" to finalProfile.email,
+                "householdId" to primaryHouseholdId,
+                "themeMode" to finalProfile.themeMode,
+                "baseCurrency" to finalProfile.baseCurrency,
+                "memberColorHex" to finalProfile.memberColorHex,
+                "avatarEmoji" to finalProfile.avatarEmoji,
+                "avatarInitials" to finalProfile.avatarInitials,
+                "memberRole" to finalProfile.memberRole,
+                "defaultSplitPercentage" to finalProfile.defaultSplitPercentage,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (finalProfile.avatarBase64.isNotBlank()) {
+                userPayload["avatarBase64"] = finalProfile.avatarBase64
+            }
+            if (!userSnap.exists()) {
+                userPayload["createdAt"] = FieldValue.serverTimestamp()
+            }
+            userDocRef.set(userPayload, SetOptions.merge()).await()
+
+            // 4. Garantir documento households/{primaryHouseholdId} normalizado (sem "Você"/"VO", sem acc_cash com limite, 60/20/20)
+            val houseRef = db.collection("households").document(primaryHouseholdId)
             currentPath = houseRef.path
             val houseSnap = houseRef.get().await()
+            val myBadge = FamilyMemberBadge(
+                userId = uid,
+                displayName = finalProfile.displayName,
+                email = finalProfile.email,
+                avatarBase64 = finalProfile.avatarBase64,
+                colorHex = finalProfile.memberColorHex,
+                avatarEmoji = finalProfile.avatarEmoji,
+                role = finalProfile.memberRole,
+                isCurrentUser = true
+            )
+
             if (!houseSnap.exists()) {
-                val initialMember = FamilyMemberBadge(
-                    userId = uid,
-                    displayName = profile.displayName.ifBlank { displayName },
-                    colorHex = profile.memberColorHex,
-                    avatarEmoji = profile.avatarEmoji,
-                    role = profile.memberRole
-                )
+                val defaultFamilyName = if (primaryHouseholdId == OFFICIAL_HOUSEHOLD_ID) {
+                    "Família Vaz"
+                } else {
+                    "Família ${finalProfile.displayName.split(" ").firstOrNull() ?: "Omni"}"
+                }
                 val housePayload = mapOf(
-                    "householdId" to houseId,
-                    "name" to "Família ${displayName.split(" ").firstOrNull() ?: "Omni"}",
+                    "householdId" to primaryHouseholdId,
+                    "name" to defaultFamilyName,
                     "ownerId" to uid,
-                    "monthlyIncomeBrl" to 8500.0,
-                    "needsPercentage" to 50L,
-                    "wantsPercentage" to 30L,
+                    "monthlyIncomeBrl" to 0.0,
+                    "needsPercentage" to 60L,
+                    "wantsPercentage" to 20L,
                     "savingsPercentage" to 20L,
                     "defaultSplitMode" to SplitMode.EQUAL,
-                    "members" to memberBadgesToFirestoreList(listOf(initialMember)),
+                    "members" to memberBadgesToFirestoreList(listOf(myBadge)),
                     "bankAccounts" to bankAccountsToFirestoreList(BankAccountCatalog.defaultAccounts()),
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                houseRef.set(housePayload).await()
+                houseRef.set(housePayload, SetOptions.merge()).await()
             } else {
-                // Ensure current user is in the household members list
                 val existingHouse = houseSnap.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                 if (existingHouse != null) {
-                    val hasMember = existingHouse.members.any { it.userId == uid }
-                    val hasAccounts = existingHouse.bankAccounts.isNotEmpty()
-                    if (!hasMember || !hasAccounts) {
-                        val updatedMembers = if (hasMember) {
-                            existingHouse.members
-                        } else {
-                            existingHouse.members + FamilyMemberBadge(
-                                userId = uid,
-                                displayName = profile.displayName.ifBlank { displayName },
-                                colorHex = profile.memberColorHex,
-                                avatarEmoji = profile.avatarEmoji,
-                                role = profile.memberRole
-                            )
-                        }
-                        val updatedAccounts = if (hasAccounts) existingHouse.bankAccounts else BankAccountCatalog.defaultAccounts()
-                        runCatching {
-                            houseRef.update(
-                                mapOf(
-                                    "members" to memberBadgesToFirestoreList(updatedMembers),
-                                    "bankAccounts" to bankAccountsToFirestoreList(updatedAccounts),
-                                    "updatedAt" to FieldValue.serverTimestamp()
-                                )
-                            ).await()
-                        }
-                    }
+                    val normalizedMembers = normalizeHouseholdMembersList(
+                        rawMembers = existingHouse.members,
+                        currentUid = uid,
+                        currentName = finalProfile.displayName,
+                        currentEmail = finalProfile.email,
+                        currentAvatarBase64 = finalProfile.avatarBase64,
+                        currentColorHex = finalProfile.memberColorHex,
+                        currentEmoji = finalProfile.avatarEmoji,
+                        currentRole = finalProfile.memberRole
+                    )
+                    val sanitizedAccounts = existingHouse.bankAccounts
+                        .ifEmpty { BankAccountCatalog.defaultAccounts() }
+                        .map { it.sanitized() }
+                    val cleanMural = existingHouse.muralItems.filterNot { it.id.startsWith("mural_seed_") }
+                    val isLegacy503020 = existingHouse.needsPercentage == 50L &&
+                        existingHouse.wantsPercentage == 30L &&
+                        existingHouse.savingsPercentage == 20L
+                    val needsPct = if (isLegacy503020) 60L else existingHouse.needsPercentage
+                    val wantsPct = if (isLegacy503020) 20L else existingHouse.wantsPercentage
+                    val savingsPct = if (isLegacy503020) 20L else existingHouse.savingsPercentage
+
+                    val updates = mutableMapOf<String, Any>(
+                        "householdId" to primaryHouseholdId,
+                        "members" to memberBadgesToFirestoreList(normalizedMembers),
+                        "bankAccounts" to bankAccountsToFirestoreList(sanitizedAccounts),
+                        "muralItems" to muralItemsToFirestoreList(cleanMural),
+                        "needsPercentage" to needsPct,
+                        "wantsPercentage" to wantsPct,
+                        "savingsPercentage" to savingsPct,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    houseRef.set(updates, SetOptions.merge()).await()
                 }
             }
 
-            Result.success(profile)
+            // 5. Realizar download completo (Pull Inicial) das subcoleções antes de abrir o Hub
+            pullFullHouseholdSnapshotToLocal(primaryHouseholdId, finalProfile)
+
+            Result.success(finalProfile)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.WRITE, currentPath)
+            Result.failure(e)
+        }
+    }
+
+    private fun normalizeHouseholdMembersList(
+        rawMembers: List<FamilyMemberBadge>,
+        currentUid: String,
+        currentName: String,
+        currentEmail: String,
+        currentAvatarBase64: String,
+        currentColorHex: Long,
+        currentEmoji: String,
+        currentRole: String
+    ): List<FamilyMemberBadge> {
+        val merged = linkedMapOf<String, FamilyMemberBadge>()
+        for (m in rawMembers) {
+            val isMe = (m.userId.isNotBlank() && m.userId == currentUid) ||
+                (currentEmail.isNotBlank() && m.email.equals(currentEmail, ignoreCase = true)) ||
+                (!isPlaceholderMemberName(m.displayName) && m.displayName.equals(currentName, ignoreCase = true))
+
+            val resolvedName = when {
+                isMe -> currentName
+                !isPlaceholderMemberName(m.displayName) -> m.displayName.trim()
+                m.email.isNotBlank() -> m.email.substringBefore('@').replaceFirstChar { it.titlecase(Locale.ROOT) }
+                else -> ""
+            }
+            if (resolvedName.isBlank()) continue
+
+            val resolvedUid = if (isMe) currentUid else m.userId.trim()
+            val key = resolvedUid.ifBlank { resolvedName.lowercase(Locale.ROOT) }
+            val prev = merged[key]
+            merged[key] = FamilyMemberBadge(
+                userId = resolvedUid.ifBlank { prev?.userId.orEmpty() },
+                displayName = resolvedName,
+                email = if (isMe && currentEmail.isNotBlank()) currentEmail else m.email.ifBlank { prev?.email.orEmpty() },
+                avatarBase64 = when {
+                    isMe && currentAvatarBase64.isNotBlank() -> currentAvatarBase64
+                    m.avatarBase64.isNotBlank() -> m.avatarBase64
+                    else -> prev?.avatarBase64.orEmpty()
+                },
+                colorHex = when {
+                    isMe && currentColorHex != 0L -> currentColorHex
+                    m.colorHex != 0L -> m.colorHex
+                    else -> prev?.colorHex ?: 0xFF0E7C5B
+                },
+                avatarEmoji = if (isMe && currentEmoji.isNotBlank()) currentEmoji else m.avatarEmoji.ifBlank { prev?.avatarEmoji ?: "🌿" },
+                role = m.role.ifBlank { prev?.role ?: currentRole.ifBlank { "ADMIN" } },
+                isCurrentUser = isMe
+            )
+        }
+
+        if (merged.values.none { it.userId == currentUid || it.displayName.equals(currentName, ignoreCase = true) }) {
+            merged[currentUid] = FamilyMemberBadge(
+                userId = currentUid,
+                displayName = currentName,
+                email = currentEmail,
+                avatarBase64 = currentAvatarBase64,
+                colorHex = if (currentColorHex != 0L) currentColorHex else 0xFF0E7C5B,
+                avatarEmoji = currentEmoji.ifBlank { "🌿" },
+                role = currentRole.ifBlank { "ADMIN" },
+                isCurrentUser = true
+            )
+        }
+        return merged.values.toList()
+    }
+
+    /**
+     * Fusão Segura de Família Duplicada (ex.: FAM_SKRKRVKS -> FAM_OMNI2448):
+     * Copia todas as subcoleções preservando o ID original de cada documento com SetOptions.merge(),
+     * mescla contas bancárias, categorias, orçamentos, mural e membros, atualiza users/{uid} vinculados
+     * e marca a família antiga com migratedTo = targetHouseholdId sem apagá-la.
+     */
+    private suspend fun fuseDuplicateHouseholdIntoOfficial(
+        duplicateSnap: DocumentSnapshot,
+        targetHouseholdId: String
+    ) {
+        val dupId = duplicateSnap.id
+        if (dupId.isBlank() || dupId == targetHouseholdId) return
+        val alreadyMigrated = duplicateSnap.getString("migratedTo")?.trim().orEmpty()
+        if (alreadyMigrated == targetHouseholdId) return
+
+        val dupRef = db.collection("households").document(dupId)
+        val targetRef = db.collection("households").document(targetHouseholdId)
+
+        val subcollections = listOf(
+            "tasks",
+            "transactions",
+            "subscriptions",
+            "savings_goals",
+            "health_logs",
+            "diary_entries"
+        )
+
+        for (sub in subcollections) {
+            runCatching {
+                val subSnap = dupRef.collection(sub).get().await()
+                for (doc in subSnap.documents) {
+                    val docId = doc.id
+                    if (docId.startsWith("task_demo_") ||
+                        docId.startsWith("tx_demo_") ||
+                        docId.startsWith("sub_demo_") ||
+                        docId.startsWith("goal_demo_") ||
+                        docId.startsWith("diary_seed_")
+                    ) continue
+                    val data = doc.data?.toMutableMap() ?: continue
+                    data["householdId"] = targetHouseholdId
+                    targetRef.collection(sub).document(docId).set(data, SetOptions.merge()).await()
+                }
+            }
+        }
+
+        // Mesclar campos do documento household (membros, contas, categorias, orçamentos e mural)
+        val dupHouse = duplicateSnap.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+        val targetSnap = targetRef.get().await()
+        val targetHouse = if (targetSnap.exists()) {
+            targetSnap.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+        } else null
+
+        if (dupHouse != null) {
+            val mergedMembers = (targetHouse?.members.orEmpty() + dupHouse.members)
+                .filterNot { isPlaceholderMemberName(it.displayName) }
+            val existingAccountIds = targetHouse?.bankAccounts.orEmpty().map { it.id }.toSet()
+            val mergedAccounts = (targetHouse?.bankAccounts.orEmpty() +
+                dupHouse.bankAccounts.filterNot { it.id in existingAccountIds })
+                .ifEmpty { BankAccountCatalog.defaultAccounts() }
+                .map { it.sanitized() }
+            val mergedCategories = (targetHouse?.customCategories.orEmpty() + dupHouse.customCategories)
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+            val mergedBudgets = dupHouse.categoryBudgetsBrl + targetHouse?.categoryBudgetsBrl.orEmpty()
+            val existingMuralIds = targetHouse?.muralItems.orEmpty().map { it.id }.toSet()
+            val mergedMural = (targetHouse?.muralItems.orEmpty() +
+                dupHouse.muralItems.filterNot { it.id in existingMuralIds })
+                .filterNot { it.id.startsWith("mural_seed_") }
+
+            val mergePayload = mutableMapOf<String, Any>(
+                "householdId" to targetHouseholdId,
+                "members" to memberBadgesToFirestoreList(mergedMembers),
+                "bankAccounts" to bankAccountsToFirestoreList(mergedAccounts),
+                "customCategories" to mergedCategories,
+                "categoryBudgetsBrl" to mergedBudgets,
+                "muralItems" to muralItemsToFirestoreList(mergedMural),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if ((targetHouse?.monthlyIncomeBrl ?: 0.0) <= 0.0 && dupHouse.monthlyIncomeBrl > 0.0 && dupHouse.monthlyIncomeBrl != 8500.0) {
+                mergePayload["monthlyIncomeBrl"] = dupHouse.monthlyIncomeBrl
+            }
+            targetRef.set(mergePayload, SetOptions.merge()).await()
+
+            // Atualizar users/{uid} de membros vinculados à família antiga
+            val memberUids = (dupHouse.members.map { it.userId } + dupHouse.ownerId)
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith("mem_") && it != LocalOfflineStore.LOCAL_USER_ID }
+                .distinct()
+            for (memberUid in memberUids) {
+                runCatching {
+                    db.collection("users").document(memberUid)
+                        .set(
+                            mapOf(
+                                "householdId" to targetHouseholdId,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            ),
+                            SetOptions.merge()
+                        ).await()
+                }
+            }
+        }
+
+        // Marcar documento duplicado com migratedTo = targetHouseholdId sem apagá-lo
+        dupRef.set(
+            mapOf(
+                "migratedTo" to targetHouseholdId,
+                "updatedAt" to FieldValue.serverTimestamp()
+            ),
+            SetOptions.merge()
+        ).await()
+    }
+
+    /**
+     * Faz o download completo (get()) de households/{householdId} e de todas as subcoleções
+     * para o armazenamento local antes de liberar o Hub.
+     */
+    suspend fun pullFullHouseholdSnapshotToLocal(
+        householdId: String,
+        profile: UserProfile
+    ) {
+        if (householdId.isBlank()) return
+        val uid = auth.currentUser?.uid ?: profile.uid
+        val houseRef = db.collection("households").document(householdId)
+        val houseSnap = runCatching { houseRef.get().await() }.getOrNull() ?: return
+        val remoteHousehold = houseSnap.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            ?.let { h ->
+                h.copy(
+                    id = houseSnap.id,
+                    householdId = houseSnap.id,
+                    bankAccounts = h.bankAccounts.ifEmpty { BankAccountCatalog.defaultAccounts() }.map { it.sanitized() },
+                    muralItems = h.muralItems.filterNot { it.id.startsWith("mural_seed_") }
+                )
+            } ?: Household(id = householdId, householdId = householdId)
+
+        val tasksSnap = runCatching { houseRef.collection("tasks").get().await() }.getOrNull()
+        val remoteTasks = tasksSnap?.documents.orEmpty().mapNotNull { doc ->
+            if (doc.id.startsWith("task_demo_")) {
+                runCatching { doc.reference.delete() }
+                return@mapNotNull null
+            }
+            val base = doc.toObject(TaskItem::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            base?.copy(
+                id = doc.id,
+                isInbox = doc.getBoolean("isInbox") ?: doc.getBoolean("inbox") ?: base.isInbox,
+                isEssential = doc.getBoolean("isEssential") ?: doc.getBoolean("essential") ?: base.isEssential
+            )
+        }.filter { task ->
+            isVisibleForMember(uid, task.userId, task.assignedMemberId, task.privacyScope, task.visibleToMemberIds)
+        }
+
+        val txSnap = runCatching { houseRef.collection("transactions").get().await() }.getOrNull()
+        val remoteTx = txSnap?.documents.orEmpty().mapNotNull { doc ->
+            if (doc.id.startsWith("tx_demo_")) {
+                runCatching { doc.reference.delete() }
+                return@mapNotNull null
+            }
+            doc.toObject(FinanceTransaction::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                ?.copy(id = doc.id)
+        }.filter { tx ->
+            isVisibleForMember(uid, tx.userId, tx.responsibleMemberId, tx.privacyScope, tx.visibleToMemberIds)
+        }
+
+        val subsSnap = runCatching { houseRef.collection("subscriptions").get().await() }.getOrNull()
+        val remoteSubs = subsSnap?.documents.orEmpty().mapNotNull { doc ->
+            if (doc.id.startsWith("sub_demo_")) {
+                runCatching { doc.reference.delete() }
+                return@mapNotNull null
+            }
+            doc.toObject(SubscriptionBill::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                ?.copy(id = doc.id)
+        }.filter { sub ->
+            isVisibleForMember(uid, sub.userId, sub.responsibleMemberId, sub.privacyScope, sub.visibleToMemberIds)
+        }
+
+        val goalsSnap = runCatching { houseRef.collection("savings_goals").get().await() }.getOrNull()
+        val remoteGoals = goalsSnap?.documents.orEmpty().mapNotNull { doc ->
+            if (doc.id.startsWith("goal_demo_")) {
+                runCatching { doc.reference.delete() }
+                return@mapNotNull null
+            }
+            doc.toObject(SavingsGoal::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                ?.copy(id = doc.id)
+        }.filter { goal ->
+            isVisibleForMember(uid, goal.userId, goal.responsibleMemberId, goal.privacyScope, emptyList())
+        }
+
+        localStore?.replaceAllWithCloudPull(
+            profile = profile,
+            household = remoteHousehold,
+            tasks = remoteTasks,
+            transactions = remoteTx,
+            subscriptions = remoteSubs,
+            savingsGoals = remoteGoals
+        )
+    }
+
+    /**
+     * Botão "Forçar Sincronização Agora" no card "Status da Nuvem (Firestore)" do Perfil.
+     */
+    suspend fun forceFullCloudSyncNow(
+        displayNameHint: String = "",
+        avatarBase64Hint: String = ""
+    ): Result<String> {
+        if (isLocalOfflineMode()) {
+            return Result.failure(IllegalStateException("Conecte sua conta Google para sincronizar com a nuvem."))
+        }
+        return try {
+            val profileRes = ensureUserProfileAndHousehold(
+                displayNameRaw = displayNameHint,
+                avatarBase64Raw = avatarBase64Hint
+            )
+            val profile = profileRes.getOrThrow()
+            val houseId = profile.householdId.ifBlank { OFFICIAL_HOUSEHOLD_ID }
+            Result.success("Sincronização concluída com a família $houseId!")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateUserAvatarBase64(
+        householdId: String,
+        currentHousehold: Household?,
+        avatarBase64: String
+    ): Result<Unit> {
+        if (isLocalOfflineMode()) {
+            val prof = localStore!!.userProfileFlow.value
+            localStore.updateUserMemberIdentity(
+                displayName = prof.displayName,
+                memberColorHex = prof.memberColorHex,
+                avatarEmoji = prof.avatarEmoji,
+                avatarInitials = prof.avatarInitials,
+                memberRole = prof.memberRole,
+                defaultSplitPercentage = prof.defaultSplitPercentage,
+                avatarBase64 = avatarBase64,
+                email = prof.email
+            )
+            return Result.success(Unit)
+        }
+        var docPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}"
+        return try {
+            val uid = requireUserId()
+            val userRef = db.collection("users").document(uid)
+            docPath = userRef.path
+            userRef.set(
+                mapOf(
+                    "avatarBase64" to avatarBase64,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                ),
+                SetOptions.merge()
+            ).await()
+
+            if (householdId.isNotBlank()) {
+                val houseRef = db.collection("households").document(householdId)
+                docPath = houseRef.path
+                val snap = houseRef.get().await()
+                val existingHouse = snap.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    ?: currentHousehold
+                if (existingHouse != null) {
+                    val updatedMembers = existingHouse.members.map { m ->
+                        if (m.userId == uid || m.isCurrentUser) {
+                            m.copy(avatarBase64 = avatarBase64)
+                        } else {
+                            m
+                        }
+                    }
+                    houseRef.set(
+                        mapOf(
+                            "members" to memberBadgesToFirestoreList(updatedMembers),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    ).await()
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
             Result.failure(e)
         }
     }
@@ -343,9 +867,10 @@ class AuraFirestoreRepository(
         avatarEmoji: String,
         avatarInitials: String = "",
         memberRole: String = "ADMIN",
-        defaultSplitPercentage: Double = 50.0
+        defaultSplitPercentage: Double = 50.0,
+        avatarBase64: String = ""
     ): Result<Unit> {
-        val cleanName = displayName.trim().take(80).ifBlank { "Membro da Família" }
+        val cleanName = resolveRealAuthenticatedName(displayName)
         val cleanEmoji = avatarEmoji.trim().take(16).ifBlank { "🌿" }
         val cleanInitials = avatarInitials.trim().take(4).ifBlank {
             cleanName.split(" ")
@@ -364,7 +889,8 @@ class AuraFirestoreRepository(
                 avatarEmoji = cleanEmoji,
                 avatarInitials = cleanInitials,
                 memberRole = validRole,
-                defaultSplitPercentage = safeSplitPct
+                defaultSplitPercentage = safeSplitPct,
+                avatarBase64 = avatarBase64.ifBlank { localStore.userProfileFlow.value.avatarBase64 }
             )
             return Result.success(Unit)
         }
@@ -372,19 +898,51 @@ class AuraFirestoreRepository(
         var docPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}"
         return try {
             val uid = requireUserId()
+            val userEmail = auth.currentUser?.email?.trim().orEmpty()
             val ref = db.collection("users").document(uid)
             docPath = ref.path
-            ref.update(
-                mapOf(
-                    "displayName" to cleanName,
-                    "memberColorHex" to memberColorHex,
-                    "avatarEmoji" to cleanEmoji,
-                    "avatarInitials" to cleanInitials,
-                    "memberRole" to validRole,
-                    "defaultSplitPercentage" to safeSplitPct,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val userUpdates = mutableMapOf<String, Any>(
+                "displayName" to cleanName,
+                "email" to userEmail,
+                "memberColorHex" to memberColorHex,
+                "avatarEmoji" to cleanEmoji,
+                "avatarInitials" to cleanInitials,
+                "memberRole" to validRole,
+                "defaultSplitPercentage" to safeSplitPct,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (avatarBase64.isNotBlank()) {
+                userUpdates["avatarBase64"] = avatarBase64
+            }
+            ref.set(userUpdates, SetOptions.merge()).await()
+
+            // Sincronizar também na lista members do household atual para atualizar o chip imediatamente em todos os aparelhos
+            val userSnap = ref.get().await()
+            val houseId = userSnap.getString("householdId").orEmpty()
+            if (houseId.isNotBlank()) {
+                val houseRef = db.collection("households").document(houseId)
+                val houseSnap = houseRef.get().await()
+                val existingHouse = houseSnap.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                if (existingHouse != null) {
+                    val normalized = normalizeHouseholdMembersList(
+                        rawMembers = existingHouse.members,
+                        currentUid = uid,
+                        currentName = cleanName,
+                        currentEmail = userEmail,
+                        currentAvatarBase64 = avatarBase64.ifBlank { userSnap.getString("avatarBase64").orEmpty() },
+                        currentColorHex = memberColorHex,
+                        currentEmoji = cleanEmoji,
+                        currentRole = validRole
+                    )
+                    houseRef.set(
+                        mapOf(
+                            "members" to memberBadgesToFirestoreList(normalized),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    ).await()
+                }
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -395,21 +953,22 @@ class AuraFirestoreRepository(
     }
 
     suspend fun updateThemeMode(themeMode: String): Result<Unit> {
+        val validTheme = if (themeMode in listOf("SYSTEM", "LIGHT", "DARK", "AMOLED")) themeMode else "SYSTEM"
+        localStore?.updateThemeMode(validTheme)
         if (isLocalOfflineMode()) {
-            localStore!!.updateThemeMode(themeMode)
             return Result.success(Unit)
         }
         var docPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}"
         return try {
             val uid = requireUserId()
-            val validTheme = if (themeMode in listOf("SYSTEM", "LIGHT", "DARK", "AMOLED")) themeMode else "SYSTEM"
             val ref = db.collection("users").document(uid)
             docPath = ref.path
-            ref.update(
+            ref.set(
                 mapOf(
                     "themeMode" to validTheme,
                     "updatedAt" to FieldValue.serverTimestamp()
-                )
+                ),
+                SetOptions.merge()
             ).await()
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -429,26 +988,36 @@ class AuraFirestoreRepository(
         var currentPath = "users/${auth.currentUser?.uid ?: "unauthenticated"}"
         return try {
             val uid = requireUserId()
+            val userEmail = auth.currentUser?.email?.trim().orEmpty()
             val targetHouseholdId = sanitizeHouseholdCode(newHouseholdCodeRaw)
-            val familyName = familyNameRaw.trim().take(80).ifBlank { "Família Omni" }
+            val familyName = familyNameRaw.trim().take(80).ifBlank {
+                if (targetHouseholdId == OFFICIAL_HOUSEHOLD_ID) "Família Vaz" else "Família Omni"
+            }
 
             val userRef = db.collection("users").document(uid)
             currentPath = userRef.path
             val userSnap = userRef.get().await()
             val userProf = userSnap.toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-            userRef.update(
+            val cleanMemberName = resolveRealAuthenticatedName(userProf?.displayName)
+            userRef.set(
                 mapOf(
                     "householdId" to targetHouseholdId,
+                    "displayName" to cleanMemberName,
+                    "email" to userEmail,
                     "updatedAt" to FieldValue.serverTimestamp()
-                )
+                ),
+                SetOptions.merge()
             ).await()
 
             val myMemberBadge = FamilyMemberBadge(
                 userId = uid,
-                displayName = userProf?.displayName?.ifBlank { "Você" } ?: "Você",
+                displayName = cleanMemberName,
+                email = userEmail,
+                avatarBase64 = userProf?.avatarBase64.orEmpty(),
                 colorHex = userProf?.memberColorHex ?: 0xFF0E7C5B,
                 avatarEmoji = userProf?.avatarEmoji?.ifBlank { "🌿" } ?: "🌿",
-                role = userProf?.memberRole?.ifBlank { "ADMIN" } ?: "ADMIN"
+                role = userProf?.memberRole?.ifBlank { "ADMIN" } ?: "ADMIN",
+                isCurrentUser = true
             )
 
             val houseRef = db.collection("households").document(targetHouseholdId)
@@ -459,9 +1028,9 @@ class AuraFirestoreRepository(
                     "householdId" to targetHouseholdId,
                     "name" to familyName,
                     "ownerId" to uid,
-                    "monthlyIncomeBrl" to 8500.0,
-                    "needsPercentage" to 50L,
-                    "wantsPercentage" to 30L,
+                    "monthlyIncomeBrl" to 0.0,
+                    "needsPercentage" to 60L,
+                    "wantsPercentage" to 20L,
                     "savingsPercentage" to 20L,
                     "defaultSplitMode" to SplitMode.EQUAL,
                     "members" to memberBadgesToFirestoreList(listOf(myMemberBadge)),
@@ -469,20 +1038,34 @@ class AuraFirestoreRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                houseRef.set(housePayload).await()
+                houseRef.set(housePayload, SetOptions.merge()).await()
             } else {
                 val existingHouse = snap.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                if (existingHouse != null && existingHouse.members.none { it.userId == uid }) {
-                    val updatedMembers = existingHouse.members + myMemberBadge
+                if (existingHouse != null) {
+                    val normalized = normalizeHouseholdMembersList(
+                        rawMembers = existingHouse.members,
+                        currentUid = uid,
+                        currentName = cleanMemberName,
+                        currentEmail = userEmail,
+                        currentAvatarBase64 = userProf?.avatarBase64.orEmpty(),
+                        currentColorHex = userProf?.memberColorHex ?: 0xFF0E7C5B,
+                        currentEmoji = userProf?.avatarEmoji?.ifBlank { "🌿" } ?: "🌿",
+                        currentRole = userProf?.memberRole?.ifBlank { "ADMIN" } ?: "ADMIN"
+                    )
                     runCatching {
-                        houseRef.update(
+                        houseRef.set(
                             mapOf(
-                                "members" to memberBadgesToFirestoreList(updatedMembers),
+                                "members" to memberBadgesToFirestoreList(normalized),
                                 "updatedAt" to FieldValue.serverTimestamp()
-                            )
+                            ),
+                            SetOptions.merge()
                         ).await()
                     }
                 }
+            }
+
+            if (userProf != null) {
+                pullFullHouseholdSnapshotToLocal(targetHouseholdId, userProf.copy(householdId = targetHouseholdId, displayName = cleanMemberName))
             }
 
             Result.success(targetHouseholdId)
@@ -659,10 +1242,16 @@ class AuraFirestoreRepository(
                 .map { snapshot ->
                     if (snapshot.exists()) {
                         val loaded = snapshot.toObject(Household::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                        if (loaded != null && loaded.bankAccounts.isEmpty()) {
-                            loaded.copy(bankAccounts = BankAccountCatalog.defaultAccounts())
+                        if (loaded != null) {
+                            val sanitizedAccounts = loaded.bankAccounts
+                                .ifEmpty { BankAccountCatalog.defaultAccounts() }
+                                .map { it.sanitized() }
+                            loaded.copy(
+                                bankAccounts = sanitizedAccounts,
+                                muralItems = loaded.muralItems.filterNot { it.id.startsWith("mural_seed_") }
+                            )
                         } else {
-                            loaded
+                            null
                         }
                     } else {
                         null
@@ -2541,5 +3130,10 @@ class AuraFirestoreRepository(
             handleFirestoreError(e, OperationType.DELETE, docPath)
             Result.failure(e)
         }
+    }
+
+    companion object {
+        const val OFFICIAL_HOUSEHOLD_ID = "FAM_OMNI2448"
+        const val LEGACY_DUPLICATE_HOUSEHOLD_ID = "FAM_SKRKRVKS"
     }
 }

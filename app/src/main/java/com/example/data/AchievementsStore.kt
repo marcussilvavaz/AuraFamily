@@ -566,14 +566,14 @@ class AchievementsRepository(context: Context) {
             ),
             buildAutomaticGoal(
                 id = "finance_503020_diamond",
-                title = "Mestre do Equilíbrio 50/30/20",
+                title = "Mestre do Equilíbrio 60/20/20",
                 description = "Mantenha os 3 pilares do orçamento familiar (Saldo Positivo, Essenciais e Estilo de Vida) dentro da meta com reserva ativa.",
                 module = AchievementModule.FINANCE,
                 medalTier = MedalTier.DIAMOND,
                 iconEmoji = "👑",
                 liveValue = budget503020PillarsMet + (if (totalSavingsAccumulatedRatio >= 50) 1 else 0),
                 targetValue = 4,
-                unitLabel = "pilares 50/30/20"
+                unitLabel = "pilares 60/20/20"
             ),
 
             // =================================================================
