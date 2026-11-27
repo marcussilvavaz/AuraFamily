@@ -230,24 +230,27 @@ object InsulinSiteCatalog {
 }
 
 object InsulinTypeCatalog {
-    const val BASAL = "Basal (NPH / Glargina)"
-    const val RAPIDA = "Rápida (Regular / Humalog)"
     const val NPH = "NPH"
     const val REGULAR = "Regular"
     const val GLARGINA = "Glargina (Lantus / Basaglar)"
-    const val HUMALOG = "Humalog (Lispro)"
-    const val NOVORAPID = "NovoRapid (Asparte)"
-    const val TRESIBA = "Tresiba (Degludeca)"
+    const val LISPRO = "Lispro (Humalog)"
+    const val ASPARTE = "Asparte (NovoRapid)"
+    const val DEGLUDECA = "Degludeca (Tresiba)"
+
+    // Aliases for backward compatibility
+    const val BASAL = NPH
+    const val RAPIDA = REGULAR
+    const val HUMALOG = LISPRO
+    const val NOVORAPID = ASPARTE
+    const val TRESIBA = DEGLUDECA
 
     val presetTypes: List<String> = listOf(
-        BASAL,
-        RAPIDA,
         NPH,
         REGULAR,
         GLARGINA,
-        HUMALOG,
-        NOVORAPID,
-        TRESIBA
+        LISPRO,
+        ASPARTE,
+        DEGLUDECA
     )
     val presets: List<String> = presetTypes
 }
@@ -611,6 +614,10 @@ data class Household(
     val insulinConfigs: List<InsulinScheduleConfig> = emptyList(),
     val pregnancyDppDate: String = "",
     val pregnancyComparisonMode: String = "TODOS",
+    val babyName: String = "",
+    val babyGender: String = "SURPRESA",
+    val geminiApiKey: String = "",
+    val memberHealthSettings: Map<String, Map<String, Boolean>> = emptyMap(),
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {

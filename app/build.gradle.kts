@@ -16,8 +16,8 @@ android {
     applicationId = "com.auramanager.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 14
-    versionName = "1.12.2"
+    versionCode = 15
+    versionName = "1.12.3"
 
     buildConfigField(
       "String",

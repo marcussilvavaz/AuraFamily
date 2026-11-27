@@ -351,6 +351,11 @@ class LocalOfflineStore(context: Context) {
         val inviteOpen = prefs.getBoolean(KEY_INVITE_OPEN, false)
         val loadedMembers = loadExtraMembers(profile)
         val memberUids = (listOf(LOCAL_USER_ID) + loadedMembers.map { it.userId }.filter { it.isNotBlank() }).distinct()
+        val dppDate = prefs.getString(KEY_PREGNANCY_DPP, "") ?: ""
+        val compMode = prefs.getString(KEY_PREGNANCY_COMP_MODE, "TODOS") ?: "TODOS"
+        val babyName = prefs.getString(KEY_BABY_NAME, "") ?: ""
+        val babyGender = prefs.getString(KEY_BABY_GENDER, "SURPRESA") ?: "SURPRESA"
+        val geminiKey = prefs.getString(KEY_GEMINI_API_KEY, "") ?: ""
         return Household(
             id = houseId,
             householdId = houseId,
@@ -363,12 +368,37 @@ class LocalOfflineStore(context: Context) {
             wantsPercentage = wants,
             savingsPercentage = savings,
             defaultSplitMode = defaultSplit,
+            pregnancyDppDate = dppDate,
+            pregnancyComparisonMode = compMode,
+            babyName = babyName,
+            babyGender = babyGender,
+            geminiApiKey = geminiKey,
             members = loadedMembers,
             bankAccounts = loadBankAccounts(),
             categoryBudgetsBrl = budgetsMap,
             customCategories = customCatsList,
             muralItems = OmniBackupAndMigrationManager.getFamilyMuralItems(appContext)
         )
+    }
+
+    fun updateHouseholdPregnancyAndBabyConfig(
+        dppDate: String,
+        comparisonMode: String,
+        babyName: String = _householdFlow.value.babyName,
+        babyGender: String = _householdFlow.value.babyGender
+    ) {
+        prefs.edit()
+            .putString(KEY_PREGNANCY_DPP, dppDate.trim())
+            .putString(KEY_PREGNANCY_COMP_MODE, comparisonMode.trim().ifBlank { "TODOS" })
+            .putString(KEY_BABY_NAME, babyName.trim())
+            .putString(KEY_BABY_GENDER, babyGender.trim().ifBlank { "SURPRESA" })
+            .apply()
+        _householdFlow.value = loadHousehold()
+    }
+
+    fun updateHouseholdGeminiApiKey(apiKey: String) {
+        prefs.edit().putString(KEY_GEMINI_API_KEY, apiKey.trim()).apply()
+        _householdFlow.value = loadHousehold()
     }
 
     fun updateHouseholdInviteOpen(inviteOpen: Boolean) {
@@ -1764,6 +1794,11 @@ class LocalOfflineStore(context: Context) {
             .putString(KEY_DEFAULT_SPLIT_MODE, household.defaultSplitMode.ifBlank { SplitMode.EQUAL })
             .putBoolean(KEY_INVITE_OPEN, household.inviteOpen)
             .putBoolean(KEY_USER_EDITED_BUDGET, true)
+            .putString(KEY_PREGNANCY_DPP, household.pregnancyDppDate)
+            .putString(KEY_PREGNANCY_COMP_MODE, household.pregnancyComparisonMode.ifBlank { "TODOS" })
+            .putString(KEY_BABY_NAME, household.babyName)
+            .putString(KEY_BABY_GENDER, household.babyGender.ifBlank { "SURPRESA" })
+            .putString(KEY_GEMINI_API_KEY, household.geminiApiKey)
             .putString(KEY_CATEGORY_BUDGETS_JSON, serializeDoubleMap(household.categoryBudgetsBrl).toString())
             .putString(KEY_CUSTOM_CATEGORIES_JSON, serializeStringList(household.customCategories).toString())
             .apply()
@@ -1819,5 +1854,10 @@ class LocalOfflineStore(context: Context) {
         private const val KEY_CATEGORY_BUDGETS_JSON = "category_budgets_json"
         private const val KEY_CUSTOM_CATEGORIES_JSON = "custom_categories_json"
         private const val KEY_INVITE_OPEN = "household_invite_open"
+        private const val KEY_PREGNANCY_DPP = "household_pregnancy_dpp"
+        private const val KEY_PREGNANCY_COMP_MODE = "household_pregnancy_comp_mode"
+        private const val KEY_BABY_NAME = "household_baby_name"
+        private const val KEY_BABY_GENDER = "household_baby_gender"
+        private const val KEY_GEMINI_API_KEY = "household_gemini_api_key"
     }
 }

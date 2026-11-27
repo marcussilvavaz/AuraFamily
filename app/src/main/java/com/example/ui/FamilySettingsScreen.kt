@@ -220,6 +220,10 @@ fun FamilySettingsScreen(
     syncedItemsTotalCount: Int = 0,
     onForceCloudSyncNow: () -> Unit = {},
     onUpdateAvatarBase64: (String) -> Unit = {},
+    onSyncPregnancyConfigToCloud: (dppDate: String, comparisonMode: String) -> Unit = { _, _ -> },
+    onSyncBabyIdentityToCloud: (babyName: String, babyGender: String) -> Unit = { _, _ -> },
+    onSyncMemberHealthSettingsToCloud: (Map<String, Boolean>) -> Unit = {},
+    onSyncGeminiApiKeyToCloud: (String) -> Unit = {},
     onBackToHub: () -> Unit,
     onShowMessage: (String) -> Unit,
     onSignOut: () -> Unit
@@ -1020,7 +1024,11 @@ fun FamilySettingsScreen(
 
                     ModularProfileEditorContent(
                         config = customizationConfig,
-                        customizationRepo = customizationRepo
+                        customizationRepo = customizationRepo,
+                        onSyncPregnancyConfigToCloud = onSyncPregnancyConfigToCloud,
+                        onSyncBabyIdentityToCloud = onSyncBabyIdentityToCloud,
+                        onSyncMemberHealthSettingsToCloud = onSyncMemberHealthSettingsToCloud,
+                        onSyncGeminiApiKeyToCloud = onSyncGeminiApiKeyToCloud
                     )
                 }
             }

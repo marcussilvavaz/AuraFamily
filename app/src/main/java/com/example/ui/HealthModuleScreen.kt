@@ -46,6 +46,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.WaterDrop
@@ -110,6 +112,8 @@ import com.example.data.InsulinRecord
 import com.example.data.InsulinScheduleConfig
 import com.example.data.InsulinSiteCatalog
 import com.example.data.InsulinTypeCatalog
+import com.example.data.MedicalDocumentMeta
+import com.example.data.MedicalDocumentsRepository
 import com.example.data.MedicalReportPdfGenerator
 import com.example.data.PregnancyCalculator
 import com.example.data.PrivacyScope
@@ -139,7 +143,22 @@ fun HealthModuleScreen(
     pendingGlucoseSlotFromNotification: String? = null,
     onConsumePendingGlucoseSlot: () -> Unit = {},
     onAddSupplyToMural: (String) -> Unit = {},
-    onSyncPregnancyConfigToCloud: (dppDate: String, comparisonMode: String) -> Unit = { _, _ -> }
+    onSyncPregnancyConfigToCloud: (dppDate: String, comparisonMode: String) -> Unit = { _, _ -> },
+    onSyncBabyIdentityToCloud: (babyName: String, babyGender: String) -> Unit = { _, _ -> },
+    onScheduleOrderInAgenda: (
+        docTitle: String,
+        memberName: String,
+        memberId: String,
+        dateEpochDay: Long,
+        alarmHour: Int,
+        alarmMinute: Int,
+        location: String,
+        notes: String,
+        existingLinkedTaskId: String,
+        onTaskLinked: (String) -> Unit
+    ) -> Unit = { _, _, _, _, _, _, _, _, _, _ -> },
+    onMarkLinkedTaskCompleted: (String, Boolean) -> Unit = { _, _ -> },
+    onDeleteLinkedTask: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val cardRadius = LocalOrganicCardRadius.current
@@ -344,6 +363,9 @@ fun HealthModuleScreen(
         )
     }
 
+    val medicalDocsRepo = remember(context) { MedicalDocumentsRepository.getInstance(context) }
+    val medicalDocuments by medicalDocsRepo.documentsFlow.collectAsStateWithLifecycle()
+
     // Launcher para salvar PDF nativo em pasta escolhida pelo usuário (CreateDocument)
     val createPdfDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/pdf")
@@ -355,7 +377,8 @@ fun HealthModuleScreen(
                 profileName = activeMember.displayName,
                 periodDays = pdfPeriodDays,
                 customizationConfig = customizationConfig,
-                healthState = memberFilteredHealthState
+                healthState = memberFilteredHealthState,
+                medicalDocuments = medicalDocuments
             )
             if (result.success) {
                 val localCopy = MedicalReportPdfGenerator.exportToLocalAppFile(
@@ -363,7 +386,8 @@ fun HealthModuleScreen(
                     profileName = activeMember.displayName,
                     periodDays = pdfPeriodDays,
                     customizationConfig = customizationConfig,
-                    healthState = memberFilteredHealthState
+                    healthState = memberFilteredHealthState,
+                    medicalDocuments = medicalDocuments
                 )
                 val safePath = if (localCopy.success) localCopy.filePath else ""
                 healthRepo.recordGeneratedPdfInfo(safePath, result.summaryText)
@@ -375,7 +399,9 @@ fun HealthModuleScreen(
     }
 
     val effectiveDppDate = household.pregnancyDppDate.ifBlank { customizationConfig.pregnancyDppDate }
-    val showPregnancyCard = customizationConfig.pregnancyEnabled || effectiveDppDate.isNotBlank()
+    val effectiveBabyName = customizationConfig.babyName.ifBlank { household.babyName }
+    val effectiveBabyGender = customizationConfig.babyGender.ifBlank { household.babyGender.ifBlank { "SURPRESA" } }
+    val showPregnancyCard = customizationConfig.pregnancyEnabled
 
     LazyColumn(
         modifier = Modifier
@@ -396,6 +422,8 @@ fun HealthModuleScreen(
                         household.pregnancyComparisonMode.ifBlank { "TODOS" }
                     },
                     accentColor = Color(customizationConfig.healthColorHex),
+                    babyName = effectiveBabyName,
+                    babyGender = effectiveBabyGender,
                     onSelectComparisonMode = { mode ->
                         customizationRepo.updatePregnancyComparisonMode(mode)
                         onSyncPregnancyConfigToCloud(effectiveDppDate, mode)
@@ -523,70 +551,133 @@ fun HealthModuleScreen(
             }
         }
 
-        // 2. CARD ÚNICO CONSOLIDADO: MONITORAMENTO DE GLICEMIA (mg/dL), INSULINA, RODÍZIO, INSUMOS E TIMER 1H
+        // 1.5. TRACKER MINIMALISTA DE ÁGUA (SEPARADO DA GLICEMIA — SEMPRE VISÍVEL MESMO COM GLICEMIA DESATIVADA)
         item {
-            val recordsOnSelectedDate = remember(filteredGlucose, activeDateEpochDay, selectedDateIso) {
-                filteredGlucose.filter { rec ->
-                    rec.dateEpochDay == activeDateEpochDay || rec.dateIso == selectedDateIso
+            val waterTracker = remember(healthState.trackers) {
+                healthState.trackers.firstOrNull {
+                    it.id == "tracker_water" || it.title.contains("Água", ignoreCase = true)
                 }
             }
-            val latestBySlotOnDate = remember(recordsOnSelectedDate) {
-                val map = mutableMapOf<String, GlucoseRecord>()
-                for (slot in DiabetesSlotCatalog.allSlots) {
-                    val match = recordsOnSelectedDate
-                        .filter { DiabetesSlotCatalog.normalizeSlot(it.slot) == slot }
-                        .maxByOrNull { it.timestampEpochMillis }
-                    if (match != null) {
-                        map[slot] = match
-                    }
-                }
-                map
+            val waterTarget = (waterTracker?.targetValue ?: 8).coerceAtLeast(1)
+            val waterCurrent = if (waterTracker != null) {
+                healthState.progressForTracker(selectedDateIso, waterTracker.id)
+            } else {
+                0
             }
-            val measuredCountOnDate = latestBySlotOnDate.size
-            val dayValues = remember(recordsOnSelectedDate) {
-                recordsOnSelectedDate.map { it.valueMgDl }.filter { it > 0 }
-            }
-            val dayMin = remember(dayValues) { dayValues.minOrNull() ?: 0 }
-            val dayMax = remember(dayValues) { dayValues.maxOrNull() ?: 0 }
-            val dayAvg = remember(dayValues) {
-                if (dayValues.isNotEmpty()) dayValues.average().roundToInt() else 0
-            }
-
-            val latestInsulinBanner = remember(healthState.insulinRecords, activeMember, selectedDateIso) {
-                healthState.formatLatestInsulinBanner(
-                    memberId = activeMember.userId,
-                    memberName = activeMember.displayName,
-                    todayIso = DateCalendarUtils.todayIsoDate()
-                )
-            }
-
-            val isTodaySelected = activeDateEpochDay == todayEpochDay
-            val dateDisplayLabel = remember(activeDateEpochDay, isTodaySelected) {
-                val formatted = DateCalendarUtils.formatEpochDayPt(activeDateEpochDay)
-                if (isTodaySelected) "Hoje • $formatted" else formatted
-            }
+            val remainingCups = (waterTarget - waterCurrent).coerceAtLeast(0)
 
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .testTag("clinical_measurements_card"),
+                    .testTag("minimalist_water_tracker_card"),
                 shape = RoundedCornerShape(cardRadius),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
-                Column(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Título + Botão rápido de PDF
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "💧 Água",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = if (remainingCups > 0) {
+                                "Faltam $remainingCups ${if (remainingCups == 1) "copo" else "copos"}"
+                            } else {
+                                "Meta concluída ✓"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (remainingCups == 0) IncomeEmerald else Color(0xFF0077B6)
+                        )
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            val trackerId = waterTracker?.id ?: "tracker_water"
+                            val step = waterTracker?.stepValue ?: 1
+                            healthRepo.incrementTrackerProgress(selectedDateIso, trackerId, step)
+                        },
+                        shape = RoundedCornerShape(50),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("health_water_plus_one_btn")
+                    ) {
+                        Text("+1", fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
+        }
+
+        // 2. CARD ÚNICO CONSOLIDADO: MONITORAMENTO DE GLICEMIA (mg/dL), INSULINA, RODÍZIO, INSUMOS E TIMER 1H
+        if (customizationConfig.diabetesEnabled) {
+            item {
+                val recordsOnSelectedDate = remember(filteredGlucose, activeDateEpochDay, selectedDateIso) {
+                    filteredGlucose.filter { rec ->
+                        rec.dateEpochDay == activeDateEpochDay || rec.dateIso == selectedDateIso
+                    }
+                }
+                val latestBySlotOnDate = remember(recordsOnSelectedDate) {
+                    val map = mutableMapOf<String, GlucoseRecord>()
+                    for (slot in DiabetesSlotCatalog.allSlots) {
+                        val match = recordsOnSelectedDate
+                            .filter { DiabetesSlotCatalog.normalizeSlot(it.slot) == slot }
+                            .maxByOrNull { it.timestampEpochMillis }
+                        if (match != null) {
+                            map[slot] = match
+                        }
+                    }
+                    map
+                }
+                val measuredCountOnDate = latestBySlotOnDate.size
+                val dayValues = remember(recordsOnSelectedDate) {
+                    recordsOnSelectedDate.map { it.valueMgDl }.filter { it > 0 }
+                }
+                val dayMin = remember(dayValues) { dayValues.minOrNull() ?: 0 }
+                val dayMax = remember(dayValues) { dayValues.maxOrNull() ?: 0 }
+                val dayAvg = remember(dayValues) {
+                    if (dayValues.isNotEmpty()) dayValues.average().roundToInt() else 0
+                }
+
+                val latestInsulinBanner = remember(healthState.insulinRecords, activeMember, selectedDateIso) {
+                    healthState.formatLatestInsulinBanner(
+                        memberId = activeMember.userId,
+                        memberName = activeMember.displayName,
+                        todayIso = DateCalendarUtils.todayIsoDate()
+                    )
+                }
+
+                val isTodaySelected = activeDateEpochDay == todayEpochDay
+                val dateDisplayLabel = remember(activeDateEpochDay, isTodaySelected) {
+                    val formatted = DateCalendarUtils.formatEpochDayPt(activeDateEpochDay)
+                    if (isTodaySelected) "Hoje • $formatted" else formatted
+                }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("clinical_measurements_card"),
+                    shape = RoundedCornerShape(cardRadius),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        // Título limpo (sem botão duplicado de Histórico no canto superior direito)
+                        Column(modifier = Modifier.fillMaxWidth()) {
                             Text(
                                 text = "🩸 Monitoramento de Glicemia (mg/dL)",
                                 style = MaterialTheme.typography.titleMedium,
@@ -598,21 +689,6 @@ fun HealthModuleScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        FilledTonalButton(
-                            onClick = { showUnifiedHistoryModal = true },
-                            shape = RoundedCornerShape(50),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.testTag("top_open_glucose_history_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.History,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Histórico", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                        }
-                    }
 
                     // Seletor rápido de membro ("Marcus" | "Nathalia")
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1076,21 +1152,41 @@ fun HealthModuleScreen(
                         onResetTimer = {
                             healthRepo.resetPostMealTimer(selectedMealForTimer)
                             AlarmScheduler.cancelPostMealGlucoseAlarm(context)
-                        },
-                        onLogPostMealGlucoseNow = {
-                            healthRepo.dismissPostMealTimerAlert()
-                            AlarmScheduler.cancelPostMealGlucoseAlarm(context)
-                            presetGlucoseSlot = DiabetesSlotCatalog.normalizeSlot(selectedMealForTimer)
-                            glucoseToEdit = null
-                            showAddGlucoseDialog = true
                         }
                     )
                 }
             }
         }
+        }
 
-        // 3. MONITORAMENTO DE PRESSÃO ARTERIAL (mmHg) — exibido quando ativo ou se houver registros
-        if (customizationConfig.bloodPressureEnabled || filteredBp.isNotEmpty()) {
+        // 2.5. CENTRAL DE DOCUMENTOS MÉDICOS (EXAMES, ULTRASSONS, PEDIDOS & RECEITAS + GEMINI 2.5 FLASH SOB DEMANDA)
+        item {
+            MedicalDocumentsCenterCard(
+                householdId = household.householdId,
+                loggedMemberId = activeMember.userId,
+                loggedMemberName = activeMember.displayName,
+                familyMembers = familyMembers,
+                customizationConfig = customizationConfig,
+                customizationRepo = customizationRepo,
+                onSyncPregnancyDppAndMode = { dpp, mode, bName, bGender ->
+                    onSyncPregnancyConfigToCloud(dpp, mode)
+                    if (!bName.isNullOrBlank() || !bGender.isNullOrBlank()) {
+                        onSyncBabyIdentityToCloud(
+                            bName ?: customizationConfig.babyName,
+                            bGender ?: customizationConfig.babyGender
+                        )
+                    }
+                },
+                onSyncBabyIdentity = onSyncBabyIdentityToCloud,
+                onScheduleOrderInAgenda = onScheduleOrderInAgenda,
+                onMarkLinkedTaskCompleted = onMarkLinkedTaskCompleted,
+                onDeleteLinkedTask = onDeleteLinkedTask,
+                onStatusMessage = onShowBannerMessage
+            )
+        }
+
+        // 3. MONITORAMENTO DE PRESSÃO ARTERIAL (mmHg) — exibido estritamente quando o módulo estiver ativo para o membro
+        if (customizationConfig.bloodPressureEnabled) {
             item {
                 val avgSys = remember(filteredBp) {
                     if (filteredBp.isNotEmpty()) filteredBp.map { it.systolic }.average().roundToInt() else 0
@@ -1305,52 +1401,35 @@ fun HealthModuleScreen(
                     }
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = {
-                            val localResult = MedicalReportPdfGenerator.exportToLocalAppFile(
+                Button(
+                    onClick = {
+                        val localResult = MedicalReportPdfGenerator.exportToLocalAppFile(
+                            context = context,
+                            profileName = activeMember.displayName,
+                            periodDays = pdfPeriodDays,
+                            customizationConfig = customizationConfig,
+                            healthState = memberFilteredHealthState,
+                            medicalDocuments = medicalDocuments
+                        )
+                        if (localResult.success) {
+                            healthRepo.recordGeneratedPdfInfo(localResult.filePath, localResult.summaryText)
+                            MedicalReportPdfGenerator.openOrSharePdf(
                                 context = context,
-                                profileName = activeMember.displayName,
-                                periodDays = pdfPeriodDays,
-                                customizationConfig = customizationConfig,
-                                healthState = memberFilteredHealthState
+                                pdfFilePath = localResult.filePath,
+                                profileName = activeMember.displayName
                             )
-                            if (localResult.success) {
-                                healthRepo.recordGeneratedPdfInfo(localResult.filePath, localResult.summaryText)
-                                MedicalReportPdfGenerator.openOrSharePdf(
-                                    context = context,
-                                    pdfFilePath = localResult.filePath,
-                                    profileName = activeMember.displayName
-                                )
-                            } else {
-                                onShowBannerMessage(localResult.summaryText)
-                            }
-                        },
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier
-                            .weight(1.2f)
-                            .testTag("generate_medical_pdf_now_btn")
-                    ) {
-                        Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Gerar & Compartilhar PDF", fontWeight = FontWeight.ExtraBold)
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            val fileName = "Relatorio_Medico_${activeMember.displayName.replace(" ", "_")}_${selectedDateIso}.pdf"
-                            createPdfDocumentLauncher.launch(fileName)
-                        },
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier
-                            .weight(0.9f)
-                            .testTag("export_medical_pdf_file_btn")
-                    ) {
-                        Text("Salvar no Aparelho", fontWeight = FontWeight.Bold)
-                    }
+                        } else {
+                            onShowBannerMessage(localResult.summaryText)
+                        }
+                    },
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("generate_medical_pdf_now_btn")
+                ) {
+                    Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Gerar / Compartilhar PDF Médico", fontWeight = FontWeight.ExtraBold)
                 }
 
                 if (healthState.lastGeneratedPdfSummary.isNotBlank()) {
@@ -1392,7 +1471,8 @@ fun HealthModuleScreen(
                                             profileName = activeMember.displayName,
                                             periodDays = pdfPeriodDays,
                                             customizationConfig = customizationConfig,
-                                            healthState = memberFilteredHealthState
+                                            healthState = memberFilteredHealthState,
+                                            medicalDocuments = medicalDocuments
                                         )
                                         if (regenerated.success) {
                                             healthRepo.recordGeneratedPdfInfo(regenerated.filePath, regenerated.summaryText)
@@ -1421,6 +1501,11 @@ fun HealthModuleScreen(
                     }
                 }
             }
+        }
+
+        // Espaçamento inferior extra para que o botão flutuante nunca cubra os controles da base
+        item {
+            Spacer(modifier = Modifier.height(110.dp))
         }
     }
 
@@ -1707,18 +1792,23 @@ fun HealthModuleScreen(
     if (showEditDppDialog) {
         EditDppAndUltrasoundDialog(
             initialDppDate = effectiveDppDate,
-            initialPregnancyEnabled = customizationConfig.pregnancyEnabled || effectiveDppDate.isNotBlank(),
+            initialPregnancyEnabled = customizationConfig.pregnancyEnabled,
+            initialBabyName = effectiveBabyName,
+            initialBabyGender = effectiveBabyGender,
             onDismiss = { showEditDppDialog = false },
-            onSave = { enabled, finalDpp ->
+            onSave = { _, finalDpp, updatedBabyName, updatedBabyGender ->
                 val mode = customizationConfig.pregnancyComparisonMode.ifBlank { "TODOS" }
                 customizationRepo.updatePregnancyModule(
-                    enabled = enabled,
+                    enabled = customizationConfig.pregnancyEnabled,
                     dppDate = finalDpp,
                     notes = customizationConfig.pregnancyNotes,
-                    comparisonMode = mode
+                    comparisonMode = mode,
+                    babyName = updatedBabyName,
+                    babyGender = updatedBabyGender
                 )
                 onSyncPregnancyConfigToCloud(finalDpp, mode)
-                triggerFeedback("🤰 DPP ($finalDpp) sincronizada no Hub, Saúde e Nuvem!")
+                onSyncBabyIdentityToCloud(updatedBabyName, updatedBabyGender)
+                triggerFeedback("🤰 DPP ($finalDpp) e dados do bebê sincronizados na Família!")
                 showEditDppDialog = false
             }
         )
@@ -1727,7 +1817,7 @@ fun HealthModuleScreen(
 
 // =============================================================================
 // CARD DE GESTAÇÃO (DPP) COM COMPARADOR (DOCE / FRUTA / ANIMAL) E PRÓXIMO MARCO
-// Reutilizado tanto no topo da aba "Saúde & Glicemia" quanto no "Hub da Família"
+// Reutilizado tanto no topo da aba "Saúde" quanto no "Hub da Família" (expansível)
 // =============================================================================
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -1738,6 +1828,10 @@ fun OmniPregnancyHeroCard(
     onSelectComparisonMode: (String) -> Unit,
     onOpenEditDpp: () -> Unit,
     modifier: Modifier = Modifier,
+    babyName: String = "",
+    babyGender: String = "SURPRESA",
+    expandableInHub: Boolean = false,
+    initiallyExpanded: Boolean = true,
     extraFooterContent: (@Composable () -> Unit)? = null
 ) {
     val cardRadius = LocalOrganicCardRadius.current
@@ -1750,10 +1844,36 @@ fun OmniPregnancyHeroCard(
             else -> "TODOS"
         }
     }
+    var isExpanded by rememberSaveable(expandableInHub) {
+        mutableStateOf(if (expandableInHub) initiallyExpanded else true)
+    }
+
+    val arrivalCountdownLabel = remember(pregProgress.daysRemainingToDpp, babyName, babyGender) {
+        PregnancyCalculator.formatBabyArrivalCountdownPt(
+            daysRemaining = pregProgress.daysRemainingToDpp,
+            babyName = babyName,
+            babyGender = babyGender
+        )
+    }
+    val comparatorIntroLabel = remember(pregProgress.currentWeek, babyName, babyGender) {
+        PregnancyCalculator.formatBabyComparatorIntroPt(
+            currentWeek = pregProgress.currentWeek,
+            babyName = babyName,
+            babyGender = babyGender
+        )
+    }
+    val percentInt = (pregProgress.progressFraction40Weeks * 100).roundToInt()
 
     Card(
         modifier = modifier
             .fillMaxWidth()
+            .then(
+                if (expandableInHub) {
+                    Modifier.clickable { isExpanded = !isExpanded }
+                } else {
+                    Modifier
+                }
+            )
             .testTag("family_pregnancy_module_card"),
         shape = RoundedCornerShape(cardRadius),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -1779,171 +1899,207 @@ fun OmniPregnancyHeroCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
+                    val titleSuffix = if (babyName.trim().isNotBlank()) {
+                        " • ${babyName.trim()}"
+                    } else {
+                        ""
+                    }
                     Text(
-                        text = "🤰 Gestação da Família • ${pregProgress.gestationalAgeLabelPt}",
+                        text = "🤰 Gestação da Família$titleSuffix • ${pregProgress.gestationalAgeLabelPt}",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.ExtraBold
                     )
                     Text(
-                        text = "DPP: ${pregProgress.dppFormatted} • ${pregProgress.trimester}º Trimestre • Faltam ${pregProgress.daysRemainingToDpp} dias",
+                        text = if (expandableInHub && !isExpanded) {
+                            "${pregProgress.gestationalAgeLabelPt} • $arrivalCountdownLabel • $percentInt%"
+                        } else {
+                            "DPP: ${pregProgress.dppFormatted} • ${pregProgress.trimester}º Trimestre • $arrivalCountdownLabel"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
-                OutlinedButton(
-                    onClick = onOpenEditDpp,
-                    shape = RoundedCornerShape(50),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    modifier = Modifier.testTag("edit_dpp_date_btn")
-                ) {
-                    Text("DPP / Ultrassom", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                }
-            }
 
-            // Barra de progresso das 40 semanas + contagem regressiva
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        text = "Progresso das 40 semanas (${(pregProgress.progressFraction40Weeks * 100).roundToInt()}%)",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = accentColor
-                    )
-                    Text(
-                        text = "Tamanho aprox.: ${String.format(Locale.forLanguageTag("pt-BR"), "%.1f cm", pregProgress.approxLengthCm)} • Peso: ${pregProgress.approxWeightGrams} g",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = JetBrainsMonoFontFamily,
-                        fontWeight = FontWeight.Bold
-                    )
+                    if (!expandableInHub || isExpanded) {
+                        OutlinedButton(
+                            onClick = onOpenEditDpp,
+                            shape = RoundedCornerShape(50),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("edit_dpp_date_btn")
+                        ) {
+                            Text("DPP / Ultrassom", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    if (expandableInHub) {
+                        Surface(
+                            shape = CircleShape,
+                            color = accentColor.copy(alpha = 0.14f)
+                        ) {
+                            Icon(
+                                imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = if (isExpanded) "Recolher card de gestação" else "Expandir card de gestação",
+                                tint = accentColor,
+                                modifier = Modifier
+                                    .padding(6.dp)
+                                    .size(18.dp)
+                            )
+                        }
+                    }
                 }
-                LinearProgressIndicator(
-                    progress = { pregProgress.progressFraction40Weeks },
-                    color = accentColor,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(9.dp)
-                        .clip(RoundedCornerShape(50))
-                )
             }
 
-            // Chips de modo de comparação ("Doce" | "Fruta" | "Animal" | "Todos")
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                listOf(
-                    "DOCE" to "🧁 Doce",
-                    "FRUTA" to "🍓 Fruta",
-                    "ANIMAL" to "🐾 Animal",
-                    "TODOS" to "✨ Todos"
-                ).forEach { (modeKey, modeLabel) ->
-                    val selected = activeMode == modeKey
-                    FilterChip(
-                        selected = selected,
-                        onClick = { onSelectComparisonMode(modeKey) },
-                        label = {
+            AnimatedVisibility(visible = !expandableInHub || isExpanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    // Barra de progresso das 40 semanas + contagem regressiva
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
                             Text(
-                                text = modeLabel,
+                                text = "Progresso das 40 semanas ($percentInt%)",
                                 style = MaterialTheme.typography.labelSmall,
-                                fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor
                             )
-                        },
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier.testTag("pregnancy_mode_chip_$modeKey")
-                    )
-                }
-            }
+                            Text(
+                                text = "Tamanho aprox.: ${String.format(Locale.forLanguageTag("pt-BR"), "%.1f cm", pregProgress.approxLengthCm)} • Peso: ${pregProgress.approxWeightGrams} g",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        LinearProgressIndicator(
+                            progress = { pregProgress.progressFraction40Weeks },
+                            color = accentColor,
+                            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(9.dp)
+                                .clip(RoundedCornerShape(50))
+                        )
+                    }
 
-            // Card visual do Comparador da Semana Atual
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = accentColor.copy(alpha = 0.10f),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, accentColor.copy(alpha = 0.30f), RoundedCornerShape(16.dp))
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = "Na semana ${pregProgress.currentWeek}, o bebê tem o tamanho aproximado de:",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    when (activeMode) {
-                        "DOCE" -> Text(
-                            text = "🧁 Doce: ${pregProgress.sweetComparison}",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        "FRUTA" -> Text(
-                            text = "🍓 Fruta: ${pregProgress.fruitComparison}",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        "ANIMAL" -> Text(
-                            text = "🐾 Animal: ${pregProgress.animalComparison}",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        else -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                text = "🧁 Doce: ${pregProgress.sweetComparison}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                            Text(
-                                text = "🍓 Fruta: ${pregProgress.fruitComparison}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                            Text(
-                                text = "🐾 Animal: ${pregProgress.animalComparison}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.ExtraBold
+                    // Chips de modo de comparação ("Doce" | "Fruta" | "Animal" | "Todos")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        listOf(
+                            "DOCE" to "🧁 Doce",
+                            "FRUTA" to "🍓 Fruta",
+                            "ANIMAL" to "🐾 Animal",
+                            "TODOS" to "✨ Todos"
+                        ).forEach { (modeKey, modeLabel) ->
+                            val selected = activeMode == modeKey
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onSelectComparisonMode(modeKey) },
+                                label = {
+                                    Text(
+                                        text = modeLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium
+                                    )
+                                },
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier.testTag("pregnancy_mode_chip_$modeKey")
                             )
                         }
                     }
 
-                    HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
+                    // Card visual do Comparador da Semana Atual
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = accentColor.copy(alpha = 0.10f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, accentColor.copy(alpha = 0.30f), RoundedCornerShape(16.dp))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = comparatorIntroLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            when (activeMode) {
+                                "DOCE" -> Text(
+                                    text = "🧁 Doce: ${pregProgress.sweetComparison}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                "FRUTA" -> Text(
+                                    text = "🍓 Fruta: ${pregProgress.fruitComparison}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                "ANIMAL" -> Text(
+                                    text = "🐾 Animal: ${pregProgress.animalComparison}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                else -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(
+                                        text = "🧁 Doce: ${pregProgress.sweetComparison}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                    Text(
+                                        text = "🍓 Fruta: ${pregProgress.fruitComparison}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                    Text(
+                                        text = "🐾 Animal: ${pregProgress.animalComparison}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                }
+                            }
 
-                    // Próximo marco (dias para a próxima semana e próximo trimestre)
-                    val nextWeekText = if (pregProgress.currentWeek < 42) {
-                        "⏳ Faltam ${pregProgress.daysToNextWeek} dia(s) para completar a ${pregProgress.currentWeek + 1}ª semana"
-                    } else {
-                        "🎉 Reta final da gestação!"
+                            HorizontalDivider(color = accentColor.copy(alpha = 0.2f))
+
+                            // Próximo marco (dias para a próxima semana e próximo trimestre)
+                            val nextWeekText = if (pregProgress.currentWeek < 42) {
+                                "⏳ Faltam ${pregProgress.daysToNextWeek} dia(s) para completar a ${pregProgress.currentWeek + 1}ª semana"
+                            } else {
+                                "🎉 Reta final da gestação!"
+                            }
+                            val nextTrimesterText = when {
+                                pregProgress.trimester == 1 && pregProgress.daysToNextTrimester > 0 ->
+                                    " • ${pregProgress.daysToNextTrimester} dia(s) para entrar no 2º trimestre (14ª sem.)"
+                                pregProgress.trimester == 2 && pregProgress.daysToNextTrimester > 0 ->
+                                    " • ${pregProgress.daysToNextTrimester} dia(s) para entrar no 3º trimestre (28ª sem.)"
+                                else ->
+                                    " • 3º Trimestre em andamento ($arrivalCountdownLabel)"
+                            }
+                            Text(
+                                text = nextWeekText + nextTrimesterText,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
-                    val nextTrimesterText = when {
-                        pregProgress.trimester == 1 && pregProgress.daysToNextTrimester > 0 ->
-                            " • ${pregProgress.daysToNextTrimester} dia(s) para entrar no 2º trimestre (14ª sem.)"
-                        pregProgress.trimester == 2 && pregProgress.daysToNextTrimester > 0 ->
-                            " • ${pregProgress.daysToNextTrimester} dia(s) para entrar no 3º trimestre (28ª sem.)"
-                        else ->
-                            " • 3º Trimestre em andamento (${pregProgress.daysRemainingToDpp} dias até a DPP)"
-                    }
-                    Text(
-                        text = nextWeekText + nextTrimesterText,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+
+                    extraFooterContent?.invoke()
                 }
             }
-
-            extraFooterContent?.invoke()
         }
     }
 }
@@ -1953,11 +2109,21 @@ fun OmniPregnancyHeroCard(
 fun EditDppAndUltrasoundDialog(
     initialDppDate: String,
     initialPregnancyEnabled: Boolean = true,
+    initialBabyName: String = "",
+    initialBabyGender: String = "SURPRESA",
     onDismiss: () -> Unit,
-    onSave: (enabled: Boolean, dppDateBr: String) -> Unit
+    onSave: (enabled: Boolean, dppDateBr: String, babyName: String, babyGender: String) -> Unit
 ) {
-    var pregEnabled by remember { mutableStateOf(initialPregnancyEnabled) }
     var dppInput by remember { mutableStateOf(initialDppDate.ifBlank { "15/03/2027" }) }
+    var babyNameInput by remember { mutableStateOf(initialBabyName) }
+    var babyGenderInput by remember {
+        mutableStateOf(
+            when (initialBabyGender.trim().uppercase(Locale.ROOT)) {
+                "MENINO", "MENINA", "SURPRESA" -> initialBabyGender.trim().uppercase(Locale.ROOT)
+                else -> "SURPRESA"
+            }
+        )
+    }
     var useUltrasoundCalculator by remember { mutableStateOf(false) }
     var examDateInput by remember {
         mutableStateOf(OmniDateMaskUtils.epochDayToBrDate(DateCalendarUtils.todayEpochDay()))
@@ -1969,7 +2135,7 @@ fun EditDppAndUltrasoundDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "🤰 Configurar DPP ou Calcular pelo Ultrassom",
+                text = "🤰 Configurar DPP, Ultrassom & Bebê",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.ExtraBold
             )
@@ -1979,14 +2145,45 @@ fun EditDppAndUltrasoundDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                OutlinedTextField(
+                    value = babyNameInput,
+                    onValueChange = { babyNameInput = it },
+                    label = { Text("Nome do Bebê (opcional)") },
+                    placeholder = { Text("Ex.: Aurora, Gael...") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_dpp_baby_name_input")
+                )
+
+                Text(
+                    text = "Sexo do Bebê (concordância nos textos):",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text("Exibir Card de Gestação no Hub e Saúde", fontWeight = FontWeight.SemiBold)
-                    Switch(checked = pregEnabled, onCheckedChange = { pregEnabled = it })
+                    listOf(
+                        "MENINO" to "👦 Menino",
+                        "MENINA" to "👧 Menina",
+                        "SURPRESA" to "✨ Surpresa"
+                    ).forEach { (key, label) ->
+                        FilterChip(
+                            selected = babyGenderInput == key,
+                            onClick = { babyGenderInput = key },
+                            label = {
+                                Text(
+                                    text = label,
+                                    fontWeight = if (babyGenderInput == key) FontWeight.ExtraBold else FontWeight.Medium
+                                )
+                            }
+                        )
+                    }
                 }
+
+                HorizontalDivider()
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
@@ -2078,7 +2275,7 @@ fun EditDppAndUltrasoundDialog(
                     } else {
                         dppInput.trim()
                     }
-                    onSave(pregEnabled, resolvedDpp)
+                    onSave(initialPregnancyEnabled, resolvedDpp, babyNameInput.trim(), babyGenderInput)
                 }
             ) {
                 Text("Salvar DPP")
@@ -2101,8 +2298,7 @@ private fun IntegratedOneHourPostMealTimerSection(
     onSelectMealSlot: (String) -> Unit,
     onStartTimer: () -> Unit,
     onPauseResumeTimer: () -> Unit,
-    onResetTimer: () -> Unit,
-    onLogPostMealGlucoseNow: () -> Unit
+    onResetTimer: () -> Unit
 ) {
     val minutes = liveRemainingSeconds / 60
     val seconds = liveRemainingSeconds % 60
@@ -2274,20 +2470,6 @@ private fun IntegratedOneHourPostMealTimerSection(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Zerar", maxLines = 1, softWrap = false)
                     }
-                }
-
-                OutlinedButton(
-                    onClick = onLogPostMealGlucoseNow,
-                    shape = RoundedCornerShape(50),
-                    modifier = Modifier.testTag("test_1h_timer_alert_btn")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.WaterDrop,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Registrar", fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -2605,8 +2787,12 @@ private fun InsulinRecordRowCard(
                     }
                 }
                 Spacer(modifier = Modifier.height(2.dp))
+                val datePt = remember(record.dateIso) {
+                    val epoch = runCatching { java.time.LocalDate.parse(record.dateIso).toEpochDay() }.getOrNull()
+                    if (epoch != null) DateCalendarUtils.formatEpochDayPt(epoch) else record.dateIso
+                }
                 Text(
-                    text = "${record.memberId} • ${record.dateIso} às ${record.timeFormatted}" +
+                    text = "${record.memberId} • $datePt às ${record.timeFormatted}" +
                         if (record.notes.isNotBlank()) " • ${record.notes}" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant

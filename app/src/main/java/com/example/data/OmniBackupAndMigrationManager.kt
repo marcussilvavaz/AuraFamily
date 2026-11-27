@@ -645,6 +645,10 @@ object OmniBackupAndMigrationManager {
         root.put("exportedAtEpochMs", System.currentTimeMillis())
         root.put("householdId", household.id)
         root.put("householdName", household.name)
+        root.put("pregnancyDppDate", household.pregnancyDppDate)
+        root.put("pregnancyComparisonMode", household.pregnancyComparisonMode)
+        root.put("babyName", household.babyName)
+        root.put("babyGender", household.babyGender)
 
         // Family Members
         val membersArr = JSONArray()
@@ -855,6 +859,15 @@ object OmniBackupAndMigrationManager {
         }
         root.put("insulinRecords", insulinArr)
 
+        // Medical Documents (structured metadata without Base64 page bloat)
+        val medDocsArr = JSONArray()
+        runCatching {
+            MedicalDocumentsRepository(context).documentsFlow.value.forEach { doc ->
+                medDocsArr.put(MedicalDocumentsRepository.recordToJson(doc))
+            }
+        }
+        root.put("healthDocuments", medDocsArr)
+
         // Private Diary
         val diaryArr = JSONArray()
         diaryState.entries.forEach { entry ->
@@ -1032,6 +1045,31 @@ object OmniBackupAndMigrationManager {
                     importedGlucose = importedGlucose,
                     importedBp = importedBp,
                     importedInsulin = importedInsulin
+                )
+            }
+
+            // 4b. Medical Documents & Baby Identity
+            root.optJSONArray("healthDocuments")?.let { docsArr ->
+                val importedDocs = buildList {
+                    for (i in 0 until docsArr.length()) {
+                        val obj = docsArr.optJSONObject(i) ?: continue
+                        runCatching { MedicalDocumentsRepository.parseRecordFromJson(obj) }.getOrNull()?.let { add(it) }
+                    }
+                }
+                if (importedDocs.isNotEmpty()) {
+                    healthMerged += MedicalDocumentsRepository(appContext).mergeImportedDocuments(importedDocs)
+                }
+            }
+            val importedBabyName = root.optString("babyName", "").trim()
+            val importedBabyGender = root.optString("babyGender", "").trim()
+            val importedDpp = root.optString("pregnancyDppDate", "").trim()
+            val importedCompMode = root.optString("pregnancyComparisonMode", "").trim()
+            if (importedBabyName.isNotBlank() || importedBabyGender.isNotBlank() || importedDpp.isNotBlank()) {
+                CustomizationRepository(appContext).syncSharedPregnancyDetailsFromCloud(
+                    dppDate = importedDpp,
+                    comparisonMode = importedCompMode,
+                    babyName = importedBabyName,
+                    babyGender = importedBabyGender
                 )
             }
 

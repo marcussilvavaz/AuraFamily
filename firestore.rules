@@ -109,6 +109,12 @@ service cloud.firestore {
                                  incoming().content is string && incoming().content.size() >= 1 && incoming().content.size() <= 8000;
         allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(letterId);
       }
+
+      // Subcollection: Personal Diary Letters
+      match /diary_letters/{letterId} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+        allow create, update, delete: if isSignedIn() && request.auth.uid == userId && isValidId(letterId);
+      }
     }
 
     // 2. Household validation
@@ -227,6 +233,7 @@ service cloud.firestore {
                          'memberIds', 'members', 'membersMap', 'bankAccounts',
                          'categoryBudgetsBrl', 'customCategories', 'muralItems',
                          'insulinConfigs', 'pregnancyDppDate', 'pregnancyComparisonMode',
+                         'babyName', 'babyGender', 'geminiApiKey', 'memberHealthSettings',
                          'defaultSplitMode', 'createdAt', 'updatedAt'
                        ]) &&
                        isValidHousehold(incoming());
@@ -248,6 +255,7 @@ service cloud.firestore {
                              'memberIds', 'members', 'membersMap', 'bankAccounts',
                              'categoryBudgetsBrl', 'customCategories', 'muralItems',
                              'insulinConfigs', 'pregnancyDppDate', 'pregnancyComparisonMode',
+                             'babyName', 'babyGender', 'geminiApiKey', 'memberHealthSettings',
                              'defaultSplitMode', 'updatedAt'
                            ])
                          ) ||
@@ -458,6 +466,23 @@ service cloud.firestore {
       match /diary_entries/{entryId} {
         allow get, list: if isSignedIn() && isHouseholdMember(householdId);
         allow create, update, delete: if isSignedIn() && isValidId(entryId) && isHouseholdMember(householdId);
+      }
+
+      // Subcollection: DiaryLetters
+      match /diary_letters/{letterId} {
+        allow get, list: if isSignedIn() && isHouseholdMember(householdId);
+        allow create, update, delete: if isSignedIn() && isValidId(letterId) && isHouseholdMember(householdId);
+      }
+
+      // Subcollection: HealthDocuments & Multi-Page Compressed Base64 Pages (<250 KB/page, Spark Plan)
+      match /health_documents/{docId} {
+        allow get, list: if isSignedIn() && isHouseholdMember(householdId);
+        allow create, update, delete: if isSignedIn() && isValidId(docId) && isHouseholdMember(householdId);
+
+        match /pages/{pageId} {
+          allow get, list: if isSignedIn() && isHouseholdMember(householdId);
+          allow create, update, delete: if isSignedIn() && isValidId(pageId) && isHouseholdMember(householdId);
+        }
       }
     }
 

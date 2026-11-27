@@ -238,11 +238,28 @@ fun MainFeatureScreen(
         val activeHouseId = loadedHousehold?.householdId?.takeIf { it.isNotBlank() }
             ?: userProfile?.householdId.orEmpty()
         val resolvedMemberName = remoteName.ifBlank { customizationConfig.profileName }
+        val activeUid = userProfile?.uid.orEmpty()
+        if (activeUid.isNotBlank()) {
+            customizationRepo.bindActiveMemberAndSyncHealthSettings(
+                userId = activeUid,
+                remoteMemberSettings = loadedHousehold?.memberHealthSettings?.get(activeUid)
+            )
+        }
         if (activeHouseId.isNotBlank()) {
             healthRepo.attachHouseholdRealtimeSync(
                 householdId = activeHouseId,
-                loggedUserId = userProfile?.uid.orEmpty(),
+                loggedUserId = activeUid,
                 loggedUserName = resolvedMemberName
+            )
+        }
+    }
+
+    LaunchedEffect(userProfile?.uid, loadedHousehold?.memberHealthSettings) {
+        val activeUid = userProfile?.uid.orEmpty()
+        if (activeUid.isNotBlank()) {
+            customizationRepo.bindActiveMemberAndSyncHealthSettings(
+                userId = activeUid,
+                remoteMemberSettings = loadedHousehold?.memberHealthSettings?.get(activeUid)
             )
         }
     }
@@ -254,18 +271,22 @@ fun MainFeatureScreen(
         }
     }
 
-    LaunchedEffect(loadedHousehold?.pregnancyDppDate, loadedHousehold?.pregnancyComparisonMode) {
-        val remoteDpp = loadedHousehold?.pregnancyDppDate?.trim().orEmpty()
-        val remoteMode = loadedHousehold?.pregnancyComparisonMode?.trim().orEmpty()
-        if (remoteDpp.isNotBlank() && remoteDpp != customizationConfig.pregnancyDppDate) {
-            customizationRepo.updatePregnancyModule(
-                enabled = true,
-                dppDate = remoteDpp,
-                notes = customizationConfig.pregnancyNotes,
-                comparisonMode = remoteMode.ifBlank { customizationConfig.pregnancyComparisonMode }
-            )
-        } else if (remoteMode.isNotBlank() && remoteMode != customizationConfig.pregnancyComparisonMode) {
-            customizationRepo.updatePregnancyComparisonMode(remoteMode)
+    LaunchedEffect(
+        loadedHousehold?.pregnancyDppDate,
+        loadedHousehold?.pregnancyComparisonMode,
+        loadedHousehold?.babyName,
+        loadedHousehold?.babyGender,
+        loadedHousehold?.geminiApiKey
+    ) {
+        customizationRepo.syncSharedPregnancyDetailsFromCloud(
+            dppDate = loadedHousehold?.pregnancyDppDate.orEmpty(),
+            comparisonMode = loadedHousehold?.pregnancyComparisonMode.orEmpty(),
+            babyName = loadedHousehold?.babyName.orEmpty(),
+            babyGender = loadedHousehold?.babyGender.orEmpty()
+        )
+        val remoteGeminiKey = loadedHousehold?.geminiApiKey?.trim().orEmpty()
+        if (remoteGeminiKey.isNotBlank() && remoteGeminiKey != customizationConfig.geminiApiKey) {
+            customizationRepo.updateGeminiApiKey(remoteGeminiKey)
         }
     }
 
@@ -332,6 +353,18 @@ fun MainFeatureScreen(
                     onFinishOnboarding = {
                         showModularOnboardingModal = false
                         localStudioBanner = "Perfil Modular configurado com sucesso! Suas preferências de rotina, saúde e acolhimento estão ativas."
+                    },
+                    onSyncPregnancyConfigToCloud = { dpp, mode ->
+                        viewModel.updateHouseholdPregnancyConfig(dpp, mode)
+                    },
+                    onSyncBabyIdentityToCloud = { bName, bGender ->
+                        viewModel.updateHouseholdBabyIdentity(bName, bGender)
+                    },
+                    onSyncMemberHealthSettingsToCloud = { settingsMap ->
+                        viewModel.syncMemberHealthSettingsToCloud(settingsMap)
+                    },
+                    onSyncGeminiApiKeyToCloud = { key ->
+                        viewModel.updateHouseholdGeminiApiKey(key)
                     }
                 )
             }
@@ -677,7 +710,7 @@ fun MainFeatureScreen(
                                 text = when (currentTab) {
                                     1 -> "📅 Agenda & Rotina"
                                     2 -> "💳 Finanças & Cartões"
-                                    5 -> "🩺 Saúde & Glicemia"
+                                    5 -> if (customizationConfig.diabetesEnabled) "🩺 Saúde & Glicemia" else "🩺 Saúde"
                                     6 -> if (diaryInitialSubTab == 1) "📌 Mural da Família" else "📔 Diário & Mural"
                                     else -> "Omni"
                                 },
@@ -928,6 +961,9 @@ fun MainFeatureScreen(
                                 customizationRepo = customizationRepo,
                                 onSyncPregnancyConfigToCloud = { dpp, mode ->
                                     viewModel.updateHouseholdPregnancyConfig(dpp, mode)
+                                },
+                                onSyncBabyIdentityToCloud = { bName, bGender ->
+                                    viewModel.updateHouseholdBabyIdentity(bName, bGender)
                                 }
                             )
 
@@ -1279,7 +1315,19 @@ fun MainFeatureScreen(
                                 },
                                 onBackToHub = { currentTab = 0 },
                                 onShowMessage = { localStudioBanner = it },
-                                onSignOut = onSignOut
+                                onSignOut = onSignOut,
+                                onSyncPregnancyConfigToCloud = { dpp, mode ->
+                                    viewModel.updateHouseholdPregnancyConfig(dpp, mode)
+                                },
+                                onSyncBabyIdentityToCloud = { bName, bGender ->
+                                    viewModel.updateHouseholdBabyIdentity(bName, bGender)
+                                },
+                                onSyncMemberHealthSettingsToCloud = { settingsMap ->
+                                    viewModel.syncMemberHealthSettingsToCloud(settingsMap)
+                                },
+                                onSyncGeminiApiKeyToCloud = { key ->
+                                    viewModel.updateHouseholdGeminiApiKey(key)
+                                }
                             )
 
                             // 4: ESTÚDIO DE PERSONALIZAÇÃO TOTAL (Colors, 8 Themes, 10 Fonts, Ringtones)
@@ -1325,6 +1373,30 @@ fun MainFeatureScreen(
                                 },
                                 onSyncPregnancyConfigToCloud = { dpp, mode ->
                                     viewModel.updateHouseholdPregnancyConfig(dpp, mode)
+                                },
+                                onSyncBabyIdentityToCloud = { bName, bGender ->
+                                    viewModel.updateHouseholdBabyIdentity(bName, bGender)
+                                },
+                                onScheduleOrderInAgenda = { docTitle, memberName, memberId, dateEpochDay, alarmHour, alarmMinute, location, notes, existingLinkedTaskId, onTaskLinked ->
+                                    viewModel.scheduleOrUpdateMedicalOrderTask(
+                                        context = context,
+                                        docTitle = docTitle,
+                                        memberName = memberName,
+                                        memberId = memberId,
+                                        dateEpochDay = dateEpochDay,
+                                        alarmHour = alarmHour,
+                                        alarmMinute = alarmMinute,
+                                        location = location,
+                                        notes = notes,
+                                        existingLinkedTaskId = existingLinkedTaskId,
+                                        onTaskLinked = onTaskLinked
+                                    )
+                                },
+                                onMarkLinkedTaskCompleted = { taskId, completed ->
+                                    viewModel.setLinkedMedicalOrderTaskCompleted(context, taskId, completed)
+                                },
+                                onDeleteLinkedTask = { taskId ->
+                                    viewModel.deleteLinkedMedicalOrderTask(context, taskId)
                                 }
                             )
 

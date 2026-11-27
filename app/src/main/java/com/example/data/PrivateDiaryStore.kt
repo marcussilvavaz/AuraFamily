@@ -96,11 +96,25 @@ data class SupportLetterRecord(
     val createdAtEpochMs: Long = System.currentTimeMillis()
 )
 
+data class DiaryLetterRecord(
+    val id: String = UUID.randomUUID().toString(),
+    val authorUserId: String = LocalOfflineStore.LOCAL_USER_ID,
+    val authorName: String = "",
+    val recipientLabel: String = "Para o Bebê",
+    val dateIso: String,
+    val timeFormatted: String,
+    val title: String,
+    val content: String,
+    val sharedWithFamily: Boolean = true,
+    val createdAtEpochMs: Long = System.currentTimeMillis()
+)
+
 data class PrivateDiaryState(
     val userId: String = LocalOfflineStore.LOCAL_USER_ID,
     val entries: List<PrivateDiaryEntry> = emptyList(),
     val customSymptomTags: List<String> = emptyList(),
     val savedSupportLetters: List<SupportLetterRecord> = emptyList(),
+    val diaryLetters: List<DiaryLetterRecord> = emptyList(),
     val activeShift: DayShift = DayShift.currentShift(),
     val currentShiftQuote: String = "",
     val currentShiftQuoteAuthor: String = "",
@@ -268,11 +282,32 @@ class PrivateDiaryRepository(
                 )
             }
 
+            val diaryLettersArr = root.optJSONArray("diaryLetters") ?: JSONArray()
+            val diaryLetters = mutableListOf<DiaryLetterRecord>()
+            for (i in 0 until diaryLettersArr.length()) {
+                val obj = diaryLettersArr.getJSONObject(i)
+                diaryLetters.add(
+                    DiaryLetterRecord(
+                        id = obj.optString("id", UUID.randomUUID().toString()),
+                        authorUserId = obj.optString("authorUserId", userId),
+                        authorName = obj.optString("authorName", ""),
+                        recipientLabel = obj.optString("recipientLabel", "Para o Bebê"),
+                        dateIso = obj.optString("dateIso", LocalDate.now().toString()),
+                        timeFormatted = obj.optString("timeFormatted", "10:00"),
+                        title = obj.optString("title", "Carta do Diário"),
+                        content = obj.optString("content", ""),
+                        sharedWithFamily = obj.optBoolean("sharedWithFamily", true),
+                        createdAtEpochMs = obj.optLong("createdAtEpochMs", System.currentTimeMillis())
+                    )
+                )
+            }
+
             PrivateDiaryState(
                 userId = userId,
                 entries = entries.sortedWith(compareByDescending<PrivateDiaryEntry> { it.epochDay }.thenBy { it.hour * 60 + it.minute }),
                 customSymptomTags = customTags,
                 savedSupportLetters = letters.sortedByDescending { it.createdAtEpochMs },
+                diaryLetters = diaryLetters.sortedByDescending { it.createdAtEpochMs },
                 activeShift = shift,
                 currentShiftQuote = quote,
                 currentShiftQuoteAuthor = author,
@@ -349,6 +384,25 @@ class PrivateDiaryRepository(
             )
         }
         root.put("savedSupportLetters", lettersArr)
+
+        val diaryLettersArr = JSONArray()
+        state.diaryLetters.forEach { letter ->
+            diaryLettersArr.put(
+                JSONObject().apply {
+                    put("id", letter.id)
+                    put("authorUserId", letter.authorUserId)
+                    put("authorName", letter.authorName)
+                    put("recipientLabel", letter.recipientLabel)
+                    put("dateIso", letter.dateIso)
+                    put("timeFormatted", letter.timeFormatted)
+                    put("title", letter.title)
+                    put("content", letter.content)
+                    put("sharedWithFamily", letter.sharedWithFamily)
+                    put("createdAtEpochMs", letter.createdAtEpochMs)
+                }
+            )
+        }
+        root.put("diaryLetters", diaryLettersArr)
 
         prefs.edit().putString(KEY_DIARY_JSON, root.toString()).apply()
     }
@@ -585,9 +639,67 @@ class PrivateDiaryRepository(
             ?.delete()
     }
 
+    fun saveDiaryLetter(
+        title: String,
+        content: String,
+        recipientLabel: String,
+        authorName: String,
+        sharedWithFamily: Boolean = true,
+        existingId: String? = null
+    ): DiaryLetterRecord {
+        val nowTimeFormatted = SimpleDateFormat("HH:mm", Locale.forLanguageTag("pt-BR")).format(Date())
+        val todayIso = LocalDate.now().toString()
+        val effectiveUid = auth?.currentUser?.uid ?: userId
+        val record = DiaryLetterRecord(
+            id = existingId?.takeIf { it.isNotBlank() } ?: "dletter_${System.currentTimeMillis()}",
+            authorUserId = effectiveUid,
+            authorName = authorName.ifBlank { "Família" },
+            recipientLabel = recipientLabel.ifBlank { "Para o Bebê" },
+            dateIso = todayIso,
+            timeFormatted = nowTimeFormatted,
+            title = title.trim().ifBlank { "Carta do Diário ($recipientLabel)" },
+            content = content.trim(),
+            sharedWithFamily = sharedWithFamily,
+            createdAtEpochMs = System.currentTimeMillis()
+        )
+        updateState { current ->
+            val filtered = current.diaryLetters.filterNot { it.id == record.id }
+            current.copy(diaryLetters = (listOf(record) + filtered).sortedByDescending { it.createdAtEpochMs })
+        }
+        syncDiaryLetterToFirestore(record)
+        return record
+    }
+
+    fun deleteDiaryLetter(letterId: String) {
+        updateState { current ->
+            current.copy(diaryLetters = current.diaryLetters.filterNot { it.id == letterId })
+        }
+        val uid = auth?.currentUser?.uid
+        if (!uid.isNullOrBlank()) {
+            db?.collection("users")
+                ?.document(uid)
+                ?.collection("diary_letters")
+                ?.document(letterId)
+                ?.delete()
+        }
+        val houseId = appContext.getSharedPreferences("aura_local_offline_store", Context.MODE_PRIVATE)
+            .getString("household_id", null)
+        if (!houseId.isNullOrBlank()) {
+            db?.collection("households")
+                ?.document(houseId)
+                ?.collection("diary_letters")
+                ?.document(letterId)
+                ?.delete()
+        }
+    }
+
     fun saveLocalGeminiApiKey(apiKey: String) {
         val trimmed = apiKey.trim()
         prefs.edit().putString(KEY_LOCAL_GEMINI_API_KEY, trimmed).apply()
+        appContext.getSharedPreferences("aura_local_offline_store", Context.MODE_PRIVATE)
+            .edit()
+            .putString("gemini_api_key", trimmed)
+            .apply()
         updateState {
             it.copy(hasLocalApiKeyConfigured = isGeminiApiKeyConfigured(trimmed))
         }
@@ -596,6 +708,23 @@ class PrivateDiaryRepository(
     fun getConfiguredGeminiApiKey(): String {
         val localOverride = prefs.getString(KEY_LOCAL_GEMINI_API_KEY, "").orEmpty().trim()
         if (isValidRealKey(localOverride)) return localOverride
+
+        val offlineStoreKey = appContext
+            .getSharedPreferences("aura_local_offline_store", Context.MODE_PRIVATE)
+            .getString("gemini_api_key", "")
+            .orEmpty()
+            .trim()
+        if (isValidRealKey(offlineStoreKey)) return offlineStoreKey
+
+        val customPrefsJson = appContext
+            .getSharedPreferences("aura_customization_v1", Context.MODE_PRIVATE)
+            .getString("customization_config_json", null)
+        if (!customPrefsJson.isNullOrBlank()) {
+            val fromProfile = runCatching {
+                JSONObject(customPrefsJson).optString("geminiApiKey", "").trim()
+            }.getOrDefault("")
+            if (isValidRealKey(fromProfile)) return fromProfile
+        }
 
         val buildConfigKey = runCatching { BuildConfig.GEMINI_API_KEY.trim() }.getOrDefault("")
         if (isValidRealKey(buildConfigKey)) return buildConfigKey
@@ -612,17 +741,18 @@ class PrivateDiaryRepository(
 
     private fun isGeminiApiKeyConfigured(localOverride: String): Boolean {
         return isValidRealKey(localOverride) ||
-            isValidRealKey(runCatching { BuildConfig.GEMINI_API_KEY }.getOrDefault(""))
+            isValidRealKey(getConfiguredGeminiApiKey())
     }
 
     /**
      * Generates a personalized, empathetic support letter in pt-BR based on recent mood and symptom entries.
-     * Uses the Gemini API if a valid key is available via BuildConfig or local configuration,
+     * Uses the Gemini API (gemini-2.5-flash) on demand if a valid key is available via Profile or BuildConfig,
      * and gracefully falls back to a rich, contextual local empathetic letter generator when offline or unconfigured.
      */
     suspend fun generatePersonalizedSupportLetter(
         userName: String,
-        targetEpochDay: Long
+        targetEpochDay: Long,
+        overrideApiKey: String = ""
     ): SupportLetterRecord = withContext(Dispatchers.IO) {
         val state = _stateFlow.value
         val targetDateIso = LocalDate.ofEpochDay(targetEpochDay).toString()
@@ -640,7 +770,7 @@ class PrivateDiaryRepository(
         val moodSummary = buildMoodAndSymptomsDigest(entriesForContext)
         val nowTimeFormatted = SimpleDateFormat("HH:mm", Locale.forLanguageTag("pt-BR")).format(Date())
         val currentShift = DayShift.currentShift()
-        val apiKey = getConfiguredGeminiApiKey()
+        val apiKey = overrideApiKey.trim().takeIf { isValidRealKey(it) } ?: getConfiguredGeminiApiKey()
 
         if (apiKey.isNotBlank()) {
             try {
@@ -998,9 +1128,80 @@ class PrivateDiaryRepository(
             .set(payload)
     }
 
+    private fun syncDiaryLetterToFirestore(letter: DiaryLetterRecord) {
+        val uid = auth?.currentUser?.uid
+        val firestore = db ?: return
+        val payload = mapOf(
+            "id" to letter.id,
+            "authorUserId" to (uid ?: letter.authorUserId),
+            "authorName" to letter.authorName.take(80),
+            "recipientLabel" to letter.recipientLabel.take(60),
+            "dateIso" to letter.dateIso,
+            "timeFormatted" to letter.timeFormatted,
+            "title" to letter.title.take(140),
+            "content" to letter.content.take(8000),
+            "sharedWithFamily" to letter.sharedWithFamily,
+            "createdAtEpochMs" to letter.createdAtEpochMs
+        )
+        if (!uid.isNullOrBlank()) {
+            firestore.collection("users")
+                .document(uid)
+                .collection("diary_letters")
+                .document(letter.id)
+                .set(payload)
+        }
+        val houseId = appContext.getSharedPreferences("aura_local_offline_store", Context.MODE_PRIVATE)
+            .getString("household_id", null)
+        if (!houseId.isNullOrBlank() && letter.sharedWithFamily) {
+            firestore.collection("households")
+                .document(houseId)
+                .collection("diary_letters")
+                .document(letter.id)
+                .set(payload)
+        }
+    }
+
     private fun syncFromFirestoreIfAuthenticated() {
         val uid = auth?.currentUser?.uid ?: return
         val firestore = db ?: return
+
+        val houseId = appContext.getSharedPreferences("aura_local_offline_store", Context.MODE_PRIVATE)
+            .getString("household_id", null)
+        if (!houseId.isNullOrBlank()) {
+            firestore.collection("households")
+                .document(houseId)
+                .collection("diary_letters")
+                .get()
+                .addOnSuccessListener { snap ->
+                    if (snap != null && !snap.isEmpty) {
+                        val remoteLetters = snap.documents.mapNotNull { doc ->
+                            val id = doc.getString("id") ?: doc.id
+                            val content = doc.getString("content") ?: return@mapNotNull null
+                            DiaryLetterRecord(
+                                id = id,
+                                authorUserId = doc.getString("authorUserId") ?: uid,
+                                authorName = doc.getString("authorName").orEmpty(),
+                                recipientLabel = doc.getString("recipientLabel") ?: "Para o Bebê",
+                                dateIso = doc.getString("dateIso") ?: LocalDate.now().toString(),
+                                timeFormatted = doc.getString("timeFormatted") ?: "10:00",
+                                title = doc.getString("title") ?: "Carta do Diário",
+                                content = content,
+                                sharedWithFamily = doc.getBoolean("sharedWithFamily") ?: true,
+                                createdAtEpochMs = doc.getLong("createdAtEpochMs") ?: System.currentTimeMillis()
+                            )
+                        }
+                        if (remoteLetters.isNotEmpty()) {
+                            updateState { current ->
+                                val merged = (current.diaryLetters + remoteLetters)
+                                    .associateBy { it.id }
+                                    .values
+                                    .sortedByDescending { it.createdAtEpochMs }
+                                current.copy(diaryLetters = merged)
+                            }
+                        }
+                    }
+                }
+        }
 
         firestore.collection("users")
             .document(uid)

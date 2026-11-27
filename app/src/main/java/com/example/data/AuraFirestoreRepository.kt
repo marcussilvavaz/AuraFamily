@@ -650,7 +650,9 @@ class AuraFirestoreRepository(
             "savings_goals",
             "health_logs",
             "insulin_records",
-            "diary_entries"
+            "diary_entries",
+            "diary_letters",
+            "health_documents"
         )
 
         for (sub in subcollections) {
@@ -667,6 +669,24 @@ class AuraFirestoreRepository(
                     val data = doc.data?.toMutableMap() ?: continue
                     data["householdId"] = targetHouseholdId
                     targetRef.collection(sub).document(docId).set(data, SetOptions.merge()).await()
+                    if (sub == "health_documents") {
+                        runCatching {
+                            val pagesSnap = dupRef.collection("health_documents")
+                                .document(docId)
+                                .collection("pages")
+                                .get()
+                                .await()
+                            for (pageDoc in pagesSnap.documents) {
+                                val pageData = pageDoc.data ?: continue
+                                targetRef.collection("health_documents")
+                                    .document(docId)
+                                    .collection("pages")
+                                    .document(pageDoc.id)
+                                    .set(pageData, SetOptions.merge())
+                                    .await()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -723,6 +743,20 @@ class AuraFirestoreRepository(
             }
             if (targetHouse?.pregnancyDppDate.isNullOrBlank() && dupHouse.pregnancyDppDate.isNotBlank()) {
                 mergePayload["pregnancyDppDate"] = dupHouse.pregnancyDppDate
+            }
+            if (targetHouse?.babyName.isNullOrBlank() && dupHouse.babyName.isNotBlank()) {
+                mergePayload["babyName"] = dupHouse.babyName
+            }
+            if ((targetHouse?.babyGender.isNullOrBlank() || targetHouse?.babyGender == "SURPRESA") &&
+                dupHouse.babyGender.isNotBlank() && dupHouse.babyGender != "SURPRESA"
+            ) {
+                mergePayload["babyGender"] = dupHouse.babyGender
+            }
+            if (targetHouse?.geminiApiKey.isNullOrBlank() && dupHouse.geminiApiKey.isNotBlank()) {
+                mergePayload["geminiApiKey"] = dupHouse.geminiApiKey
+            }
+            if (dupHouse.memberHealthSettings.isNotEmpty()) {
+                mergePayload["memberHealthSettings"] = dupHouse.memberHealthSettings + targetHouse?.memberHealthSettings.orEmpty()
             }
             if (targetHouse?.insulinConfigs.isNullOrEmpty() && dupHouse.insulinConfigs.isNotEmpty()) {
                 mergePayload["insulinConfigs"] = dupHouse.insulinConfigs.map { cfg ->
@@ -955,16 +989,35 @@ class AuraFirestoreRepository(
                 )
 
                 val customRepo = CustomizationRepository(ctx)
-                val currentCustom = customRepo.configFlow.value
-                val cloudDpp = remoteHousehold.pregnancyDppDate.trim()
-                val cloudMode = remoteHousehold.pregnancyComparisonMode.trim().uppercase(Locale.ROOT)
-                if (cloudDpp.isNotBlank() || cloudMode.isNotBlank()) {
-                    customRepo.updatePregnancyModule(
-                        enabled = if (cloudDpp.isNotBlank()) true else currentCustom.pregnancyEnabled,
-                        dppDate = cloudDpp.ifBlank { currentCustom.pregnancyDppDate },
-                        notes = currentCustom.pregnancyNotes,
-                        comparisonMode = cloudMode.ifBlank { currentCustom.pregnancyComparisonMode }
-                    )
+                customRepo.bindActiveMemberAndSyncHealthSettings(
+                    userId = uid,
+                    remoteMemberSettings = remoteHousehold.memberHealthSettings[uid]
+                )
+                customRepo.syncSharedPregnancyDetailsFromCloud(
+                    dppDate = remoteHousehold.pregnancyDppDate.trim(),
+                    comparisonMode = remoteHousehold.pregnancyComparisonMode.trim().uppercase(Locale.ROOT),
+                    babyName = remoteHousehold.babyName.trim(),
+                    babyGender = remoteHousehold.babyGender.trim().uppercase(Locale.ROOT)
+                )
+                if (remoteHousehold.geminiApiKey.isNotBlank()) {
+                    customRepo.updateGeminiApiKey(remoteHousehold.geminiApiKey.trim())
+                }
+
+                // Pull initial health_documents metadata snapshot
+                runCatching {
+                    val medDocsRepo = MedicalDocumentsRepository(ctx)
+                    val docsSnap = houseRef.collection("health_documents").get().await()
+                    val remoteDocs = docsSnap.documents.mapNotNull { doc ->
+                        val rawJson = doc.getString("payloadJson").orEmpty()
+                        if (rawJson.isNotBlank()) {
+                            runCatching {
+                                MedicalDocumentsRepository.parseRecordFromJson(org.json.JSONObject(rawJson))
+                            }.getOrNull()
+                        } else null
+                    }
+                    if (remoteDocs.isNotEmpty()) {
+                        medDocsRepo.mergeImportedDocuments(remoteDocs)
+                    }
                 }
             }
         }
@@ -1716,27 +1769,155 @@ class AuraFirestoreRepository(
     suspend fun updateHouseholdPregnancyConfig(
         householdId: String,
         dppDate: String,
-        comparisonMode: String
+        comparisonMode: String,
+        babyName: String? = null,
+        babyGender: String? = null
     ): Result<Unit> {
         val cleanDpp = dppDate.trim().take(20)
         val cleanMode = when (comparisonMode.trim().uppercase(Locale.ROOT)) {
             "DOCE", "FRUTA", "ANIMAL", "TODOS" -> comparisonMode.trim().uppercase(Locale.ROOT)
             else -> "TODOS"
         }
+        val cleanBabyName = babyName?.trim()?.take(60)
+        val cleanBabyGender = babyGender?.trim()?.uppercase(Locale.ROOT)?.let {
+            if (it in listOf("MENINO", "MENINA", "SURPRESA")) it else "SURPRESA"
+        }
+        localStore?.updateHouseholdPregnancyAndBabyConfig(
+            dppDate = cleanDpp,
+            comparisonMode = cleanMode,
+            babyName = cleanBabyName ?: localStore.householdFlow.value.babyName,
+            babyGender = cleanBabyGender ?: localStore.householdFlow.value.babyGender
+        )
         if (isLocalOfflineMode() || householdId.isBlank()) {
             return Result.success(Unit)
         }
         var docPath = "households/$householdId"
         return try {
-            requireUserId()
+            val uid = requireUserId()
             val ref = db.collection("households").document(householdId)
             docPath = ref.path
-            ref.update(
+            val updates = mutableMapOf<String, Any>(
+                "pregnancyDppDate" to cleanDpp,
+                "pregnancyComparisonMode" to cleanMode,
+                "memberUids" to FieldValue.arrayUnion(uid),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (cleanBabyName != null) {
+                updates["babyName"] = cleanBabyName
+            }
+            if (cleanBabyGender != null) {
+                updates["babyGender"] = cleanBabyGender
+            }
+            ref.set(updates, SetOptions.merge()).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateHouseholdBabyIdentity(
+        householdId: String,
+        babyName: String,
+        babyGender: String
+    ): Result<Unit> {
+        val cleanName = babyName.trim().take(60)
+        val cleanGender = when (babyGender.trim().uppercase(Locale.ROOT)) {
+            "MENINO", "MENINA", "SURPRESA" -> babyGender.trim().uppercase(Locale.ROOT)
+            else -> "SURPRESA"
+        }
+        localStore?.let { store ->
+            val current = store.householdFlow.value
+            store.updateHouseholdPregnancyAndBabyConfig(
+                dppDate = current.pregnancyDppDate,
+                comparisonMode = current.pregnancyComparisonMode,
+                babyName = cleanName,
+                babyGender = cleanGender
+            )
+        }
+        if (isLocalOfflineMode() || householdId.isBlank()) {
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            val uid = requireUserId()
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.set(
                 mapOf(
-                    "pregnancyDppDate" to cleanDpp,
-                    "pregnancyComparisonMode" to cleanMode,
+                    "babyName" to cleanName,
+                    "babyGender" to cleanGender,
+                    "memberUids" to FieldValue.arrayUnion(uid),
                     "updatedAt" to FieldValue.serverTimestamp()
-                )
+                ),
+                SetOptions.merge()
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateHouseholdGeminiApiKey(
+        householdId: String,
+        geminiApiKey: String
+    ): Result<Unit> {
+        val cleanKey = geminiApiKey.trim().take(200)
+        localStore?.updateHouseholdGeminiApiKey(cleanKey)
+        if (isLocalOfflineMode() || householdId.isBlank()) {
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            val uid = requireUserId()
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            ref.set(
+                mapOf(
+                    "geminiApiKey" to cleanKey,
+                    "memberUids" to FieldValue.arrayUnion(uid),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                ),
+                SetOptions.merge()
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateMemberHealthSettings(
+        householdId: String,
+        currentHousehold: Household?,
+        memberUid: String,
+        settings: Map<String, Boolean>
+    ): Result<Unit> {
+        val cleanMemberUid = memberUid.trim()
+        if (isLocalOfflineMode() || householdId.isBlank() || cleanMemberUid.isBlank()) {
+            return Result.success(Unit)
+        }
+        var docPath = "households/$householdId"
+        return try {
+            val uid = requireUserId()
+            val ref = db.collection("households").document(householdId)
+            docPath = ref.path
+            val mergedAll = currentHousehold?.memberHealthSettings.orEmpty().toMutableMap()
+            mergedAll[cleanMemberUid] = settings
+            ref.set(
+                mapOf(
+                    "memberHealthSettings" to mergedAll,
+                    "memberUids" to FieldValue.arrayUnion(uid),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                ),
+                SetOptions.merge()
             ).await()
             Result.success(Unit)
         } catch (e: CancellationException) {

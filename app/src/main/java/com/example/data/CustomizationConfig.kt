@@ -135,16 +135,21 @@ data class AppCustomizationConfig(
     val energyMorning: String = EnergyLevel.ALTA,
     val energyAfternoon: String = EnergyLevel.MEDIA,
     val energyNight: String = EnergyLevel.BAIXA,
-    // 3. Módulos de Saúde (switches opcionais)
+    // 3. Módulos de Saúde (switches independentes por membro)
+    val activeMemberUserId: String = "",
     val pregnancyEnabled: Boolean = false,
     val pregnancyDppDate: String = "", // Data Prevista do Parto (DD/MM/AAAA)
     val pregnancyNotes: String = "",
     val pregnancyComparisonMode: String = "TODOS", // "DOCE", "FRUTA", "ANIMAL", "TODOS"
+    val babyName: String = "",
+    val babyGender: String = "SURPRESA", // "MENINO", "MENINA", "SURPRESA"
     val diabetesEnabled: Boolean = false,
     val diabetesSlots: Set<String> = DiabetesSlotCatalog.defaultSelectedSlots,
     val bloodPressureEnabled: Boolean = false,
     val bloodPressureReminderTime: String = "21:30 (Antes de dormir)",
-    val chronicPainFatigueEnabled: Boolean = false, // Ativa o botão "Modo Dia Difícil" somente se marcado no questionário
+    val chronicPainFatigueEnabled: Boolean = false, // Ativa o botão "Modo Dia Difícil" somente se marcado no perfil do membro
+    // Chave da API Gemini sincronizada na família (sem hardcode)
+    val geminiApiKey: String = "",
     // 4. Diário e Acolhimento (switches)
     val hourlyMoodEnabled: Boolean = true,
     val threeShiftQuotesEnabled: Boolean = true,
@@ -532,6 +537,17 @@ class CustomizationRepository(context: Context) {
             legacyText
         }
 
+        val activeMemberUid = (prefs.getString(KEY_ACTIVE_MEMBER_UID, "") ?: "").trim()
+        fun readMemberBool(baseKey: String, defaultVal: Boolean): Boolean {
+            if (activeMemberUid.isNotBlank()) {
+                val scopedKey = "${baseKey}_$activeMemberUid"
+                if (prefs.contains(scopedKey)) {
+                    return prefs.getBoolean(scopedKey, defaultVal)
+                }
+            }
+            return prefs.getBoolean(baseKey, defaultVal)
+        }
+
         return AppCustomizationConfig(
             presetId = presetId,
             useCustomColors = prefs.getBoolean(KEY_USE_CUSTOM_COLORS, false),
@@ -578,15 +594,20 @@ class CustomizationRepository(context: Context) {
             energyMorning = prefs.getString(KEY_ENERGY_MORNING, EnergyLevel.ALTA) ?: EnergyLevel.ALTA,
             energyAfternoon = prefs.getString(KEY_ENERGY_AFTERNOON, EnergyLevel.MEDIA) ?: EnergyLevel.MEDIA,
             energyNight = prefs.getString(KEY_ENERGY_NIGHT, EnergyLevel.BAIXA) ?: EnergyLevel.BAIXA,
-            pregnancyEnabled = prefs.getBoolean(KEY_PREGNANCY_ENABLED, false),
+            activeMemberUserId = activeMemberUid,
+            pregnancyEnabled = readMemberBool(KEY_PREGNANCY_ENABLED, false),
             pregnancyDppDate = prefs.getString(KEY_PREGNANCY_DPP, "") ?: "",
+            pregnancyNotes = prefs.getString(KEY_PREGNANCY_NOTES, "") ?: "",
             pregnancyComparisonMode = prefs.getString(KEY_PREGNANCY_COMPARISON_MODE, "TODOS") ?: "TODOS",
-            diabetesEnabled = prefs.getBoolean(KEY_DIABETES_ENABLED, false),
+            babyName = (prefs.getString(KEY_BABY_NAME, "") ?: "").trim(),
+            babyGender = normalizeBabyGender(prefs.getString(KEY_BABY_GENDER, "SURPRESA") ?: "SURPRESA"),
+            diabetesEnabled = readMemberBool(KEY_DIABETES_ENABLED, false),
             diabetesSlots = diabetesSlotsSet,
-            bloodPressureEnabled = prefs.getBoolean(KEY_BP_ENABLED, false),
+            bloodPressureEnabled = readMemberBool(KEY_BP_ENABLED, false),
             bloodPressureReminderTime = prefs.getString(KEY_BP_REMINDER_TIME, "21:30 (Antes de dormir)")
                 ?: "21:30 (Antes de dormir)",
-            chronicPainFatigueEnabled = prefs.getBoolean(KEY_PAIN_FATIGUE_ENABLED, false),
+            chronicPainFatigueEnabled = readMemberBool(KEY_PAIN_FATIGUE_ENABLED, false),
+            geminiApiKey = (prefs.getString(KEY_GEMINI_API_KEY, "") ?: "").trim(),
             hourlyMoodEnabled = prefs.getBoolean(KEY_HOURLY_MOOD_ENABLED, true),
             threeShiftQuotesEnabled = prefs.getBoolean(KEY_THREE_SHIFT_QUOTES_ENABLED, true),
             aiSupportLetterEnabled = prefs.getBoolean(KEY_AI_SUPPORT_LETTER_ENABLED, true),
@@ -645,7 +666,8 @@ class CustomizationRepository(context: Context) {
     }
 
     private fun saveAndEmit(updated: AppCustomizationConfig) {
-        prefs.edit()
+        val activeUid = updated.activeMemberUserId.trim()
+        val editor = prefs.edit()
             .putString(KEY_PRESET_ID, updated.presetId)
             .putBoolean(KEY_USE_CUSTOM_COLORS, updated.useCustomColors)
             .putLong(KEY_BG_HEX, updated.backgroundHex)
@@ -683,14 +705,19 @@ class CustomizationRepository(context: Context) {
             .putString(KEY_ENERGY_MORNING, updated.energyMorning)
             .putString(KEY_ENERGY_AFTERNOON, updated.energyAfternoon)
             .putString(KEY_ENERGY_NIGHT, updated.energyNight)
+            .putString(KEY_ACTIVE_MEMBER_UID, activeUid)
             .putBoolean(KEY_PREGNANCY_ENABLED, updated.pregnancyEnabled)
             .putString(KEY_PREGNANCY_DPP, updated.pregnancyDppDate)
+            .putString(KEY_PREGNANCY_NOTES, updated.pregnancyNotes)
             .putString(KEY_PREGNANCY_COMPARISON_MODE, updated.pregnancyComparisonMode)
+            .putString(KEY_BABY_NAME, updated.babyName.trim())
+            .putString(KEY_BABY_GENDER, normalizeBabyGender(updated.babyGender))
             .putBoolean(KEY_DIABETES_ENABLED, updated.diabetesEnabled)
             .putString(KEY_DIABETES_SLOTS, updated.diabetesSlots.joinToString("|"))
             .putBoolean(KEY_BP_ENABLED, updated.bloodPressureEnabled)
             .putString(KEY_BP_REMINDER_TIME, updated.bloodPressureReminderTime)
             .putBoolean(KEY_PAIN_FATIGUE_ENABLED, updated.chronicPainFatigueEnabled)
+            .putString(KEY_GEMINI_API_KEY, updated.geminiApiKey.trim())
             .putBoolean(KEY_HOURLY_MOOD_ENABLED, updated.hourlyMoodEnabled)
             .putBoolean(KEY_THREE_SHIFT_QUOTES_ENABLED, updated.threeShiftQuotesEnabled)
             .putBoolean(KEY_AI_SUPPORT_LETTER_ENABLED, updated.aiSupportLetterEnabled)
@@ -702,7 +729,16 @@ class CustomizationRepository(context: Context) {
             .putInt(KEY_MORNING_SUMMARY_HOUR, updated.morningSummaryHour)
             .putInt(KEY_MORNING_SUMMARY_MINUTE, updated.morningSummaryMinute)
             .putBoolean(KEY_FINANCE_PRIVACY_HIDE_VALUES, updated.financePrivacyHideValues)
-            .apply()
+
+        if (activeUid.isNotBlank()) {
+            editor
+                .putBoolean("${KEY_PREGNANCY_ENABLED}_$activeUid", updated.pregnancyEnabled)
+                .putBoolean("${KEY_DIABETES_ENABLED}_$activeUid", updated.diabetesEnabled)
+                .putBoolean("${KEY_BP_ENABLED}_$activeUid", updated.bloodPressureEnabled)
+                .putBoolean("${KEY_PAIN_FATIGUE_ENABLED}_$activeUid", updated.chronicPainFatigueEnabled)
+        }
+        editor.apply()
+
         OmniBackupAndMigrationManager.setWidgetFinanceBalanceHidden(appContext, updated.financePrivacyHideValues)
         _configFlow.value = updated
         com.example.widget.OmniHomeWidgetProvider.requestUpdate(appContext)
@@ -850,7 +886,9 @@ class CustomizationRepository(context: Context) {
         enabled: Boolean,
         dppDate: String = _configFlow.value.pregnancyDppDate,
         notes: String = _configFlow.value.pregnancyNotes,
-        comparisonMode: String = _configFlow.value.pregnancyComparisonMode
+        comparisonMode: String = _configFlow.value.pregnancyComparisonMode,
+        babyName: String = _configFlow.value.babyName,
+        babyGender: String = _configFlow.value.babyGender
     ) {
         val current = _configFlow.value
         val validMode = when (comparisonMode.uppercase()) {
@@ -862,8 +900,140 @@ class CustomizationRepository(context: Context) {
                 pregnancyEnabled = enabled,
                 pregnancyDppDate = dppDate,
                 pregnancyNotes = notes,
-                pregnancyComparisonMode = validMode
+                pregnancyComparisonMode = validMode,
+                babyName = babyName.trim(),
+                babyGender = normalizeBabyGender(babyGender)
             )
+        )
+    }
+
+    fun updateBabyIdentity(
+        babyName: String,
+        babyGender: String
+    ) {
+        val current = _configFlow.value
+        saveAndEmit(
+            current.copy(
+                babyName = babyName.trim(),
+                babyGender = normalizeBabyGender(babyGender)
+            )
+        )
+    }
+
+    /**
+     * Sincroniza dados compartilhados da gestação (DPP, modo do comparador, nome e sexo do bebê)
+     * vindos da nuvem SEM alterar o switch individual pregnancyEnabled deste membro.
+     */
+    fun syncSharedPregnancyDetailsFromCloud(
+        dppDate: String,
+        comparisonMode: String,
+        babyName: String,
+        babyGender: String
+    ) {
+        val current = _configFlow.value
+        val validMode = when (comparisonMode.uppercase()) {
+            "DOCE", "FRUTA", "ANIMAL", "TODOS" -> comparisonMode.uppercase()
+            else -> current.pregnancyComparisonMode.ifBlank { "TODOS" }
+        }
+        val nextDpp = dppDate.trim().ifBlank { current.pregnancyDppDate }
+        val nextName = babyName.trim().ifBlank { current.babyName }
+        val nextGender = if (babyGender.isNotBlank()) normalizeBabyGender(babyGender) else current.babyGender
+        if (current.pregnancyDppDate == nextDpp &&
+            current.pregnancyComparisonMode == validMode &&
+            current.babyName == nextName &&
+            current.babyGender == nextGender
+        ) {
+            return
+        }
+        saveAndEmit(
+            current.copy(
+                pregnancyDppDate = nextDpp,
+                pregnancyComparisonMode = validMode,
+                babyName = nextName,
+                babyGender = nextGender
+            )
+        )
+    }
+
+    fun updateGeminiApiKey(apiKey: String) {
+        val current = _configFlow.value
+        val cleanKey = apiKey.trim()
+        if (current.geminiApiKey == cleanKey) return
+        saveAndEmit(current.copy(geminiApiKey = cleanKey))
+    }
+
+    /**
+     * Vincula os switches de Módulos de Saúde ao UID do membro autenticado (ex.: Marcus vs Nathalia),
+     * garantindo que desativar Gestação ou Glicemia em um celular jamais desative no outro.
+     */
+    fun bindActiveMemberAndSyncHealthSettings(
+        userId: String,
+        remoteMemberSettings: Map<String, Boolean>? = null
+    ) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return
+        val current = _configFlow.value
+        val hasLocalScopedKeys = prefs.contains("${KEY_PREGNANCY_ENABLED}_$cleanUid") ||
+            prefs.contains("${KEY_DIABETES_ENABLED}_$cleanUid") ||
+            prefs.contains("${KEY_BP_ENABLED}_$cleanUid") ||
+            prefs.contains("${KEY_PAIN_FATIGUE_ENABLED}_$cleanUid")
+
+        val nextPregnancy = when {
+            remoteMemberSettings != null && "pregnancyEnabled" in remoteMemberSettings ->
+                remoteMemberSettings["pregnancyEnabled"] == true
+            hasLocalScopedKeys ->
+                prefs.getBoolean("${KEY_PREGNANCY_ENABLED}_$cleanUid", current.pregnancyEnabled)
+            else -> current.pregnancyEnabled
+        }
+        val nextDiabetes = when {
+            remoteMemberSettings != null && "diabetesEnabled" in remoteMemberSettings ->
+                remoteMemberSettings["diabetesEnabled"] == true
+            hasLocalScopedKeys ->
+                prefs.getBoolean("${KEY_DIABETES_ENABLED}_$cleanUid", current.diabetesEnabled)
+            else -> current.diabetesEnabled
+        }
+        val nextBp = when {
+            remoteMemberSettings != null && "bloodPressureEnabled" in remoteMemberSettings ->
+                remoteMemberSettings["bloodPressureEnabled"] == true
+            hasLocalScopedKeys ->
+                prefs.getBoolean("${KEY_BP_ENABLED}_$cleanUid", current.bloodPressureEnabled)
+            else -> current.bloodPressureEnabled
+        }
+        val nextPain = when {
+            remoteMemberSettings != null && "chronicPainFatigueEnabled" in remoteMemberSettings ->
+                remoteMemberSettings["chronicPainFatigueEnabled"] == true
+            hasLocalScopedKeys ->
+                prefs.getBoolean("${KEY_PAIN_FATIGUE_ENABLED}_$cleanUid", current.chronicPainFatigueEnabled)
+            else -> current.chronicPainFatigueEnabled
+        }
+
+        if (current.activeMemberUserId == cleanUid &&
+            current.pregnancyEnabled == nextPregnancy &&
+            current.diabetesEnabled == nextDiabetes &&
+            current.bloodPressureEnabled == nextBp &&
+            current.chronicPainFatigueEnabled == nextPain
+        ) {
+            return
+        }
+
+        saveAndEmit(
+            current.copy(
+                activeMemberUserId = cleanUid,
+                pregnancyEnabled = nextPregnancy,
+                diabetesEnabled = nextDiabetes,
+                bloodPressureEnabled = nextBp,
+                chronicPainFatigueEnabled = nextPain
+            )
+        )
+    }
+
+    fun currentMemberHealthSettingsMap(): Map<String, Boolean> {
+        val c = _configFlow.value
+        return mapOf(
+            "pregnancyEnabled" to c.pregnancyEnabled,
+            "diabetesEnabled" to c.diabetesEnabled,
+            "bloodPressureEnabled" to c.bloodPressureEnabled,
+            "chronicPainFatigueEnabled" to c.chronicPainFatigueEnabled
         )
     }
 
@@ -1388,5 +1558,18 @@ class CustomizationRepository(context: Context) {
         private const val KEY_PROFILE_AVATAR_BASE64 = "profile_avatar_base64"
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_PREGNANCY_COMPARISON_MODE = "pregnancy_comparison_mode"
+        private const val KEY_PREGNANCY_NOTES = "pregnancy_notes"
+        private const val KEY_ACTIVE_MEMBER_UID = "active_member_uid"
+        private const val KEY_BABY_NAME = "pregnancy_baby_name"
+        private const val KEY_BABY_GENDER = "pregnancy_baby_gender"
+        private const val KEY_GEMINI_API_KEY = "family_gemini_api_key"
+
+        fun normalizeBabyGender(raw: String): String {
+            return when (raw.trim().uppercase()) {
+                "MENINO", "MASCULINO", "M" -> "MENINO"
+                "MENINA", "FEMININO", "F" -> "MENINA"
+                else -> "SURPRESA"
+            }
+        }
     }
 }

@@ -3,6 +3,12 @@
     <cache-path
         name="apk_exports"
         path="apk_exports/" />
+    <cache-path
+        name="camera_captures"
+        path="camera_captures/" />
+    <cache-path
+        name="cache_root"
+        path="." />
     <files-path
         name="internal_files"
         path="." />

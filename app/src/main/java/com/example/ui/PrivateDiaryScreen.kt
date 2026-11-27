@@ -83,6 +83,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.AppCustomizationConfig
 import com.example.data.DayShift
 import com.example.data.MoodOption
+import com.example.data.DiaryLetterRecord
 import com.example.data.PrivateDiaryCatalog
 import com.example.data.PrivateDiaryEntry
 import com.example.data.PrivateDiaryRepository
@@ -845,6 +846,7 @@ fun PrivateDiaryScreen(
                 ) {
                     SupportLetterGeneratorCard(
                         diaryState = diaryState,
+                        hasProfileApiKey = customizationConfig.geminiApiKey.isNotBlank(),
                         activeLetter = activeLetter,
                         isGenerating = isGeneratingLetter,
                         showHistory = showSavedLettersHistory,
@@ -856,7 +858,8 @@ fun PrivateDiaryScreen(
                                     userName = customizationConfig.profileName.takeIf {
                                         it.isNotBlank() && !it.equals("Você", ignoreCase = true)
                                     } ?: "Membro",
-                                    targetEpochDay = selectedDayEpoch
+                                    targetEpochDay = selectedDayEpoch,
+                                    overrideApiKey = customizationConfig.geminiApiKey
                                 )
                                 activeLetter = generated
                                 isGeneratingLetter = false
@@ -872,6 +875,43 @@ fun PrivateDiaryScreen(
                         onOpenApiKeyConfig = { showApiKeyConfigDialog = true }
                     )
                 }
+            }
+        }
+
+        // 3B. CARTA DO DIÁRIO (Cartas autorais para o Bebê, Família ou Futuro — sincronizadas na nuvem)
+        item {
+            AuraExpandableSectionCard(
+                title = "✉️ Carta do Diário (Para o Bebê, Família & Futuro)",
+                subtitle = "Escreva e guarde cartas afetivas sincronizadas com segurança na sua família",
+                icon = Icons.Default.EditNote,
+                accentColor = Color(customizationConfig.diaryColorHex),
+                badgeText = "${diaryState.diaryLetters.size} cartas",
+                initiallyExpanded = false,
+                testTag = "expandable_diary_letters_section"
+            ) {
+                PersonalDiaryLettersCard(
+                    letters = diaryState.diaryLetters,
+                    defaultAuthorName = customizationConfig.profileName.takeIf {
+                        it.isNotBlank() && !it.equals("Você", ignoreCase = true)
+                    } ?: "Família",
+                    babyNameHint = customizationConfig.babyName,
+                    selectedEpochDay = selectedDayEpoch,
+                    onSaveLetter = { title, recipientLabel, bodyText ->
+                        diaryRepo.saveDiaryLetter(
+                            title = title,
+                            content = bodyText,
+                            recipientLabel = recipientLabel,
+                            authorName = customizationConfig.profileName.takeIf {
+                                it.isNotBlank() && !it.equals("Você", ignoreCase = true)
+                            } ?: "Família"
+                        )
+                        triggerFeedback("Carta do Diário salva e sincronizada!")
+                    },
+                    onDeleteLetter = { id ->
+                        diaryRepo.deleteDiaryLetter(id)
+                        triggerFeedback("Carta do Diário removida.")
+                    }
+                )
             }
         }
 
@@ -1337,8 +1377,10 @@ fun PrivateDiaryScreen(
     if (showApiKeyConfigDialog) {
         LocalGeminiApiKeyDialog(
             diaryRepo = diaryRepo,
+            initialProfileKey = customizationConfig.geminiApiKey,
             onDismiss = { showApiKeyConfigDialog = false },
-            onSaved = {
+            onSaved = { updatedKey ->
+                customizationRepo?.updateGeminiApiKey(updatedKey)
                 showApiKeyConfigDialog = false
                 triggerFeedback("Configuração da chave Gemini atualizada com segurança!")
             }
@@ -1491,9 +1533,150 @@ private fun PrivateDiaryTimelineItemCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PersonalDiaryLettersCard(
+    letters: List<DiaryLetterRecord>,
+    defaultAuthorName: String,
+    babyNameHint: String,
+    selectedEpochDay: Long,
+    onSaveLetter: (title: String, recipientLabel: String, bodyText: String) -> Unit,
+    onDeleteLetter: (String) -> Unit
+) {
+    val cardRadius = LocalOrganicCardRadius.current
+    val recipientPresets = remember(babyNameHint) {
+        val babyChip = if (babyNameHint.isNotBlank()) "Para ${babyNameHint.trim()}" else "Para o Bebê"
+        listOf(babyChip, "Para a Família", "Para o Futuro", "Memória Especial")
+    }
+    var selectedRecipient by remember(recipientPresets) { mutableStateOf(recipientPresets.first()) }
+    var titleInput by remember { mutableStateOf("") }
+    var bodyInput by remember { mutableStateOf("") }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = "Destinatário da carta:",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            recipientPresets.forEach { preset ->
+                FilterChip(
+                    selected = selectedRecipient == preset,
+                    onClick = { selectedRecipient = preset },
+                    label = { Text(preset) }
+                )
+            }
+        }
+        OutlinedTextField(
+            value = titleInput,
+            onValueChange = { titleInput = it },
+            label = { Text("Título da Carta") },
+            placeholder = { Text("Ex.: O dia em que ouvimos seu coração...") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("input_diary_letter_title")
+        )
+        OutlinedTextField(
+            value = bodyInput,
+            onValueChange = { bodyInput = it },
+            label = { Text("Mensagem da Carta") },
+            placeholder = { Text("Escreva com carinho suas memórias, desejos e sentimentos...") },
+            minLines = 3,
+            maxLines = 8,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("input_diary_letter_body")
+        )
+        Button(
+            onClick = {
+                if (bodyInput.isNotBlank()) {
+                    onSaveLetter(titleInput.trim(), selectedRecipient, bodyInput.trim())
+                    titleInput = ""
+                    bodyInput = ""
+                }
+            },
+            enabled = bodyInput.isNotBlank(),
+            shape = RoundedCornerShape(50),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("btn_save_personal_diary_letter")
+        ) {
+            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("Salvar Carta do Diário", fontWeight = FontWeight.ExtraBold)
+        }
+
+        if (letters.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Cartas Guardadas (${letters.size})",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.ExtraBold
+            )
+            letters.forEach { letter ->
+                val datePt = remember(letter.dateIso) {
+                    runCatching {
+                        LocalDate.parse(letter.dateIso)
+                            .format(DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale("pt", "BR")))
+                    }.getOrDefault(letter.dateIso)
+                }
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(cardRadius),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = letter.title,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                                Text(
+                                    text = "${letter.recipientLabel} • $datePt • Por ${letter.authorName.ifBlank { defaultAuthorName }}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            IconButton(onClick = { onDeleteLetter(letter.id) }) {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteOutline,
+                                    contentDescription = "Excluir carta",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = letter.content,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun SupportLetterGeneratorCard(
     diaryState: PrivateDiaryState,
+    hasProfileApiKey: Boolean = false,
     activeLetter: SupportLetterRecord?,
     isGenerating: Boolean,
     showHistory: Boolean,
@@ -1549,10 +1732,10 @@ private fun SupportLetterGeneratorCard(
                             fontWeight = FontWeight.ExtraBold
                         )
                         Text(
-                            text = if (diaryState.hasLocalApiKeyConfigured) {
-                                "Gemini API ativa • Baseada nos seus humores e sintomas recentes"
+                            text = if (diaryState.hasLocalApiKeyConfigured || hasProfileApiKey) {
+                                "Gemini 2.5 Flash ativa (sincronizada com o Perfil) • Baseada nos seus humores e sintomas"
                             } else {
-                                "Analisa seu humor e sintomas recentes (com suporte a Gemini API e modo offline)"
+                                "Analisa seu humor e sintomas recentes (configure a Chave Gemini no Perfil ou toque na chave ao lado)"
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2230,25 +2413,26 @@ private fun FamilyMuralSharedSubScreen(
 @Composable
 private fun LocalGeminiApiKeyDialog(
     diaryRepo: PrivateDiaryRepository,
+    initialProfileKey: String = "",
     onDismiss: () -> Unit,
-    onSaved: () -> Unit
+    onSaved: (String) -> Unit
 ) {
-    var keyInput by remember {
-        mutableStateOf(diaryRepo.getConfiguredGeminiApiKey())
+    var keyInput by remember(initialProfileKey) {
+        mutableStateOf(initialProfileKey.ifBlank { diaryRepo.getConfiguredGeminiApiKey() })
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "Chave da API Gemini (Opcional)",
+                text = "Chave da API Gemini (Perfil & Diário)",
                 fontWeight = FontWeight.ExtraBold
             )
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "O aplicativo lê automaticamente a chave GEMINI_API_KEY via BuildConfig (painel Secrets do AI Studio). Se preferir, você também pode informar uma chave local abaixo. Caso fique em branco ou offline, o app usa o gerador empático local automaticamente.",
+                    text = "Esta chave Gemini 2.5 Flash é compartilhada entre a Central de Documentos Médicos e a Carta de Apoio via IA. Caso fique em branco ou offline, o Diário usa o gerador empático local automaticamente.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -2266,8 +2450,9 @@ private fun LocalGeminiApiKeyDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    diaryRepo.saveLocalGeminiApiKey(keyInput)
-                    onSaved()
+                    val trimmed = keyInput.trim()
+                    diaryRepo.saveLocalGeminiApiKey(trimmed)
+                    onSaved(trimmed)
                 }
             ) {
                 Text("Salvar")

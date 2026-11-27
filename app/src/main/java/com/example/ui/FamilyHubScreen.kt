@@ -209,7 +209,8 @@ fun FamilyHubScreen(
     onToggleMuralItem: (String) -> Unit = {},
     onAddQuickMuralItem: (String) -> Unit = {},
     customizationRepo: com.example.data.CustomizationRepository? = null,
-    onSyncPregnancyConfigToCloud: (dppDate: String, comparisonMode: String) -> Unit = { _, _ -> }
+    onSyncPregnancyConfigToCloud: (dppDate: String, comparisonMode: String) -> Unit = { _, _ -> },
+    onSyncBabyIdentityToCloud: (babyName: String, babyGender: String) -> Unit = { _, _ -> }
 ) {
     val cardRadius = LocalOrganicCardRadius.current
     val hideFinanceValues = com.example.ui.theme.LocalFinancePrivacyHideValues.current
@@ -887,17 +888,23 @@ fun FamilyHubScreen(
             }
         }
 
-        // Card de Gestação (DPP) com Comparador (Doce / Fruta / Animal) e Próximo Marco no Hub
+        // Card de Gestação (DPP) Expansível com Comparador (Doce / Fruta / Animal) e Próximo Marco no Hub
         val effectiveDppDate = household.pregnancyDppDate.ifBlank { customizationConfig.pregnancyDppDate }
         val effectiveComparisonMode = household.pregnancyComparisonMode.ifBlank {
             customizationConfig.pregnancyComparisonMode.ifBlank { "Todos" }
         }
-        if (customizationConfig.pregnancyEnabled || effectiveDppDate.isNotBlank()) {
+        val effectiveBabyName = customizationConfig.babyName.ifBlank { household.babyName }
+        val effectiveBabyGender = customizationConfig.babyGender.ifBlank { household.babyGender.ifBlank { "SURPRESA" } }
+        if (customizationConfig.pregnancyEnabled) {
             item(key = "hub_bento_pregnancy_dpp") {
                 OmniPregnancyHeroCard(
                     dppDateRaw = effectiveDppDate,
                     comparisonMode = effectiveComparisonMode,
                     accentColor = Color(0xFFD84B72),
+                    babyName = effectiveBabyName,
+                    babyGender = effectiveBabyGender,
+                    expandableInHub = true,
+                    initiallyExpanded = false,
                     onSelectComparisonMode = { newMode ->
                         customizationRepo?.updatePregnancyComparisonMode(newMode)
                         onSyncPregnancyConfigToCloud(effectiveDppDate, newMode)
@@ -1346,17 +1353,24 @@ fun FamilyHubScreen(
         val currentMode = household.pregnancyComparisonMode.ifBlank {
             customizationConfig.pregnancyComparisonMode.ifBlank { "TODOS" }
         }
+        val currentBabyName = customizationConfig.babyName.ifBlank { household.babyName }
+        val currentBabyGender = customizationConfig.babyGender.ifBlank { household.babyGender.ifBlank { "SURPRESA" } }
         EditDppAndUltrasoundDialog(
             initialDppDate = currentDpp,
-            initialPregnancyEnabled = customizationConfig.pregnancyEnabled || currentDpp.isNotBlank(),
+            initialPregnancyEnabled = customizationConfig.pregnancyEnabled,
+            initialBabyName = currentBabyName,
+            initialBabyGender = currentBabyGender,
             onDismiss = { showEditPregnancyDppDialog = false },
-            onSave = { enabled, newDpp ->
+            onSave = { _, newDpp, updatedBabyName, updatedBabyGender ->
                 customizationRepo?.updatePregnancyModule(
-                    enabled = enabled,
+                    enabled = customizationConfig.pregnancyEnabled,
                     dppDate = newDpp,
-                    comparisonMode = currentMode
+                    comparisonMode = currentMode,
+                    babyName = updatedBabyName,
+                    babyGender = updatedBabyGender
                 )
                 onSyncPregnancyConfigToCloud(newDpp, currentMode)
+                onSyncBabyIdentityToCloud(updatedBabyName, updatedBabyGender)
                 showEditPregnancyDppDialog = false
             }
         )
@@ -2530,29 +2544,6 @@ private fun SmartwatchHealthWidget(
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        if (customizationConfig.diabetesEnabled) {
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "💉 $latestInsulinBanner",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = when {
-                                    timer.completedAlertPending -> "🔔 Alarme ${timer.mealLabel}! Hora de medir a glicemia"
-                                    timer.isRunning && !timer.isPaused -> "⏱️ Cronômetro ${timer.mealLabel}: $formattedCountdown restantes"
-                                    timer.pausedRemainingMillis > 0L -> "⏸️ Cronômetro pausado ($formattedCountdown)"
-                                    else -> "⏱️ Cronômetro Pós-Refeição 1h (60:00) pronto"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = if (timer.completedAlertPending) ExpenseCoral else ringColor
-                            )
-                        }
                     }
                 }
 
@@ -2560,6 +2551,71 @@ private fun SmartwatchHealthWidget(
                     expanded = expanded,
                     accentColor = ringColor
                 )
+            }
+
+            // Minimalist Water Tracker Strip (Separado da Glicemia — sempre visível)
+            val waterTracker = remember(healthState.trackers) {
+                healthState.trackers.firstOrNull {
+                    it.id == "tracker_water" || it.title.contains("Água", ignoreCase = true)
+                }
+            }
+            val waterTarget = (waterTracker?.targetValue ?: 8).coerceAtLeast(1)
+            val waterCurrent = if (waterTracker != null) {
+                healthState.progressForTracker(todayIso, waterTracker.id)
+            } else {
+                0
+            }
+            val remainingWaterCups = (waterTarget - waterCurrent).coerceAtLeast(0)
+
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF0077B6).copy(alpha = 0.08f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 18.dp, end = 18.dp, bottom = 10.dp)
+                    .border(1.dp, Color(0xFF0077B6).copy(alpha = 0.25f), RoundedCornerShape(16.dp))
+                    .testTag("hub_minimalist_water_strip")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "💧 Água",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = if (remainingWaterCups > 0) {
+                                "Faltam $remainingWaterCups ${if (remainingWaterCups == 1) "copo" else "copos"}"
+                            } else {
+                                "Meta concluída ✓"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (remainingWaterCups == 0) IncomeEmerald else Color(0xFF0077B6)
+                        )
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            val trackerId = waterTracker?.id ?: "tracker_water"
+                            onIncrementTracker(todayIso, trackerId, 1)
+                        },
+                        shape = RoundedCornerShape(50),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                        modifier = Modifier.testTag("hub_water_plus_one_btn")
+                    ) {
+                        Text("+1", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
             }
 
             // Always-visible Quick Glucose + Insulin + 1h Timer Strip in the Hub when collapsed

@@ -1379,21 +1379,240 @@ class AuraViewModel(
         }
     }
 
+    fun showStatusMessage(message: String) {
+        if (message.isNotBlank()) {
+            _statusBannerMessage.value = message
+        }
+    }
+
     fun updateHouseholdPregnancyConfig(
         dppDate: String,
         comparisonMode: String,
+        babyName: String? = null,
+        babyGender: String? = null,
         showConfirmationBanner: Boolean = false
     ) {
         viewModelScope.launch {
             val result = repository.updateHouseholdPregnancyConfig(
                 householdId = currentHouseholdId(),
                 dppDate = dppDate,
-                comparisonMode = comparisonMode
+                comparisonMode = comparisonMode,
+                babyName = babyName,
+                babyGender = babyGender
             )
             if (showConfirmationBanner) {
                 result.onSuccess {
-                    _statusBannerMessage.value = "DPP e comparador da gestação sincronizados com a família!"
+                    _statusBannerMessage.value = "DPP e dados da gestação sincronizados com a família!"
                 }
+            }
+        }
+    }
+
+    fun updateHouseholdBabyIdentity(
+        babyName: String,
+        babyGender: String,
+        showConfirmationBanner: Boolean = false
+    ) {
+        viewModelScope.launch {
+            val result = repository.updateHouseholdBabyIdentity(
+                householdId = currentHouseholdId(),
+                babyName = babyName,
+                babyGender = babyGender
+            )
+            if (showConfirmationBanner) {
+                result.onSuccess {
+                    _statusBannerMessage.value = "Nome e sexo do bebê sincronizados com toda a família!"
+                }
+            }
+        }
+    }
+
+    fun updateHouseholdGeminiApiKey(
+        geminiApiKey: String,
+        showConfirmationBanner: Boolean = true
+    ) {
+        viewModelScope.launch {
+            val result = repository.updateHouseholdGeminiApiKey(
+                householdId = currentHouseholdId(),
+                geminiApiKey = geminiApiKey
+            )
+            if (showConfirmationBanner) {
+                result.onSuccess {
+                    _statusBannerMessage.value = if (geminiApiKey.isNotBlank()) {
+                        "Chave API Gemini salva e sincronizada com a família!"
+                    } else {
+                        "Chave API Gemini removida."
+                    }
+                }
+            }
+        }
+    }
+
+    fun syncMemberHealthSettingsToCloud(settings: Map<String, Boolean>) {
+        viewModelScope.launch {
+            repository.updateMemberHealthSettings(
+                householdId = currentHouseholdId(),
+                currentHousehold = currentHousehold(),
+                memberUid = currentUserId,
+                settings = settings
+            )
+        }
+    }
+
+    fun scheduleOrUpdateMedicalOrderTask(
+        context: Context,
+        docTitle: String,
+        memberName: String,
+        memberId: String,
+        dateEpochDay: Long,
+        alarmHour: Int,
+        alarmMinute: Int,
+        location: String,
+        notes: String,
+        existingLinkedTaskId: String = "",
+        onTaskLinked: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val houseId = currentHouseholdId()
+            val house = currentHousehold()
+            val matchedMember = house?.members?.firstOrNull {
+                (memberId.isNotBlank() && it.userId == memberId) ||
+                    it.displayName.equals(memberName, ignoreCase = true)
+            }
+            val memberColor = matchedMember?.colorHex?.takeIf { it != 0L } ?: currentMemberColorHex()
+            val memberEmoji = matchedMember?.avatarEmoji?.ifBlank { "🩺" } ?: "🩺"
+            val taskTitle = "🩺 Exame: ${docTitle.trim()} (${memberName.ifBlank { currentUserName() }})"
+            val allTasks = (tasksState.value as? UiState.Success)?.data.orEmpty()
+            val existingTask = if (existingLinkedTaskId.isNotBlank()) {
+                allTasks.firstOrNull { it.id == existingLinkedTaskId }
+            } else null
+
+            if (existingTask != null) {
+                val updateRes = repository.updateTask(
+                    householdId = houseId,
+                    taskId = existingTask.id,
+                    title = taskTitle,
+                    notes = notes,
+                    location = location,
+                    category = "Saúde",
+                    priority = "HIGH",
+                    dateEpochDay = dateEpochDay,
+                    endDateEpochDay = 0L,
+                    alarmHour = alarmHour,
+                    alarmMinute = alarmMinute,
+                    alarmEnabled = true,
+                    privacyScope = PrivacyScope.FAMILY,
+                    estimatedCostBrl = existingTask.estimatedCostBrl,
+                    autoCreateExpenseOnComplete = existingTask.autoCreateExpenseOnComplete,
+                    isEssential = true,
+                    isInbox = false,
+                    durationMinutes = 45,
+                    iconEmoji = "🩺",
+                    taskColorHex = memberColor,
+                    recurrence = TaskRecurrence.ONCE,
+                    recurrenceWeekdays = emptyList(),
+                    subtasks = existingTask.subtasks,
+                    ringtoneCategory = "SAUDE"
+                )
+                updateRes.onSuccess {
+                    AlarmScheduler.scheduleTaskAlarm(
+                        context = context,
+                        taskId = existingTask.id,
+                        title = taskTitle,
+                        category = "Saúde",
+                        dateEpochDay = dateEpochDay,
+                        hour = alarmHour,
+                        minute = alarmMinute,
+                        ringtoneCategory = "SAUDE"
+                    )
+                    com.example.widget.OmniHomeWidgetProvider.requestUpdate(context)
+                    onTaskLinked(existingTask.id)
+                    _statusBannerMessage.value = "Agendamento atualizado na Agenda da Família para ${DateCalendarUtils.formatEpochDayPt(dateEpochDay)} às ${DateCalendarUtils.formatTime(alarmHour, alarmMinute)}!"
+                }
+            } else {
+                val addRes = repository.addTask(
+                    householdId = houseId,
+                    title = taskTitle,
+                    notes = notes,
+                    location = location,
+                    category = "Saúde",
+                    priority = "HIGH",
+                    dateEpochDay = dateEpochDay,
+                    endDateEpochDay = 0L,
+                    alarmHour = alarmHour,
+                    alarmMinute = alarmMinute,
+                    alarmEnabled = true,
+                    privacyScope = PrivacyScope.FAMILY,
+                    assignedMemberId = matchedMember?.userId ?: memberId.ifBlank { currentUserId },
+                    assignedMemberName = memberName.ifBlank { currentUserName() },
+                    assignedMemberColorHex = memberColor,
+                    assignedMemberEmoji = memberEmoji,
+                    createdByName = currentUserName(),
+                    createdByColorHex = currentMemberColorHex(),
+                    isEssential = true,
+                    isInbox = false,
+                    durationMinutes = 45,
+                    iconEmoji = "🩺",
+                    taskColorHex = memberColor,
+                    recurrence = TaskRecurrence.ONCE,
+                    ringtoneCategory = "SAUDE"
+                )
+                addRes.onSuccess { newTaskId ->
+                    AlarmScheduler.scheduleTaskAlarm(
+                        context = context,
+                        taskId = newTaskId,
+                        title = taskTitle,
+                        category = "Saúde",
+                        dateEpochDay = dateEpochDay,
+                        hour = alarmHour,
+                        minute = alarmMinute,
+                        ringtoneCategory = "SAUDE"
+                    )
+                    com.example.widget.OmniHomeWidgetProvider.requestUpdate(context)
+                    onTaskLinked(newTaskId)
+                    _statusBannerMessage.value = "Exame agendado na Agenda da Família para ${DateCalendarUtils.formatEpochDayPt(dateEpochDay)} às ${DateCalendarUtils.formatTime(alarmHour, alarmMinute)}!"
+                }
+            }
+        }
+    }
+
+    fun setLinkedMedicalOrderTaskCompleted(
+        context: Context,
+        linkedTaskId: String,
+        completed: Boolean
+    ) {
+        if (linkedTaskId.isBlank()) return
+        viewModelScope.launch {
+            val allTasks = (tasksState.value as? UiState.Success)?.data.orEmpty()
+            val task = allTasks.firstOrNull { it.id == linkedTaskId }
+            val houseId = task?.householdId?.ifBlank { currentHouseholdId() } ?: currentHouseholdId()
+            val targetEpoch = task?.dateEpochDay ?: DateCalendarUtils.todayEpochDay()
+            repository.toggleTaskCompleted(
+                householdId = houseId,
+                taskId = linkedTaskId,
+                completed = completed,
+                targetDateIso = DateCalendarUtils.formatIsoDate(targetEpoch),
+                completedByUserId = currentUserId,
+                completedByName = currentUserName(),
+                taskForAutoExpense = null
+            ).onSuccess {
+                if (completed) {
+                    AlarmScheduler.cancelTaskAlarm(context, linkedTaskId)
+                }
+                com.example.widget.OmniHomeWidgetProvider.requestUpdate(context)
+            }
+        }
+    }
+
+    fun deleteLinkedMedicalOrderTask(
+        context: Context,
+        linkedTaskId: String
+    ) {
+        if (linkedTaskId.isBlank()) return
+        viewModelScope.launch {
+            AlarmScheduler.cancelTaskAlarm(context, linkedTaskId)
+            repository.deleteTask(currentHouseholdId(), linkedTaskId).onSuccess {
+                com.example.widget.OmniHomeWidgetProvider.requestUpdate(context)
             }
         }
     }

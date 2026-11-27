@@ -2060,6 +2060,51 @@ object PregnancyCalculator {
         return weeklyComparisonTable[clamped] ?: weeklyComparisonTable.getValue(40)
     }
 
+    fun formatBabyArrivalCountdownPt(
+        daysRemaining: Int,
+        babyName: String,
+        babyGender: String
+    ): String {
+        val cleanName = babyName.trim()
+        if (cleanName.isBlank()) {
+            return "Faltam $daysRemaining dias para a chegada do bebê"
+        }
+        return when (babyGender.trim().uppercase(Locale.ROOT)) {
+            "MENINO" -> "Faltam $daysRemaining dias para a chegada do $cleanName"
+            "MENINA" -> "Faltam $daysRemaining dias para a chegada da $cleanName"
+            else -> "Faltam $daysRemaining dias para a chegada de $cleanName"
+        }
+    }
+
+    fun formatBabyComparatorIntroPt(
+        currentWeek: Int,
+        babyName: String,
+        babyGender: String
+    ): String {
+        val cleanName = babyName.trim()
+        if (cleanName.isBlank()) {
+            return "Na semana $currentWeek, o bebê tem o tamanho aproximado de:"
+        }
+        return when (babyGender.trim().uppercase(Locale.ROOT)) {
+            "MENINO" -> "Na semana $currentWeek, o $cleanName tem o tamanho aproximado de:"
+            "MENINA" -> "Na semana $currentWeek, a $cleanName tem o tamanho aproximado de:"
+            else -> "Na semana $currentWeek, $cleanName tem o tamanho aproximado de:"
+        }
+    }
+
+    fun formatBabyDisplayLabelPt(
+        babyName: String,
+        babyGender: String
+    ): String {
+        val cleanName = babyName.trim()
+        val genderLabel = when (babyGender.trim().uppercase(Locale.ROOT)) {
+            "MENINO" -> "Menino"
+            "MENINA" -> "Menina"
+            else -> "Surpresa"
+        }
+        return if (cleanName.isNotBlank()) "$cleanName ($genderLabel)" else "Bebê ($genderLabel)"
+    }
+
     /**
      * Calcula a DPP (DD/MM/AAAA) a partir da data de um Ultrassom e da idade gestacional (semanas e dias) naquele exame.
      */
@@ -2139,8 +2184,8 @@ object PregnancyCalculator {
 
 /**
  * 4. GERADOR DE RELATÓRIO MÉDICO EM PDF (NATIVO ANDROID - android.graphics.pdf.PdfDocument)
- * Consolida histórico de Glicemia (nos 6 períodos oficiais + contexto), Aplicações de Insulina (com local),
- * Pressão Arterial, Inegociáveis Diários e Acompanhamento Gestacional por período.
+ * Consolida histórico de Glicemia (nos 6 períodos oficiais + contexto), Aplicações de Insulina (com local e data pt-BR),
+ * Pressão Arterial, Acompanhamento Gestacional (com nome/sexo do bebê) e Resumos de Ultrassons, Exames e Receitas em uso.
  */
 object MedicalReportPdfGenerator {
 
@@ -2155,15 +2200,28 @@ object MedicalReportPdfGenerator {
         profileName: String,
         periodDays: Int, // 7, 30 ou 365 (Todo o histórico)
         customizationConfig: AppCustomizationConfig,
-        healthState: HealthModuleState
+        healthState: HealthModuleState,
+        medicalDocuments: List<HealthDocumentRecord> = emptyList()
     ): String {
         val todayEpoch = DateCalendarUtils.todayEpochDay()
-        val todayIso = DateCalendarUtils.formatIsoDate(todayEpoch)
         val minEpochDay = todayEpoch - periodDays.toLong()
 
         val filteredGlucose = healthState.glucoseRecords.filter { it.dateEpochDay >= minEpochDay }
         val filteredInsulin = healthState.insulinRecords.filter { it.dateEpochDay >= minEpochDay }
         val filteredBp = healthState.bloodPressureRecords.filter { it.dateEpochDay >= minEpochDay }
+
+        val ultrasounds = medicalDocuments
+            .filter { it.category == HealthDocumentCategory.ULTRASSOM }
+            .sortedByDescending { it.dateEpochDay }
+        val labExams = medicalDocuments
+            .filter { it.category == HealthDocumentCategory.EXAME }
+            .sortedByDescending { it.dateEpochDay }
+        val activePrescriptions = medicalDocuments
+            .filter {
+                it.category == HealthDocumentCategory.RECEITA &&
+                    it.prescriptionStatus.equals(PrescriptionStatus.EM_USO, ignoreCase = true)
+            }
+            .sortedByDescending { it.dateEpochDay }
 
         val periodLabel = when (periodDays) {
             7 -> "Últimos 7 dias"
@@ -2174,10 +2232,8 @@ object MedicalReportPdfGenerator {
         val pdfDocument = PdfDocument()
         val pageWidth = 595 // A4 width in points
         val pageHeight = 842 // A4 height in points
-
-        val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, 1).create()
-        val page = pdfDocument.startPage(pageInfo)
-        val canvas: Canvas = page.canvas
+        val leftMargin = 34f
+        val rightMargin = pageWidth - 34f
 
         val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = AndroidColor.rgb(11, 110, 79)
@@ -2204,6 +2260,11 @@ object MedicalReportPdfGenerator {
             textSize = 9f
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
         }
+        val alertPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = AndroidColor.rgb(185, 28, 28)
+            textSize = 9f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
         val boxFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = AndroidColor.rgb(242, 247, 244)
             style = Paint.Style.FILL
@@ -2213,13 +2274,38 @@ object MedicalReportPdfGenerator {
             strokeWidth = 1f
         }
 
+        var currentPageNumber = 1
+        var currentPage = pdfDocument.startPage(
+            PdfDocument.PageInfo.Builder(pageWidth, pageHeight, currentPageNumber).create()
+        )
+        var canvas: Canvas = currentPage.canvas
         var y = 38f
-        val leftMargin = 34f
-        val rightMargin = pageWidth - 34f
+
+        fun drawFooter(targetCanvas: Canvas, pageNum: Int) {
+            targetCanvas.drawText(
+                "Documento gerado nativamente em PDF pelo aplicativo Omni (com.auramanager.app) • Página $pageNum",
+                leftMargin,
+                pageHeight - 24f,
+                subtitlePaint
+            )
+        }
+
+        fun ensureSpace(requiredHeight: Float) {
+            if (y + requiredHeight > pageHeight - 44f) {
+                drawFooter(canvas, currentPageNumber)
+                pdfDocument.finishPage(currentPage)
+                currentPageNumber++
+                currentPage = pdfDocument.startPage(
+                    PdfDocument.PageInfo.Builder(pageWidth, pageHeight, currentPageNumber).create()
+                )
+                canvas = currentPage.canvas
+                y = 38f
+            }
+        }
 
         // Cabeçalho Clínico
         canvas.drawRoundRect(
-            RectF(leftMargin, y - 16f, rightMargin, y + 46f),
+            RectF(leftMargin, y - 16f, rightMargin, y + 48f),
             12f,
             12f,
             boxFillPaint
@@ -2237,14 +2323,20 @@ object MedicalReportPdfGenerator {
                 add("Glicemia (6 Períodos) & Insulina")
             }
             if (customizationConfig.bloodPressureEnabled || filteredBp.isNotEmpty()) add("Pressão Arterial")
-            if (customizationConfig.pregnancyEnabled || customizationConfig.pregnancyDppDate.isNotBlank()) {
-                add("Gestação (DPP: ${customizationConfig.pregnancyDppDate.ifBlank { "Ativa" }})")
+            if (customizationConfig.pregnancyEnabled) {
+                val babyTag = PregnancyCalculator.formatBabyDisplayLabelPt(
+                    customizationConfig.babyName,
+                    customizationConfig.babyGender
+                )
+                add("Gestação ($babyTag • DPP: ${customizationConfig.pregnancyDppDate.ifBlank { "Ativa" }})")
             }
-            add("Inegociáveis Diários")
+            if (ultrasounds.isNotEmpty() || labExams.isNotEmpty() || activePrescriptions.isNotEmpty()) {
+                add("Exames, Ultrassons & Receitas")
+            }
         }.joinToString(" | ")
         canvas.drawText("Módulos Monitorados: $activeModulesText", leftMargin + 14f, y + 36f, subtitlePaint)
 
-        y += 66f
+        y += 68f
 
         // 1. Resumo Estatístico Clínico
         canvas.drawText("1. RESUMO ESTATÍSTICO DO PERÍODO ($periodLabel)", leftMargin, y, sectionHeaderPaint)
@@ -2275,7 +2367,6 @@ object MedicalReportPdfGenerator {
             )
             y += 13f
 
-            // Média por cada um dos 6 períodos oficiais
             val slotSummary = DiabetesSlotCatalog.allSlots.mapNotNull { officialSlot ->
                 val slotRecs = filteredGlucose.filter { DiabetesSlotCatalog.normalizeSlot(it.slot) == officialSlot }
                 if (slotRecs.isNotEmpty()) {
@@ -2315,20 +2406,37 @@ object MedicalReportPdfGenerator {
             y += 13f
         }
 
-        val completedTrackersToday = healthState.completedTrackersCount(todayIso)
-        canvas.drawText(
-            "• Hábitos Inegociáveis Hoje ($todayIso): $completedTrackersToday de ${healthState.trackers.size} metas concluídas",
-            leftMargin + 8f,
-            y,
-            bodyBoldPaint
-        )
-        y += 12f
+        if (customizationConfig.pregnancyEnabled) {
+            val pregProgress = PregnancyCalculator.calculateFromDpp(customizationConfig.pregnancyDppDate)
+            val arrivalLabel = PregnancyCalculator.formatBabyArrivalCountdownPt(
+                daysRemaining = pregProgress.daysRemainingToDpp,
+                babyName = customizationConfig.babyName,
+                babyGender = customizationConfig.babyGender
+            )
+            val babyLabel = PregnancyCalculator.formatBabyDisplayLabelPt(
+                babyName = customizationConfig.babyName,
+                babyGender = customizationConfig.babyGender
+            )
+            canvas.drawText(
+                "• Gestação ($babyLabel): ${pregProgress.gestationalAgeLabel()} • ${pregProgress.trimester}º Trimestre • DPP: ${pregProgress.dppFormatted} • $arrivalLabel",
+                leftMargin + 8f,
+                y,
+                bodyBoldPaint
+            )
+            y += 13f
+        }
+
+        y += 4f
         canvas.drawLine(leftMargin, y, rightMargin, y, dividerPaint)
         y += 16f
 
-        // 2. Histórico de Monitoramento de Glicemia nos 6 Períodos Oficiais + Contexto
+        var sectionIndex = 2
+
+        // Monitoramento de Glicemia nos 6 Períodos Oficiais + Contexto
         if (customizationConfig.diabetesEnabled || filteredGlucose.isNotEmpty()) {
-            canvas.drawText("2. MONITORAMENTO DE GLICEMIA (6 PERÍODOS OFICIAIS & CONTEXTO CLÍNICO)", leftMargin, y, sectionHeaderPaint)
+            ensureSpace(50f)
+            canvas.drawText("$sectionIndex. MONITORAMENTO DE GLICEMIA (6 PERÍODOS OFICIAIS & CONTEXTO CLÍNICO)", leftMargin, y, sectionHeaderPaint)
+            sectionIndex++
             y += 14f
             canvas.drawText("DATA        HORA   MEMBRO      PERÍODO          VALOR      STATUS & CONTEXTO / SINTOMAS", leftMargin, y, bodyBoldPaint)
             y += 11f
@@ -2337,14 +2445,16 @@ object MedicalReportPdfGenerator {
                 canvas.drawText("Nenhuma medição de glicemia registrada no período selecionado.", leftMargin, y, subtitlePaint)
                 y += 15f
             } else {
-                filteredGlucose.take(14).forEach { rec ->
+                filteredGlucose.take(16).forEach { rec ->
+                    ensureSpace(16f)
+                    val datePt = DateCalendarUtils.formatEpochDayPt(rec.dateEpochDay)
                     val memberTag = rec.memberName.ifBlank { profileName }.take(10).padEnd(10, ' ')
                     val normalizedSlot = DiabetesSlotCatalog.normalizeSlot(rec.slot)
                     val slotFixed = normalizedSlot.take(15).padEnd(15, ' ')
                     val valFixed = "${rec.valueMgDl} mg/dL".padEnd(10, ' ')
-                    val noteClean = if (rec.notes.isNotBlank()) " • ${rec.notes.take(32)}" else ""
-                    val line = "${rec.dateIso}  ${rec.timeHHmm}  $memberTag  $slotFixed  $valFixed ${rec.statusLabel()}$noteClean"
-                    canvas.drawText(line, leftMargin, y, bodyPaint)
+                    val noteClean = if (rec.notes.isNotBlank()) " • ${rec.notes.take(30)}" else ""
+                    val line = "$datePt  ${rec.timeHHmm}  $memberTag  $slotFixed  $valFixed ${rec.statusLabel()}$noteClean"
+                    canvas.drawText(line, leftMargin, y, if (rec.isAlert()) alertPaint else bodyPaint)
                     y += 12f
                 }
             }
@@ -2354,9 +2464,11 @@ object MedicalReportPdfGenerator {
             y += 16f
         }
 
-        // 3. Aplicações de Insulina & Rodízio de Local
+        // Aplicações de Insulina & Rodízio de Local (Datas em pt-BR DD/MM/AAAA)
         if (customizationConfig.diabetesEnabled || filteredInsulin.isNotEmpty()) {
-            canvas.drawText("3. CONTROLE DE INSULINA (UI) & RODÍZIO DE LOCAL DE APLICAÇÃO", leftMargin, y, sectionHeaderPaint)
+            ensureSpace(50f)
+            canvas.drawText("$sectionIndex. CONTROLE DE INSULINA (UI) & RODÍZIO DE LOCAL DE APLICAÇÃO", leftMargin, y, sectionHeaderPaint)
+            sectionIndex++
             y += 14f
             canvas.drawText("DATA        HORA   MEMBRO      TIPO DE INSULINA        DOSE     LOCAL DE APLICAÇÃO & OBS.", leftMargin, y, bodyBoldPaint)
             y += 11f
@@ -2365,12 +2477,14 @@ object MedicalReportPdfGenerator {
                 canvas.drawText("Nenhuma aplicação de insulina registrada no período selecionado.", leftMargin, y, subtitlePaint)
                 y += 15f
             } else {
-                filteredInsulin.take(10).forEach { ins ->
+                filteredInsulin.take(14).forEach { ins ->
+                    ensureSpace(16f)
+                    val datePt = DateCalendarUtils.formatEpochDayPt(ins.dateEpochDay)
                     val memberTag = ins.memberName.ifBlank { profileName }.take(10).padEnd(10, ' ')
                     val typeFixed = ins.insulinType.take(22).padEnd(22, ' ')
                     val doseFixed = "${ins.doseUnits} UI".padEnd(8, ' ')
                     val noteClean = if (ins.notes.isNotBlank()) " • ${ins.notes.take(24)}" else ""
-                    val line = "${ins.dateIso}  ${ins.timeHHmm}  $memberTag  $typeFixed  $doseFixed ${ins.site}$noteClean"
+                    val line = "$datePt  ${ins.timeHHmm}  $memberTag  $typeFixed  $doseFixed ${ins.site}$noteClean"
                     canvas.drawText(line, leftMargin, y, bodyPaint)
                     y += 12f
                 }
@@ -2381,9 +2495,11 @@ object MedicalReportPdfGenerator {
             y += 16f
         }
 
-        // 4. Histórico de Pressão Arterial
+        // Histórico de Pressão Arterial
         if (customizationConfig.bloodPressureEnabled || filteredBp.isNotEmpty()) {
-            canvas.drawText("4. HISTÓRICO DE PRESSÃO ARTERIAL (mmHg) & PULSO (bpm)", leftMargin, y, sectionHeaderPaint)
+            ensureSpace(50f)
+            canvas.drawText("$sectionIndex. HISTÓRICO DE PRESSÃO ARTERIAL (mmHg) & PULSO (bpm)", leftMargin, y, sectionHeaderPaint)
+            sectionIndex++
             y += 14f
             canvas.drawText("DATA        HORA   MEMBRO      PAS/PAD (mmHg)  PULSO    CLASSIFICAÇÃO & OBS.", leftMargin, y, bodyBoldPaint)
             y += 11f
@@ -2392,13 +2508,15 @@ object MedicalReportPdfGenerator {
                 canvas.drawText("Nenhuma aferição de pressão arterial registrada no período selecionado.", leftMargin, y, subtitlePaint)
                 y += 15f
             } else {
-                filteredBp.take(8).forEach { bp ->
+                filteredBp.take(10).forEach { bp ->
+                    ensureSpace(16f)
+                    val datePt = DateCalendarUtils.formatEpochDayPt(bp.dateEpochDay)
                     val memberTag = bp.memberName.ifBlank { profileName }.take(10).padEnd(10, ' ')
                     val bpFixed = "${bp.systolic}/${bp.diastolic} mmHg".padEnd(14, ' ')
                     val pulseFixed = "${bp.pulseBpm} bpm".padEnd(8, ' ')
                     val noteClean = if (bp.notes.isNotBlank()) " • ${bp.notes.take(24)}" else ""
-                    val line = "${bp.dateIso}  ${bp.timeHHmm}  $memberTag  $bpFixed  $pulseFixed ${bp.statusLabel()}$noteClean"
-                    canvas.drawText(line, leftMargin, y, bodyPaint)
+                    val line = "$datePt  ${bp.timeHHmm}  $memberTag  $bpFixed  $pulseFixed ${bp.statusLabel()}$noteClean"
+                    canvas.drawText(line, leftMargin, y, if (bp.isAlert()) alertPaint else bodyPaint)
                     y += 12f
                 }
             }
@@ -2408,48 +2526,111 @@ object MedicalReportPdfGenerator {
             y += 16f
         }
 
-        // 5. Inegociáveis Diários & Acompanhamento Gestacional
-        if (y < pageHeight - 90f) {
-            val sectionTitle = if (customizationConfig.pregnancyEnabled || customizationConfig.pregnancyDppDate.isNotBlank()) {
-                "5. INEGOCIÁVEIS DIÁRIOS & ACOMPANHAMENTO GESTACIONAL (DPP)"
-            } else {
-                "5. INEGOCIÁVEIS DIÁRIOS (TRACKERS)"
-            }
-            canvas.drawText(sectionTitle, leftMargin, y, sectionHeaderPaint)
+        // Últimos Ultrassons Obstétricos
+        if (ultrasounds.isNotEmpty()) {
+            ensureSpace(56f)
+            canvas.drawText("$sectionIndex. RESUMO DOS ÚLTIMOS ULTRASSONS", leftMargin, y, sectionHeaderPaint)
+            sectionIndex++
             y += 14f
 
-            healthState.trackers.take(4).forEach { habit ->
-                val currentVal = healthState.progressForTracker(todayIso, habit.id)
-                canvas.drawText(
-                    "• ${habit.title}: $currentVal / ${habit.targetValue} ${habit.unit} (${if (currentVal >= habit.targetValue) "Meta Atingida" else "Em andamento"})",
-                    leftMargin + 8f,
-                    y,
-                    bodyPaint
-                )
+            ultrasounds.take(5).forEach { doc ->
+                ensureSpace(38f)
+                val us = doc.ultrasoundData
+                val igText = if (us.gestationalWeeks > 0 || us.gestationalDays > 0) {
+                    "IG: ${us.gestationalWeeks}s ${us.gestationalDays}d"
+                } else "IG n/d"
+                val weightText = if (us.estimatedFetalWeightGrams > 0) "Peso fetal: ${us.estimatedFetalWeightGrams} g" else ""
+                val bcfText = if (us.fetalHeartRateBpm > 0) "BCF: ${us.fetalHeartRateBpm} bpm" else ""
+                val dppText = if (us.estimatedDppBr.isNotBlank()) "DPP: ${us.estimatedDppBr}" else ""
+                val headerLine = "• ${doc.dateBr} • ${doc.title.take(32)} (${doc.memberName}) • " +
+                    listOf(igText, weightText, bcfText, dppText).filter { it.isNotBlank() }.joinToString(" | ")
+                canvas.drawText(headerLine.take(102), leftMargin + 4f, y, bodyBoldPaint)
                 y += 12f
-            }
 
-            if (customizationConfig.pregnancyEnabled || customizationConfig.pregnancyDppDate.isNotBlank()) {
-                y += 4f
-                val pregProgress = PregnancyCalculator.calculateFromDpp(customizationConfig.pregnancyDppDate)
+                val detailsParts = buildList {
+                    if (us.placenta.isNotBlank()) add("Placenta: ${us.placenta}")
+                    if (us.amnioticFluidIla.isNotBlank()) add("Líquido/ILA: ${us.amnioticFluidIla}")
+                    if (us.conclusion.isNotBlank()) add("Conclusão: ${us.conclusion}")
+                    else if (doc.clinicalSummaryPt.isNotBlank()) add(doc.clinicalSummaryPt)
+                }.joinToString(" • ")
+                if (detailsParts.isNotBlank()) {
+                    canvas.drawText("  ${detailsParts.take(104)}", leftMargin + 8f, y, subtitlePaint)
+                    y += 12f
+                }
+            }
+            y += 6f
+            canvas.drawLine(leftMargin, y, rightMargin, y, dividerPaint)
+            y += 16f
+        }
+
+        // Últimos Exames Laboratoriais
+        if (labExams.isNotEmpty()) {
+            ensureSpace(56f)
+            canvas.drawText("$sectionIndex. RESUMO DOS ÚLTIMOS EXAMES LABORATORIAIS", leftMargin, y, sectionHeaderPaint)
+            sectionIndex++
+            y += 14f
+
+            labExams.take(6).forEach { doc ->
+                ensureSpace(36f)
+                val labTag = if (doc.clinicOrLab.isNotBlank()) " (${doc.clinicOrLab.take(22)})" else ""
                 canvas.drawText(
-                    "Gestação: ${pregProgress.gestationalAgeLabel()} • ${pregProgress.trimester}º Trimestre • DPP: ${pregProgress.dppFormatted} • Bebê: ${pregProgress.formattedLengthAndWeight()}",
-                    leftMargin + 8f,
+                    "• ${doc.dateBr} • ${doc.title.take(36)}$labTag [${doc.memberName}]",
+                    leftMargin + 4f,
                     y,
                     bodyBoldPaint
                 )
+                y += 12f
+
+                if (doc.examMarkers.isNotEmpty()) {
+                    doc.examMarkers.take(8).forEach { m ->
+                        ensureSpace(14f)
+                        val isOut = m.status == ExamMarkerStatus.ABAIXO || m.status == ExamMarkerStatus.ACIMA
+                        val statusTag = when (m.status) {
+                            ExamMarkerStatus.ABAIXO -> " [ABAIXO DA REF.]"
+                            ExamMarkerStatus.ACIMA -> " [ACIMA DA REF.]"
+                            else -> " [Normal]"
+                        }
+                        val refTag = if (m.referenceRange.isNotBlank()) " (Ref: ${m.referenceRange.take(24)})" else ""
+                        val markerLine = "  - ${m.name.take(28)}: ${m.value} ${m.unit}$refTag$statusTag"
+                        canvas.drawText(markerLine.take(104), leftMargin + 8f, y, if (isOut) alertPaint else bodyPaint)
+                        y += 11f
+                    }
+                } else if (doc.clinicalSummaryPt.isNotBlank()) {
+                    canvas.drawText("  ${doc.clinicalSummaryPt.take(102)}", leftMargin + 8f, y, subtitlePaint)
+                    y += 12f
+                }
+            }
+            y += 6f
+            canvas.drawLine(leftMargin, y, rightMargin, y, dividerPaint)
+            y += 16f
+        }
+
+        // Receitas e Medicamentos em Uso
+        if (activePrescriptions.isNotEmpty()) {
+            ensureSpace(56f)
+            canvas.drawText("$sectionIndex. RECEITAS & MEDICAMENTOS / VITAMINAS EM USO", leftMargin, y, sectionHeaderPaint)
+            sectionIndex++
+            y += 14f
+
+            activePrescriptions.take(6).forEach { doc ->
+                ensureSpace(28f)
+                val docHeader = "• ${doc.dateBr} • ${doc.title.take(34)} [${doc.memberName}]" +
+                    if (doc.doctorName.isNotBlank()) " • Dr(a). ${doc.doctorName.take(24)}" else ""
+                canvas.drawText(docHeader.take(102), leftMargin + 4f, y, bodyBoldPaint)
+                y += 12f
+                doc.prescribedMeds.forEach { med ->
+                    ensureSpace(14f)
+                    val medLine = "  - ${med.name} ${med.dosage}".trim() +
+                        (if (med.posology.isNotBlank()) " • ${med.posology}" else "") +
+                        (if (med.duration.isNotBlank()) " (${med.duration})" else "")
+                    canvas.drawText(medLine.take(104), leftMargin + 8f, y, bodyPaint)
+                    y += 11f
+                }
             }
         }
 
-        // Rodapé
-        canvas.drawText(
-            "Documento gerado nativamente em PDF pelo aplicativo Omni (com.auramanager.app) para acompanhamento médico.",
-            leftMargin,
-            pageHeight - 24f,
-            subtitlePaint
-        )
-
-        pdfDocument.finishPage(page)
+        drawFooter(canvas, currentPageNumber)
+        pdfDocument.finishPage(currentPage)
         pdfDocument.writeTo(outputStream)
         pdfDocument.close()
 
@@ -2463,12 +2644,14 @@ object MedicalReportPdfGenerator {
             if (customizationConfig.bloodPressureEnabled || filteredBp.isNotEmpty()) {
                 add("${filteredBp.size} pressão(ões)${if (avgSys > 0) " (média ${avgSys}/${avgDia} mmHg)" else ""}")
             }
-            add("$completedTrackersToday/${healthState.trackers.size} inegociáveis")
-            if (customizationConfig.pregnancyEnabled || customizationConfig.pregnancyDppDate.isNotBlank()) {
+            if (customizationConfig.pregnancyEnabled) {
                 add("Gestação ativa")
             }
+            if (ultrasounds.isNotEmpty()) add("${ultrasounds.size} ultrassom(ns)")
+            if (labExams.isNotEmpty()) add("${labExams.size} exame(s)")
+            if (activePrescriptions.isNotEmpty()) add("${activePrescriptions.size} receita(s) em uso")
         }
-        return "Relatório consolidado ($periodLabel): ${summaryParts.joinToString(", ")}."
+        return "Relatório consolidado ($periodLabel): ${summaryParts.joinToString(", ").ifBlank { "dados clínicos atualizados" }}."
     }
 
     fun exportToLocalAppFile(
@@ -2476,9 +2659,13 @@ object MedicalReportPdfGenerator {
         profileName: String,
         periodDays: Int,
         customizationConfig: AppCustomizationConfig,
-        healthState: HealthModuleState
+        healthState: HealthModuleState,
+        medicalDocuments: List<HealthDocumentRecord> = emptyList()
     ): PdfExportResult {
         return try {
+            val resolvedDocs = medicalDocuments.ifEmpty {
+                runCatching { MedicalDocumentsRepository(context).documentsFlow.value }.getOrDefault(emptyList())
+            }
             val reportsDir = File(context.filesDir, "relatorios_medicos").apply {
                 if (!exists()) mkdirs()
             }
@@ -2491,7 +2678,8 @@ object MedicalReportPdfGenerator {
                     profileName = profileName,
                     periodDays = periodDays,
                     customizationConfig = customizationConfig,
-                    healthState = healthState
+                    healthState = healthState,
+                    medicalDocuments = resolvedDocs
                 )
             }
             PdfExportResult(
@@ -2514,9 +2702,13 @@ object MedicalReportPdfGenerator {
         profileName: String,
         periodDays: Int,
         customizationConfig: AppCustomizationConfig,
-        healthState: HealthModuleState
+        healthState: HealthModuleState,
+        medicalDocuments: List<HealthDocumentRecord> = emptyList()
     ): PdfExportResult {
         return try {
+            val resolvedDocs = medicalDocuments.ifEmpty {
+                runCatching { MedicalDocumentsRepository(context).documentsFlow.value }.getOrDefault(emptyList())
+            }
             var summary = ""
             context.contentResolver.openOutputStream(targetUri)?.use { out ->
                 summary = generateAndWriteToStream(
@@ -2524,7 +2716,8 @@ object MedicalReportPdfGenerator {
                     profileName = profileName,
                     periodDays = periodDays,
                     customizationConfig = customizationConfig,
-                    healthState = healthState
+                    healthState = healthState,
+                    medicalDocuments = resolvedDocs
                 )
             }
             // Also keep a clean local copy in filesDir so "Abrir / Compartilhar PDF" works via FileProvider
@@ -2533,7 +2726,8 @@ object MedicalReportPdfGenerator {
                 profileName = profileName,
                 periodDays = periodDays,
                 customizationConfig = customizationConfig,
-                healthState = healthState
+                healthState = healthState,
+                medicalDocuments = resolvedDocs
             )
             PdfExportResult(
                 success = true,

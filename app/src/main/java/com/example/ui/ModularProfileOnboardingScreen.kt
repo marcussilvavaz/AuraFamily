@@ -58,6 +58,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import com.example.data.AppCustomizationConfig
 import com.example.data.CustomizationRepository
 import com.example.data.DiabetesSlotCatalog
@@ -76,7 +82,11 @@ import com.example.ui.theme.SavingsGold
 fun ModularProfileOnboardingScreen(
     config: AppCustomizationConfig,
     customizationRepo: CustomizationRepository,
-    onFinishOnboarding: () -> Unit
+    onFinishOnboarding: () -> Unit,
+    onSyncPregnancyConfigToCloud: (dppDate: String, comparisonMode: String) -> Unit = { _, _ -> },
+    onSyncBabyIdentityToCloud: (babyName: String, babyGender: String) -> Unit = { _, _ -> },
+    onSyncMemberHealthSettingsToCloud: (Map<String, Boolean>) -> Unit = {},
+    onSyncGeminiApiKeyToCloud: (String) -> Unit = {}
 ) {
     val cardRadius = LocalOrganicCardRadius.current
     val triggerFeedback = rememberOmniFeedback()
@@ -161,7 +171,11 @@ fun ModularProfileOnboardingScreen(
         item {
             ModularProfileEditorContent(
                 config = config,
-                customizationRepo = customizationRepo
+                customizationRepo = customizationRepo,
+                onSyncPregnancyConfigToCloud = onSyncPregnancyConfigToCloud,
+                onSyncBabyIdentityToCloud = onSyncBabyIdentityToCloud,
+                onSyncMemberHealthSettingsToCloud = onSyncMemberHealthSettingsToCloud,
+                onSyncGeminiApiKeyToCloud = onSyncGeminiApiKeyToCloud
             )
         }
 
@@ -170,6 +184,7 @@ fun ModularProfileOnboardingScreen(
             Button(
                 onClick = {
                     customizationRepo.completeModularOnboarding()
+                    onSyncMemberHealthSettingsToCloud(customizationRepo.currentMemberHealthSettingsMap())
                     triggerFeedback("Perfil Modular salvo com sucesso!")
                     onFinishOnboarding()
                 },
@@ -203,14 +218,31 @@ fun ModularProfileOnboardingScreen(
 @Composable
 fun ModularProfileEditorContent(
     config: AppCustomizationConfig,
-    customizationRepo: CustomizationRepository
+    customizationRepo: CustomizationRepository,
+    onSyncPregnancyConfigToCloud: (dppDate: String, comparisonMode: String) -> Unit = { _, _ -> },
+    onSyncBabyIdentityToCloud: (babyName: String, babyGender: String) -> Unit = { _, _ -> },
+    onSyncMemberHealthSettingsToCloud: (Map<String, Boolean>) -> Unit = {},
+    onSyncGeminiApiKeyToCloud: (String) -> Unit = {}
 ) {
     var wakeTimeInput by remember(config.fixedWakeTime) { mutableStateOf(config.fixedWakeTime) }
     var sleepTimeInput by remember(config.fixedSleepTime) { mutableStateOf(config.fixedSleepTime) }
     var dppInput by remember(config.pregnancyDppDate) { mutableStateOf(config.pregnancyDppDate) }
+    var babyNameInput by remember(config.babyName) { mutableStateOf(config.babyName) }
+    var babyGenderInput by remember(config.babyGender) {
+        mutableStateOf(
+            when (config.babyGender.trim().uppercase()) {
+                "MENINO", "MENINA", "SURPRESA" -> config.babyGender.trim().uppercase()
+                else -> "SURPRESA"
+            }
+        )
+    }
     var bpReminderInput by remember(config.bloodPressureReminderTime) {
         mutableStateOf(config.bloodPressureReminderTime)
     }
+    var geminiApiKeyInput by remember(config.geminiApiKey) {
+        mutableStateOf(config.geminiApiKey)
+    }
+    var showGeminiKeyPlain by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -383,14 +415,20 @@ fun ModularProfileEditorContent(
             accentColor = ExpenseCoral
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                // 3.1 Gestação (pede Data Prevista do Parto - DPP)
+                // 3.1 Gestação (pede Data Prevista do Parto - DPP + Nome e Sexo do Bebê)
                 HealthModuleSwitchCard(
                     title = "Gestação",
-                    subtitle = "Acompanhamento gestacional com Data Prevista do Parto (DPP)",
+                    subtitle = "Visibilidade independente no seu celular • DPP, nome e sexo do bebê sincronizados na família",
                     icon = Icons.Default.ChildCare,
                     checked = config.pregnancyEnabled,
                     onCheckedChange = { enabled ->
-                        customizationRepo.updatePregnancyModule(enabled = enabled, dppDate = dppInput)
+                        customizationRepo.updatePregnancyModule(
+                            enabled = enabled,
+                            dppDate = dppInput,
+                            babyName = babyNameInput,
+                            babyGender = babyGenderInput
+                        )
+                        onSyncMemberHealthSettingsToCloud(customizationRepo.currentMemberHealthSettingsMap())
                     },
                     switchTestTag = "switch_pregnancy_module"
                 ) {
@@ -399,24 +437,82 @@ fun ModularProfileEditorContent(
                             dateValue = dppInput,
                             onDateValueChange = { formatted, _ ->
                                 dppInput = formatted
-                                customizationRepo.updatePregnancyModule(enabled = true, dppDate = formatted)
+                                customizationRepo.updatePregnancyModule(
+                                    enabled = config.pregnancyEnabled,
+                                    dppDate = formatted,
+                                    babyName = babyNameInput,
+                                    babyGender = babyGenderInput
+                                )
+                                if (formatted.length == 10) {
+                                    onSyncPregnancyConfigToCloud(formatted, config.pregnancyComparisonMode.ifBlank { "TODOS" })
+                                }
                             },
                             label = "Data Prevista do Parto - DPP (DD/MM/AAAA)",
                             placeholder = "Ex: 15/05/2027",
                             modifier = Modifier.fillMaxWidth(),
                             testTag = "pregnancy_dpp_input"
                         )
+
+                        OutlinedTextField(
+                            value = babyNameInput,
+                            onValueChange = { newName ->
+                                babyNameInput = newName
+                                customizationRepo.updateBabyIdentity(newName, babyGenderInput)
+                                onSyncBabyIdentityToCloud(newName.trim(), babyGenderInput)
+                            },
+                            label = { Text("Nome do Bebê (opcional)") },
+                            placeholder = { Text("Ex.: Aurora, Gael...") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("profile_pregnancy_baby_name_input")
+                        )
+
+                        Text(
+                            text = "Sexo do Bebê (concordância nos textos):",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(
+                                "MENINO" to "👦 Menino",
+                                "MENINA" to "👧 Menina",
+                                "SURPRESA" to "✨ Surpresa"
+                            ).forEach { (key, label) ->
+                                FilterChip(
+                                    selected = babyGenderInput == key,
+                                    onClick = {
+                                        babyGenderInput = key
+                                        customizationRepo.updateBabyIdentity(babyNameInput, key)
+                                        onSyncBabyIdentityToCloud(babyNameInput.trim(), key)
+                                    },
+                                    label = {
+                                        Text(
+                                            text = label,
+                                            fontWeight = if (babyGenderInput == key) FontWeight.ExtraBold else FontWeight.Medium
+                                        )
+                                    },
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.testTag("profile_baby_gender_chip_$key")
+                                )
+                            }
+                        }
                     }
                 }
 
                 // 3.2 Diabetes / Glicemia (escolher horários/slots de medição)
                 HealthModuleSwitchCard(
                     title = "Diabetes / Glicemia",
-                    subtitle = "Escolha os horários e momentos de medição glicêmica",
+                    subtitle = "Visibilidade independente por membro • Desativar oculta glicemia, insulina e timer 1h",
                     icon = Icons.Default.Favorite,
                     checked = config.diabetesEnabled,
                     onCheckedChange = { enabled ->
                         customizationRepo.updateDiabetesModule(enabled = enabled)
+                        onSyncMemberHealthSettingsToCloud(customizationRepo.currentMemberHealthSettingsMap())
                     },
                     switchTestTag = "switch_diabetes_module"
                 ) {
@@ -456,7 +552,7 @@ fun ModularProfileEditorContent(
                 // 3.3 Pressão Arterial (pedir horário do lembrete, ex: antes de dormir)
                 HealthModuleSwitchCard(
                     title = "Pressão Arterial",
-                    subtitle = "Lembrete diário para aferição da pressão arterial",
+                    subtitle = "Visibilidade independente por membro • Lembrete diário para aferição",
                     icon = Icons.Default.MonitorHeart,
                     checked = config.bloodPressureEnabled,
                     onCheckedChange = { enabled ->
@@ -464,6 +560,7 @@ fun ModularProfileEditorContent(
                             enabled = enabled,
                             reminderTime = bpReminderInput
                         )
+                        onSyncMemberHealthSettingsToCloud(customizationRepo.currentMemberHealthSettingsMap())
                     },
                     switchTestTag = "switch_blood_pressure_module"
                 ) {
@@ -513,11 +610,12 @@ fun ModularProfileEditorContent(
                 // 3.4 Dores Físicas / Fadiga (ativa o botão "Modo Dia Difícil")
                 HealthModuleSwitchCard(
                     title = "Dores Físicas / Fadiga",
-                    subtitle = "Habilita o botão \"Modo Dia Difícil\" no topo da Agenda",
+                    subtitle = "Visibilidade independente por membro • Habilita o botão \"Modo Dia Difícil\" na Agenda",
                     icon = Icons.Default.Healing,
                     checked = config.chronicPainFatigueEnabled,
                     onCheckedChange = { enabled ->
                         customizationRepo.updateChronicPainFatigueModule(enabled)
+                        onSyncMemberHealthSettingsToCloud(customizationRepo.currentMemberHealthSettingsMap())
                     },
                     switchTestTag = "switch_pain_fatigue_module"
                 ) {
@@ -752,6 +850,83 @@ fun ModularProfileEditorContent(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // 5. CHAVE API GEMINI (IA SOB DEMANDA — GEMINI 2.5 FLASH)
+        // =====================================================================
+        ModularBlockCard(
+            title = "Chave API Gemini (IA Sob Demanda)",
+            subtitle = "Usada exclusivamente ao tocar em Analisar Exame/Ultrassom ou Gerar Carta de Apoio (gemini-2.5-flash)",
+            icon = Icons.Default.Key,
+            accentColor = MaterialTheme.colorScheme.primary
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "A IA nunca roda em segundo plano. A chave fica salva com segurança na sua conta/família para leitura sob demanda de exames, ultrassons, pedidos, receitas e cartas de apoio.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = geminiApiKeyInput,
+                        onValueChange = { geminiApiKeyInput = it.trim() },
+                        label = { Text("Chave API Gemini (AIza...)") },
+                        placeholder = { Text("Cole sua chave Gemini API aqui") },
+                        singleLine = true,
+                        visualTransformation = if (showGeminiKeyPlain) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            IconButton(onClick = { showGeminiKeyPlain = !showGeminiKeyPlain }) {
+                                Icon(
+                                    imageVector = if (showGeminiKeyPlain) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (showGeminiKeyPlain) "Ocultar chave" else "Mostrar chave"
+                                )
+                            }
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("profile_gemini_api_key_input")
+                    )
+
+                    Button(
+                        onClick = {
+                            val cleanKey = geminiApiKeyInput.trim()
+                            customizationRepo.updateGeminiApiKey(cleanKey)
+                            onSyncGeminiApiKeyToCloud(cleanKey)
+                        },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.testTag("save_profile_gemini_api_key_btn")
+                    ) {
+                        Text("Salvar", fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                if (config.geminiApiKey.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = IncomeEmerald.copy(alpha = 0.14f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "✓ Chave API Gemini configurada (${config.geminiApiKey.take(6)}••••••) • Pronta para gemini-2.5-flash sob demanda",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = IncomeEmerald,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
                     }
                 }
             }
